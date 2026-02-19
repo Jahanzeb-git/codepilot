@@ -3,8 +3,8 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "codepilot"
-version = "0.1.0"
+name = "codepilot-ai"
+version = "0.1.1"
 description = "A code-native agentic framework for building robust AI agents."
 readme = "README.md"
 authors = [
