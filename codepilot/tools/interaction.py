@@ -19,12 +19,18 @@ class InteractionTools:
         The answer is returned to your control block and also appears in [EXECUTION RESULT].
         """
         self.runtime.hooks.emit(EventType.TOOL_CALL, tool="ask_user", args={"question": question})
-        self.runtime.hooks.emit(EventType.ASK_USER, question=question)
 
-        answer_from_hook = self.runtime.hooks.emit(
-            EventType.PERMISSION_REQUEST, tool="ask_user", description=question,
-        )
-        if isinstance(answer_from_hook, str):
+        # Fire ASK_USER for the answer path.
+        # If any registered handler returns a non-empty string, use that as
+        # the answer (e.g. a web app that feeds answers from a UI widget).
+        # Otherwise fall back to a blocking stdin prompt.
+        #
+        # Previously this (incorrectly) fired PERMISSION_REQUEST to get an
+        # answer, which conflated permission gating with Q&A: a handler that
+        # returned True to approve shell commands would corrupt ask_user()
+        # by giving it the boolean True as its answer.
+        answer_from_hook = self.runtime.hooks.emit(EventType.ASK_USER, question=question)
+        if isinstance(answer_from_hook, str) and answer_from_hook:
             answer = answer_from_hook
         else:
             try:

@@ -377,19 +377,34 @@ class Runtime:
             codebase_snapshot=self.context_manager.get_formatted_snapshot(),
         )
 
-    def _build_sandbox(self) -> Dict[str, Any]:
+    def _build_sandbox(self, captured_print=None) -> Dict[str, Any]:
+        # ------------------------------------------------------------------ #
+        #  __import__ is required for any `import` statement inside exec().   #
+        #  Without it, even whitelisted imports (json, re, math …) raise      #
+        #  ImportError: __import__ not found.                                 #
+        #                                                                     #
+        #  captured_print is injected by _execute() so the agent's print()   #
+        #  calls go to our capture buffer rather than real stdout.  Hook      #
+        #  handlers are regular Python closures that hold a reference to the  #
+        #  real built-in print() and are therefore unaffected.                #
+        # ------------------------------------------------------------------ #
         sandbox = {
             "__builtins__": {
-                "print": print, "len": len, "range": range,
+                "print": captured_print if captured_print is not None else print,
+                "__import__": __import__,
+                "len": len, "range": range,
                 "str": str, "int": int, "float": float, "bool": bool,
                 "list": list, "dict": dict, "set": set, "tuple": tuple,
                 "enumerate": enumerate, "zip": zip, "map": map,
                 "filter": filter, "sorted": sorted, "reversed": reversed,
                 "sum": sum, "min": min, "max": max, "abs": abs, "round": round,
-                "isinstance": isinstance, "type": type, "repr": repr,
+                "isinstance": isinstance, "issubclass": issubclass,
+                "type": type, "repr": repr,
                 "True": True, "False": False, "None": None,
                 "Exception": Exception, "ValueError": ValueError,
                 "TypeError": TypeError, "RuntimeError": RuntimeError,
+                "KeyError": KeyError, "IndexError": IndexError,
+                "StopIteration": StopIteration,
             },
         }
         sandbox.update(self.registry.as_sandbox_dict())
@@ -404,19 +419,32 @@ class Runtime:
             self._append_execution(f"SECURITY ERROR: {exc}")
             return
 
-        captured_stdout = io.StringIO()
-        old_stdout, sys.stdout = sys.stdout, captured_stdout
+        # ------------------------------------------------------------------ #
+        #  Capture only the agent's own print() calls.                        #
+        #                                                                     #
+        #  The old approach (redirect sys.stdout to StringIO) also captured   #
+        #  every print() made by hook handlers that fire inside tool calls    #
+        #  during exec() — those UI-decoration strings ended up in            #
+        #  [EXECUTION RESULT] and were fed back to the LLM.                   #
+        #                                                                     #
+        #  The fix: keep sys.stdout untouched so hook handlers write to the   #
+        #  real terminal; inject a lightweight captured_print into the        #
+        #  sandbox so that print() calls inside the agent's control block     #
+        #  go to our buffer instead.                                           #
+        # ------------------------------------------------------------------ #
+        _print_lines: list = []
+
+        def _captured_print(*args, sep=" ", end="\n", file=None, flush=False):
+            _print_lines.append(sep.join(str(a) for a in args) + end)
 
         try:
-            exec(code, self._build_sandbox())  # noqa: S102
+            exec(code, self._build_sandbox(captured_print=_captured_print))  # noqa: S102
         except Exception:
             tb = traceback.format_exc()
             self.hooks.emit(EventType.RUNTIME_ERROR, error=tb)
             self._append_execution(f"EXECUTION ERROR:\n{tb}")
-        finally:
-            sys.stdout = old_stdout
 
-        printed = captured_stdout.getvalue().strip()
+        printed = "".join(_print_lines).strip()
         if printed:
             self._execution_buffer.insert(0, printed)
 
