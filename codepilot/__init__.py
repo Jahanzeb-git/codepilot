@@ -8,24 +8,31 @@ Quick start
     runtime = Runtime("agent.yaml")
     runtime.run("Create a FastAPI hello-world server.")
 
+Streaming (pre-block reasoning streamed to user in real time)
+-------------------------------------------------------------
+    from codepilot import Runtime
+
+    runtime = Runtime("agent.yaml", stream=True)
+    runtime.run("Create a FastAPI hello-world server.")
+
 Observable hooks
 ----------------
-    from codepilot import Runtime, on_think, on_finish
+    from codepilot import Runtime, on_stream, on_finish
 
-    runtime = Runtime("agent.yaml")
+    runtime = Runtime("agent.yaml", stream=True)
 
-    @on_think(runtime)
-    def handle_think(message: str, **_):
-        print(f"Agent: {message}")
+    @on_stream(runtime)
+    def handle_stream(text: str, **_):
+        print(text, end="", flush=True)
 
     @on_finish(runtime)
     def handle_finish(summary: str, **_):
-        print(f"Done! {summary}")
+        print(f"\\nDone! {summary}")
 
     runtime.run("Refactor the database module.")
 """
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 __author__  = "CodePilot"
 
 # Core entry point
@@ -41,7 +48,7 @@ from .core.session import InMemorySession, FileSession, BaseSession, create_sess
 from .engine.hooks import (
     EventType,
     HookSystem,
-    on_think,
+    on_stream,
     on_tool_call,
     on_tool_result,
     on_ask_user,
@@ -61,7 +68,7 @@ __all__ = [
     "create_session",
     "EventType",
     "HookSystem",
-    "on_think",
+    "on_stream",
     "on_tool_call",
     "on_tool_result",
     "on_ask_user",

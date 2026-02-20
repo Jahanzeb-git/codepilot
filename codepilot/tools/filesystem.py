@@ -41,20 +41,19 @@ class FilesystemTools:
         mode: str = "w",
     ):
         """
-        Write or edit a file. Content comes from the Payload Block immediately
-        after your control block — never as a string argument. Omitting the
-        Payload Block raises an error.
+        Write or edit a file. Content comes from the next Payload Block —
+        never pass content as a string argument. Each write_file() call
+        consumes one Payload Block in order.
 
         mode='w'      — overwrite the entire file (default).
         mode='a'      — append content to the end of the file.
         mode='edit'   — replace lines start_line..end_line (1-indexed, inclusive).
-                        Always call read_file first to confirm exact line numbers.
-                        Requires both start_line and end_line.
-        mode='insert' — insert content after after_line without removing anything.
-                        Lines below shift down. Use to add a function, block, or
-                        section between two existing lines.
-                        Requires after_line. Use after_line=0 to insert at top.
-                        Always call read_file first to confirm the target line.
+                        Always read_file first. One edit per step only.
+        mode='insert' — insert after after_line without removing anything.
+                        Use after_line=0 for top of file. One insert per step only.
+
+        Up to 5 file writes (mode='w'/'a') are allowed per step.
+        Edits and inserts: one per step to prevent line-number drift.
         """
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="write_file",
@@ -65,6 +64,49 @@ class FilesystemTools:
             },
         )
 
+        # ------------------------------------------------------------------ #
+        #  ALWAYS consume the payload block first to maintain ordering for    #
+        #  multi-file writes. If we return early (guard, error), the payload  #
+        #  for THIS call is still consumed so the next write_file() gets the  #
+        #  correct payload.                                                    #
+        # ------------------------------------------------------------------ #
+        payload: Optional[CodeBlock] = self.runtime.pop_next_payload_block()
+        if payload is None:
+            result = (
+                f"[write_file] ERROR: No Payload Block found for '{path}'. "
+                "Provide a fenced code block for each write_file() call."
+            )
+            self.runtime._append_execution(result)
+            self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="write_file", result=result)
+            return
+
+        # ------------------------------------------------------------------ #
+        #  Step-level guards                                                   #
+        # ------------------------------------------------------------------ #
+        if mode in ("edit", "insert"):
+            if self.runtime._step_edit_count > 0:
+                result = (
+                    f"[write_file] ERROR: Only one edit/insert per step is allowed. "
+                    f"Skipped '{path}'. Use a separate step for additional edits."
+                )
+                self.runtime._append_execution(result)
+                self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="write_file", result=result)
+                return
+            self.runtime._step_edit_count += 1
+        else:
+            if self.runtime._step_write_count >= 5:
+                result = (
+                    f"[write_file] ERROR: Maximum 5 file writes per step exceeded. "
+                    f"Skipped '{path}'."
+                )
+                self.runtime._append_execution(result)
+                self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="write_file", result=result)
+                return
+            self.runtime._step_write_count += 1
+
+        # ------------------------------------------------------------------ #
+        #  Permission gate                                                     #
+        # ------------------------------------------------------------------ #
         tool_cfg = self.runtime._tool_config("write_file")
         if tool_cfg.get("require_permission", False):
             if mode == "edit":
@@ -79,103 +121,104 @@ class FilesystemTools:
                 self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="write_file", result=result)
                 return
 
-        payload: Optional[CodeBlock] = self.runtime.pop_next_payload_block()
-        if payload is None:
-            raise RuntimeError(
-                f"write_file('{path}'): No Payload Block found. "
-                "Provide a second fenced code block immediately after this one."
-            )
-
-        new_content = payload.content
-        abs_path    = self._safe_path(path)
-        parent      = os.path.dirname(abs_path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-
         # ------------------------------------------------------------------ #
-        #  mode='w'                                                            #
+        #  Execute the write — wrapped in try/except for error isolation.     #
+        #  If this write fails, subsequent write_file() calls in the same     #
+        #  step still execute. The LLM sees exactly which writes succeeded    #
+        #  and which failed.                                                   #
         # ------------------------------------------------------------------ #
-        if mode == "w":
-            with open(abs_path, "w", encoding="utf-8") as f:
-                f.write(new_content)
-            result = f"[write_file] '{path}' written ({len(new_content)} bytes)."
+        try:
+            new_content = payload.content
+            abs_path    = self._safe_path(path)
+            parent      = os.path.dirname(abs_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
 
-        # ------------------------------------------------------------------ #
-        #  mode='a'                                                            #
-        # ------------------------------------------------------------------ #
-        elif mode == "a":
-            with open(abs_path, "a", encoding="utf-8") as f:
-                f.write(new_content)
-            result = f"[write_file] '{path}' appended ({len(new_content)} bytes)."
+            # -------------------------------------------------------------- #
+            #  mode='w'                                                        #
+            # -------------------------------------------------------------- #
+            if mode == "w":
+                with open(abs_path, "w", encoding="utf-8") as f:
+                    f.write(new_content)
+                result = f"[write_file] '{path}' written ({len(new_content)} bytes)."
 
-        # ------------------------------------------------------------------ #
-        #  mode='edit'  — replace start_line..end_line with new content       #
-        # ------------------------------------------------------------------ #
-        elif mode == "edit":
-            if start_line is None or end_line is None:
-                raise ValueError("mode='edit' requires both start_line and end_line.")
-            if not os.path.isfile(abs_path):
-                raise FileNotFoundError(f"Cannot edit '{path}': file does not exist.")
+            # -------------------------------------------------------------- #
+            #  mode='a'                                                        #
+            # -------------------------------------------------------------- #
+            elif mode == "a":
+                with open(abs_path, "a", encoding="utf-8") as f:
+                    f.write(new_content)
+                result = f"[write_file] '{path}' appended ({len(new_content)} bytes)."
 
-            with open(abs_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
+            # -------------------------------------------------------------- #
+            #  mode='edit'                                                     #
+            # -------------------------------------------------------------- #
+            elif mode == "edit":
+                if start_line is None or end_line is None:
+                    raise ValueError("mode='edit' requires both start_line and end_line.")
+                if not os.path.isfile(abs_path):
+                    raise FileNotFoundError(f"Cannot edit '{path}': file does not exist.")
 
-            start_idx = max(0, start_line - 1)           # inclusive, 0-based
-            end_idx   = min(len(lines), end_line)         # exclusive slice end
+                with open(abs_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
 
-            if new_content and not new_content.endswith("\n"):
-                new_content += "\n"
+                start_idx = max(0, start_line - 1)
+                end_idx   = min(len(lines), end_line)
 
-            with open(abs_path, "w", encoding="utf-8") as f:
-                f.writelines(lines[:start_idx])
-                f.write(new_content)
-                f.writelines(lines[end_idx:])
+                if new_content and not new_content.endswith("\n"):
+                    new_content += "\n"
 
-            new_line_count = new_content.count("\n")
-            old_line_count = end_idx - start_idx
-            result = (
-                f"[write_file] '{path}' edited: "
-                f"replaced lines {start_line}–{end_line} "
-                f"({old_line_count} → {new_line_count} lines). "
-                f"File now has {len(lines) - old_line_count + new_line_count} lines total."
-            )
+                with open(abs_path, "w", encoding="utf-8") as f:
+                    f.writelines(lines[:start_idx])
+                    f.write(new_content)
+                    f.writelines(lines[end_idx:])
 
-        # ------------------------------------------------------------------ #
-        #  mode='insert'  — insert content after after_line, nothing removed  #
-        # ------------------------------------------------------------------ #
-        elif mode == "insert":
-            if after_line is None:
-                raise ValueError("mode='insert' requires the after_line parameter.")
-            if not os.path.isfile(abs_path):
-                raise FileNotFoundError(f"Cannot insert into '{path}': file does not exist.")
+                new_line_count = new_content.count("\n")
+                old_line_count = end_idx - start_idx
+                result = (
+                    f"[write_file] '{path}' edited: "
+                    f"replaced lines {start_line}–{end_line} "
+                    f"({old_line_count} → {new_line_count} lines). "
+                    f"File now has {len(lines) - old_line_count + new_line_count} lines total."
+                )
 
-            with open(abs_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
+            # -------------------------------------------------------------- #
+            #  mode='insert'                                                   #
+            # -------------------------------------------------------------- #
+            elif mode == "insert":
+                if after_line is None:
+                    raise ValueError("mode='insert' requires the after_line parameter.")
+                if not os.path.isfile(abs_path):
+                    raise FileNotFoundError(f"Cannot insert into '{path}': file does not exist.")
 
-            # after_line=0  → insert before the first line (prepend)
-            # after_line=N  → insert after line N (1-indexed)
-            insert_idx = min(len(lines), max(0, after_line))
+                with open(abs_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
 
-            if new_content and not new_content.endswith("\n"):
-                new_content += "\n"
+                insert_idx = min(len(lines), max(0, after_line))
 
-            with open(abs_path, "w", encoding="utf-8") as f:
-                f.writelines(lines[:insert_idx])
-                f.write(new_content)
-                f.writelines(lines[insert_idx:])
+                if new_content and not new_content.endswith("\n"):
+                    new_content += "\n"
 
-            inserted_lines = new_content.count("\n")
-            new_total      = len(lines) + inserted_lines
-            result = (
-                f"[write_file] '{path}' inserted {inserted_lines} line(s) after line {after_line}. "
-                f"File now has {new_total} lines total. "
-                f"Former line {after_line + 1} is now line {after_line + inserted_lines + 1}."
-            )
+                with open(abs_path, "w", encoding="utf-8") as f:
+                    f.writelines(lines[:insert_idx])
+                    f.write(new_content)
+                    f.writelines(lines[insert_idx:])
 
-        else:
-            raise ValueError(
-                f"Unknown mode '{mode}'. Use 'w', 'a', 'edit', or 'insert'."
-            )
+                inserted_lines = new_content.count("\n")
+                new_total      = len(lines) + inserted_lines
+                result = (
+                    f"[write_file] '{path}' inserted {inserted_lines} line(s) after line {after_line}. "
+                    f"File now has {new_total} lines total. "
+                    f"Former line {after_line + 1} is now line {after_line + inserted_lines + 1}."
+                )
+
+            else:
+                raise ValueError(
+                    f"Unknown mode '{mode}'. Use 'w', 'a', 'edit', or 'insert'."
+                )
+
+        except Exception as exc:
+            result = f"[write_file] ERROR writing '{path}': {exc}"
 
         self.runtime._append_execution(result)
         self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="write_file", result=result)
@@ -186,6 +229,7 @@ class FilesystemTools:
         Output format per line:  '    6 | self.timeout = 5'
         Always call this before write_file with mode='edit' or mode='insert'
         to confirm exact line numbers before touching anything.
+        Multiple read_file() calls per step are allowed.
         """
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="read_file",

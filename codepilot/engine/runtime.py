@@ -1,7 +1,5 @@
-import io
 import os
 import queue
-import sys
 import threading
 import traceback
 from typing import Dict, List, Optional, Any
@@ -30,53 +28,42 @@ TAG_EXECUTION_RESULT = "[EXECUTION RESULT]"
 
 class Runtime:
     """
-    The CodePilot agentic loop with multi-turn and session persistence support.
+    The CodePilot agentic loop with multi-turn, session persistence, and
+    optional streaming support.
+
+    Streaming
+    ---------
+    When ``stream=True``, the LLM response is received token by token.
+    Any natural text before the first code fence is emitted immediately via
+    the STREAM hook, giving the user real-time feedback while the rest of the
+    response (code blocks, payload blocks) buffers silently.  Once the full
+    response is received the normal parse, validate, execute pipeline runs
+    unchanged.
+
+    When ``stream=False`` (default), the full response is fetched in one call.
+    Pre-fence text is still emitted as a single ``STREAM`` event for
+    consistency — hook handlers work identically in both modes.
 
     Multi-turn
     ----------
-    Calling ``runtime.run(task)`` multiple times on the same instance continues
-    the conversation — the LLM sees the complete history of all previous tasks
-    and can reason about prior work without repeating it or hallucinating.
-
-    To start completely fresh, call ``runtime.reset()`` first.
+    Calling ``runtime.run(task)`` multiple times continues the conversation.
+    To start fresh, call ``runtime.reset()`` first.
 
     Session backends
     ----------------
-    memory (default)
-        History lives in RAM for the process lifetime.  Zero config.
-        Ideal for a CLI while-loop where you want continuity within a session
-        but don't need history to survive process restarts.
+    memory (default) — in-RAM, lost on exit.
+    file             — persisted to ~/.codepilot/sessions/<id>.json.
 
-    file
-        History is serialised to ~/.codepilot/sessions/<session_id>.json
-        after every completed task.  Survives restarts.  Multiple sessions
-        can be maintained simultaneously using different session_ids.
+    Multi-file writes
+    -----------------
+    Up to 5 ``write_file()`` calls per step (mode='w' / 'a').
+    Edits and inserts: one per step to prevent line-number drift.
+    Each ``write_file()`` consumes the next Payload Block in order.
 
-    Examples::
-
-        # in-memory multi-turn (default)
-        runtime = Runtime("agent.yaml")
-        runtime.run("Create a FastAPI app")
-        runtime.run("Now add JWT authentication to it")  # full history available
-
-        # file-backed, auto session id from agent name
-        runtime = Runtime("agent.yaml", session="file")
-
-        # file-backed, explicit id — resumes if file exists
-        runtime = Runtime("agent.yaml", session="file", session_id="my-project")
-
-        # inspect current session
-        print(runtime.session)
-
-        # start fresh (wipes history in memory + on disk)
-        runtime.reset()
-
-    Mid-task injection
-    ------------------
-    From any thread, call ``runtime.send_message(text)`` while ``run()`` is
-    executing.  The message is queued and injected at the step boundary with
-    the ``[USER MESSAGE]`` tag so the LLM can distinguish it from the original
-    task ``[USER INPUT]``.
+    Parallel commands
+    -----------------
+    ``run_command(cmd, execution="parallel")`` queues commands; they are
+    launched simultaneously after the control block finishes.
     """
 
     def __init__(
@@ -85,18 +72,21 @@ class Runtime:
         session: str = "memory",
         session_id: Optional[str] = None,
         session_dir=None,
+        stream: bool = False,
     ):
         """
         Args:
             agent_file:  Path to the AgentFile YAML.
             session:     'memory' (default) or 'file'.
-            session_id:  Unique name for this session.  Defaults to the agent
-                         name from the AgentFile (lowercased, spaces → hyphens).
+            session_id:  Unique name for this session.
             session_dir: Override default session directory for file backend.
+            stream:      Enable token-level streaming (pre-block text is
+                         emitted in real time via STREAM hooks).
         """
         self.config: AgentConfig = AgentConfig.load(agent_file)
         self.provider = get_provider(self.config.model)
         self.hooks    = HookSystem()
+        self._stream  = stream
 
         self.context_manager = ContextManager(self.config.runtime.work_dir)
         self.prompt_manager  = PromptManager()
@@ -119,8 +109,6 @@ class Runtime:
             session_dir=session_dir,
         )
 
-        # Hydrate conversation history from persisted session (no-op for memory
-        # on first use, or file backend when no file exists yet).
         self.messages: List[Dict[str, str]] = self.session.load()
 
         # ------------------------------------------------------------------ #
@@ -128,6 +116,8 @@ class Runtime:
         # ------------------------------------------------------------------ #
         self._payload_queue:    List[CodeBlock] = []
         self._execution_buffer: List[str]       = []
+        self._step_write_count: int = 0
+        self._step_edit_count:  int = 0
 
         # ------------------------------------------------------------------ #
         #  Control flags                                                       #
@@ -139,7 +129,7 @@ class Runtime:
         # ------------------------------------------------------------------ #
         #  Mid-execution message injection (thread-safe)                       #
         # ------------------------------------------------------------------ #
-        self._message_queue: queue.Queue  = queue.Queue()
+        self._message_queue: queue.Queue    = queue.Queue()
         self._loop_lock:     threading.Lock = threading.Lock()
 
     # ====================================================================== #
@@ -149,13 +139,6 @@ class Runtime:
     def run(self, task: str) -> Optional[str]:
         """
         Run a task within the current conversation context.
-
-        Calling run() multiple times on the same Runtime instance is the
-        intended pattern for multi-turn usage — each call appends to the
-        shared history so the LLM always has full context.
-
-        Args:
-            task: Natural-language description of what to do.
 
         Returns:
             The summary string passed to done(), or None if the loop ended
@@ -176,27 +159,37 @@ class Runtime:
             step += 1
             self.hooks.emit(EventType.STEP, step=step, max_steps=self.config.runtime.max_steps)
 
+            # Reset per-step state
+            self._step_write_count = 0
+            self._step_edit_count  = 0
+            self._shell_tools.reset_step()
+
             # 1. Drain mid-execution queue before next inference
             self._drain_message_queue()
 
             # 2. Build system prompt (snapshot refreshed every step)
             system_prompt = self._build_system_prompt()
 
-            # 3. LLM inference
+            # 3. LLM inference (streaming or blocking)
             try:
-                response_text = self.provider.chat(
-                    messages=self.messages,
-                    system=system_prompt,
-                    temperature=self.config.model.temperature,
-                    max_tokens=self.config.model.max_tokens,
-                )
+                if self._stream:
+                    response_text = self._stream_inference(system_prompt)
+                else:
+                    response_text = self.provider.chat(
+                        messages=self.messages,
+                        system=system_prompt,
+                        temperature=self.config.model.temperature,
+                        max_tokens=self.config.model.max_tokens,
+                    )
+                    # Non-streaming: still emit pre-fence text as single event
+                    self._emit_prefence_text(response_text)
             except Exception as exc:
                 error_msg = f"LLM provider error: {exc}"
                 self.hooks.emit(EventType.RUNTIME_ERROR, error=error_msg)
                 self._append_execution_result(f"PROVIDER ERROR: {error_msg}")
                 continue
 
-            # LLM output → assistant role, no tag
+            # LLM output → assistant role
             self.messages.append({"role": _ROLE_ASSISTANT, "content": response_text})
 
             # 4. Parse response
@@ -217,6 +210,9 @@ class Runtime:
             self._execution_buffer = []
             self._execute(control_block.content)
 
+            # 6. Flush parallel commands (if any were queued)
+            self._shell_tools.flush_parallel()
+
             execution_result = "\n\n".join(self._execution_buffer).strip()
             if not execution_result:
                 execution_result = "[Control block executed with no output.]"
@@ -225,7 +221,7 @@ class Runtime:
             if self._done:
                 break
 
-        # Persist after every run() call regardless of how the loop ended
+        # Persist after every run() call
         self.session.save(self.messages)
 
         if not self._done and not self._abort:
@@ -234,12 +230,7 @@ class Runtime:
         return self._done_summary if self._done else None
 
     def reset(self):
-        """
-        Wipe the entire conversation history and start fresh.
-
-        Clears in-memory messages and deletes the session file if using the
-        file backend.  The next call to run() will start with a clean slate.
-        """
+        """Wipe the entire conversation history and start fresh."""
         self.messages = []
         self.session.reset()
         self.hooks.emit(EventType.SESSION_RESET)
@@ -247,12 +238,6 @@ class Runtime:
     def send_message(self, message: str):
         """
         Inject a user message into the running loop from any thread.
-
-        The message is queued and tagged with [USER MESSAGE] — distinct from
-        [USER INPUT] (the original task) — so the LLM can unambiguously
-        recognise it as a mid-task course-correction or additional requirement.
-        Injected at the step boundary; the agent is never interrupted mid-step.
-
         Thread-safe and non-blocking.
         """
         self._message_queue.put(message)
@@ -267,27 +252,12 @@ class Runtime:
         Register a custom tool into the agent's sandbox.
 
         The tool is callable by name in the agent's control block.
-        Its docstring is automatically injected into the system prompt's
-        TOOLS section — write a clear, concise docstring explaining when
-        and how to use it.
+        Its docstring is automatically injected into the system prompt.
 
         Args:
             name:    Name the agent uses to call the tool.
-            func:    Any callable. Must call ``self.runtime._append_execution(result)``
-                     (or equivalent) if it produces output the agent should see,
-                     since return values from exec() are discarded.
+            func:    Any callable.
             replace: Pass True to silently override an existing tool.
-
-        Example::
-
-            def web_search(query: str):
-                \"""Search the web for current information.
-                Use when the codebase snapshot can't answer a question about
-                library APIs, recent changes, or external documentation.\"""
-                result = my_search_api(query)
-                runtime._append_execution(f"[web_search] {result}")
-
-            runtime.register_tool("web_search", web_search)
         """
         if not replace and self.registry.get(name) is not None:
             raise ValueError(
@@ -318,11 +288,7 @@ class Runtime:
     # ====================================================================== #
 
     def _drain_message_queue(self):
-        """
-        Consume all queued send_message() calls and insert them into history
-        as [USER MESSAGE] messages — distinct from [USER INPUT] so the LLM
-        can tell them apart without relying on position.
-        """
+        """Consume all queued send_message() calls and insert into history."""
         while True:
             try:
                 msg = self._message_queue.get_nowait()
@@ -344,8 +310,7 @@ class Runtime:
         if "read_file"   in enabled: self.registry.register("read_file",   self._fs_tools.read_file)
         if "run_command" in enabled: self.registry.register("run_command", self._shell_tools.run_command)
         if "ask_user"    in enabled: self.registry.register("ask_user",    self._interaction_tools.ask_user)
-        self.registry.register("done",  self._tool_done)
-        self.registry.register("think", self._tool_think)
+        self.registry.register("done", self._tool_done)
 
     def _tool_done(self, summary: str = "Task complete."):
         """
@@ -359,14 +324,6 @@ class Runtime:
         self._append_execution(f"[done] {summary}")
         self.hooks.emit(EventType.FINISH, summary=summary)
 
-    def _tool_think(self, message: str):
-        """
-        Narrate your reasoning to the user in real time — informal, specific, human.
-        Side-channel only: shown to the user but NOT stored in conversation history.
-        Write it like you're explaining your thinking to a developer sitting next to you.
-        """
-        self.hooks.emit(EventType.THINK, message=message)
-
     def _build_system_prompt(self) -> str:
         return self.prompt_manager.render(
             agent_name=self.config.name,
@@ -377,17 +334,86 @@ class Runtime:
             codebase_snapshot=self.context_manager.get_formatted_snapshot(),
         )
 
+    # ------------------------------------------------------------------ #
+    #  Streaming inference                                                 #
+    # ------------------------------------------------------------------ #
+
+    def _stream_inference(self, system_prompt: str) -> str:
+        """
+        Stream the LLM response token by token.
+
+        Text before the first code fence is emitted immediately via STREAM
+        hooks for real-time user feedback.  Once the fence is detected, all
+        subsequent tokens are buffered silently.
+
+        A 2-character hold-back prevents incorrect emission when the fence
+        marker is split across two streaming chunks (e.g. chunk ends with
+        '`' and next starts with '``').
+
+        Returns the complete response text for normal pipeline processing.
+        """
+        chunks: list            = []
+        pre_fence_emitted: int  = 0
+        fence_found: bool       = False
+
+        for chunk in self.provider.chat_stream(
+            messages=self.messages,
+            system=system_prompt,
+            temperature=self.config.model.temperature,
+            max_tokens=self.config.model.max_tokens,
+        ):
+            chunks.append(chunk)
+
+            if fence_found:
+                continue
+
+            accumulated = "".join(chunks)
+            fence_pos   = accumulated.find("```")
+
+            if fence_pos == -1:
+                # No fence yet — emit new text but hold back 2 chars so a
+                # fence split across chunks isn't prematurely streamed.
+                safe_end = len(accumulated) - 2
+                if safe_end > pre_fence_emitted:
+                    self.hooks.emit(
+                        EventType.STREAM,
+                        text=accumulated[pre_fence_emitted:safe_end],
+                    )
+                    pre_fence_emitted = safe_end
+            else:
+                # Fence detected — emit any remaining pre-fence text
+                if fence_pos > pre_fence_emitted:
+                    self.hooks.emit(
+                        EventType.STREAM,
+                        text=accumulated[pre_fence_emitted:fence_pos],
+                    )
+                fence_found = True
+
+        # Flush any held-back text if the response was purely prose (no fence)
+        if not fence_found:
+            accumulated = "".join(chunks)
+            remaining   = accumulated[pre_fence_emitted:]
+            if remaining:
+                self.hooks.emit(EventType.STREAM, text=remaining)
+
+        return "".join(chunks)
+
+    def _emit_prefence_text(self, response_text: str):
+        """Emit pre-fence text as a single STREAM event (non-streaming mode)."""
+        fence_pos = response_text.find("```")
+        if fence_pos > 0:
+            pre_text = response_text[:fence_pos].strip()
+            if pre_text:
+                self.hooks.emit(EventType.STREAM, text=pre_text)
+        elif fence_pos == -1 and response_text.strip():
+            # No code block at all — still emit the text
+            self.hooks.emit(EventType.STREAM, text=response_text.strip())
+
+    # ------------------------------------------------------------------ #
+    #  Sandbox + execution                                                 #
+    # ------------------------------------------------------------------ #
+
     def _build_sandbox(self, captured_print=None) -> Dict[str, Any]:
-        # ------------------------------------------------------------------ #
-        #  __import__ is required for any `import` statement inside exec().   #
-        #  Without it, even whitelisted imports (json, re, math …) raise      #
-        #  ImportError: __import__ not found.                                 #
-        #                                                                     #
-        #  captured_print is injected by _execute() so the agent's print()   #
-        #  calls go to our capture buffer rather than real stdout.  Hook      #
-        #  handlers are regular Python closures that hold a reference to the  #
-        #  real built-in print() and are therefore unaffected.                #
-        # ------------------------------------------------------------------ #
         sandbox = {
             "__builtins__": {
                 "print": captured_print if captured_print is not None else print,
@@ -419,19 +445,6 @@ class Runtime:
             self._append_execution(f"SECURITY ERROR: {exc}")
             return
 
-        # ------------------------------------------------------------------ #
-        #  Capture only the agent's own print() calls.                        #
-        #                                                                     #
-        #  The old approach (redirect sys.stdout to StringIO) also captured   #
-        #  every print() made by hook handlers that fire inside tool calls    #
-        #  during exec() — those UI-decoration strings ended up in            #
-        #  [EXECUTION RESULT] and were fed back to the LLM.                   #
-        #                                                                     #
-        #  The fix: keep sys.stdout untouched so hook handlers write to the   #
-        #  real terminal; inject a lightweight captured_print into the        #
-        #  sandbox so that print() calls inside the agent's control block     #
-        #  go to our buffer instead.                                           #
-        # ------------------------------------------------------------------ #
         _print_lines: list = []
 
         def _captured_print(*args, sep=" ", end="\n", file=None, flush=False):

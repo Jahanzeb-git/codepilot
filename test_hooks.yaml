@@ -1,0 +1,10 @@
+agent:
+  model:
+    api_key_env: TOGETHER_API_KEY
+    name: Qwen
+    provider: together
+  name: TestAgent
+  runtime:
+    max_steps: 1
+    work_dir: .
+  system_prompt: ''

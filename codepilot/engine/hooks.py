@@ -3,20 +3,20 @@ from enum import Enum
 
 
 class EventType(Enum):
-    START                = "start"                # Agent loop begins
-    STEP                 = "step"                 # A new agentic step is starting
-    THINK                = "think"                # Agent called think("...")
-    TOOL_CALL            = "tool_call"            # A tool is about to be invoked
-    TOOL_RESULT          = "tool_result"          # A tool returned a result
-    ASK_USER             = "ask_user"             # Agent is asking the user a question
-    PERMISSION_REQUEST   = "permission_request"   # Tool requires user permission
-    SECURITY_ERROR       = "security_error"       # AST validation rejected the code
-    RUNTIME_ERROR        = "runtime_error"        # Execution error occurred
-    FINISH               = "finish"               # Agent called done() — task complete
-    MAX_STEPS            = "max_steps"            # Loop ended due to step limit
-    USER_MESSAGE_QUEUED  = "user_message_queued"   # send_message() was called
+    START                 = "start"                  # Agent loop begins
+    STEP                  = "step"                   # A new agentic step is starting
+    STREAM                = "stream"                 # Pre-block reasoning text (streamed)
+    TOOL_CALL             = "tool_call"              # A tool is about to be invoked
+    TOOL_RESULT           = "tool_result"            # A tool returned a result
+    ASK_USER              = "ask_user"               # Agent is asking the user a question
+    PERMISSION_REQUEST    = "permission_request"     # Tool requires user permission
+    SECURITY_ERROR        = "security_error"         # AST validation rejected the code
+    RUNTIME_ERROR         = "runtime_error"          # Execution error occurred
+    FINISH                = "finish"                 # Agent called done() — task complete
+    MAX_STEPS             = "max_steps"              # Loop ended due to step limit
+    USER_MESSAGE_QUEUED   = "user_message_queued"    # send_message() was called
     USER_MESSAGE_INJECTED = "user_message_injected"  # Message inserted into context
-    SESSION_RESET        = "session_reset"           # reset() was called
+    SESSION_RESET         = "session_reset"          # reset() was called
 
 
 class HookSystem:
@@ -38,7 +38,7 @@ class HookSystem:
     # ------------------------------------------------------------------
 
     def _install_defaults(self):
-        self.register(EventType.THINK, self._default_think)
+        self.register(EventType.STREAM, self._default_stream)
         self.register(EventType.TOOL_CALL, self._default_tool_call)
         self.register(EventType.TOOL_RESULT, self._default_tool_result)
         self.register(EventType.SECURITY_ERROR, self._default_security_error)
@@ -47,8 +47,8 @@ class HookSystem:
         self.register(EventType.MAX_STEPS, self._default_max_steps)
 
     @staticmethod
-    def _default_think(message: str, **_):
-        print(f"\n💭 {message}")
+    def _default_stream(text: str, **_):
+        print(text, end="", flush=True)
 
     @staticmethod
     def _default_tool_call(tool: str, args: dict, **_):
@@ -110,11 +110,11 @@ class HookSystem:
 # Decorator helpers for developer ergonomics
 # ---------------------------------------------------------------------------
 
-def on_think(runtime_instance):
-    """Decorator: register a handler for THINK events."""
+def on_stream(runtime_instance):
+    """Decorator: register a handler for STREAM events (pre-block reasoning text)."""
     def decorator(func: Callable):
-        runtime_instance.hooks.clear(EventType.THINK)   # replace default
-        runtime_instance.hooks.register(EventType.THINK, func)
+        runtime_instance.hooks.clear(EventType.STREAM)
+        runtime_instance.hooks.register(EventType.STREAM, func)
         return func
     return decorator
 
