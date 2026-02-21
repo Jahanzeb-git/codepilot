@@ -15,8 +15,10 @@ class BlockParser:
     Parses an LLM response and extracts fenced Markdown code blocks.
 
     The runtime convention:
-      - Block[0]  → Control Block   (always Python; executed by the runtime)
-      - Block[1+] → Payload Blocks  (side-loaded by write_file)
+      - The first ```codepilot block → Control Block (Python; executed)
+      - Blocks after it            → Payload Blocks (side-loaded by write_file)
+      - All other blocks (```python, ```json, …) are display-only markdown,
+        safe to include in chat/explanations without risk of execution.
     """
 
     # Matches ```lang\\n...content...\\n``` (non-greedy, DOTALL)
@@ -39,10 +41,19 @@ class BlockParser:
         """
         Returns (control_block, payload_blocks).
 
-        control_block is None when the LLM produces a plain-text response
-        with no code blocks (treated as a conversational reply).
+        The control block is the first ```codepilot fenced block.
+        All blocks after it are payload blocks (consumed by write_file).
+        If no ```codepilot block exists, returns (None, []) — the response
+        is a conversational reply with display-only code blocks.
         """
         blocks = cls.parse(text)
         if not blocks:
             return None, []
-        return blocks[0], blocks[1:]
+
+        for i, block in enumerate(blocks):
+            if block.language == "codepilot":
+                return block, blocks[i + 1:]
+
+        # No codepilot block → entire response is display/chat
+        return None, []
+

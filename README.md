@@ -1,44 +1,104 @@
 # CodePilot — Developer Reference
 
-**CodePilot** is a code-native agentic framework. The LLM writes Python to act — no JSON schemas, no function-calling APIs. This document covers every feature with working code examples.
+**CodePilot** is a code-native agentic framework for Python. The LLM writes executable code to act — no JSON schemas, no function-calling APIs, no tool wrappers. This document covers every feature with working code examples.
+
+**Version:** `0.3.0`
 
 ---
 
 ## Installation
- 
+
 ```bash
-pip install codepilot
+pip install codepilot-ai
 ```
 
-Required env var before running anything:
+Set your LLM provider key before running anything:
+
 ```bash
-export ANTHROPIC_API_KEY="sk-ant-..."   # or OPENAI_API_KEY, etc.
+# Pick one
+export ANTHROPIC_API_KEY="sk-ant-..."
+export OPENAI_API_KEY="sk-..."
+export TOGETHER_API_KEY="..."
 ```
 
 ---
 
 ## Table of Contents
 
-1. [AgentFile (YAML config)](#1-agentfile)
-2. [Basic usage](#2-basic-usage)
-3. [Multi-turn execution](#3-multi-turn-execution)
-4. [Session persistence](#4-session-persistence)
-5. [Resuming a session](#5-resuming-a-session)
-6. [Resetting a session](#6-resetting-a-session)
-7. [Hooks — full observability](#7-hooks)
-8. [Permission gating](#8-permission-gating)
-9. [Mid-task message injection](#9-mid-task-message-injection)
-10. [Custom tools](#10-custom-tools)
-11. [Aborting the agent](#11-aborting-the-agent)
-12. [Building a CLI tool](#12-building-a-cli-tool)
-13. [Building a web server integration](#13-building-a-web-server-integration)
-14. [Full API surface](#14-full-api-surface)
+1. [How it works](#1-how-it-works)
+2. [AgentFile (YAML config)](#2-agentfile)
+3. [Basic usage](#3-basic-usage)
+4. [Streaming](#4-streaming)
+5. [Multi-turn execution](#5-multi-turn-execution)
+6. [Session persistence](#6-session-persistence)
+7. [Resuming a session](#7-resuming-a-session)
+8. [Resetting a session](#8-resetting-a-session)
+9. [Hooks — full observability](#9-hooks)
+10. [Permission gating](#10-permission-gating)
+11. [Mid-task message injection](#11-mid-task-message-injection)
+12. [Multi-operation steps](#12-multi-operation-steps)
+13. [Parallel command execution](#13-parallel-command-execution)
+14. [Background commands with timeout](#14-background-commands-with-timeout)
+15. [Workspace change detection](#15-workspace-change-detection)
+16. [Chat mode](#16-chat-mode)
+17. [Custom tools](#17-custom-tools)
+18. [Aborting the agent](#18-aborting-the-agent)
+19. [Building a CLI tool](#19-building-a-cli-tool)
+20. [Building a web server integration](#20-building-a-web-server-integration)
+21. [Full API surface](#21-full-api-surface)
 
 ---
 
-## 1. AgentFile
+## 1. How It Works
 
-Every Runtime is driven by a YAML config file. Paths in the file are resolved relative to the file's own location — not the caller's CWD — so the agent works correctly when installed as a global CLI tool.
+CodePilot uses a **code-as-interface** paradigm. Instead of the LLM describing actions in JSON, it writes Python code that the runtime executes directly.
+
+Each agent step:
+
+1. **LLM receives** the system prompt + full conversation history
+2. **LLM writes** a natural language reasoning paragraph (streamed to user), then a ` ```codepilot ` block (Python code)
+3. **Runtime executes** the code block in a sandboxed environment with bound tool functions
+4. **Execution result** is appended to conversation history as `[EXECUTION RESULT]`
+5. **Repeat** until the agent calls `done()`, hits `max_steps`, or is aborted
+
+### The `codepilot` fence
+
+The ` ```codepilot ` fence is the **only** block the runtime executes. Regular ` ```python ` blocks are display-only markdown — the agent can freely use them for code examples in explanations without risk of execution.
+
+**LLM output for an action:**
+````
+Alright, I'll create the file and verify it runs.
+
+```codepilot
+# Write the module, then immediately verify it imports
+write_file("utils.py")
+run_command("python -c 'import utils; print(utils.slugify(\"Hello World\"))'")
+```
+
+```python
+def slugify(text: str) -> str:
+    return text.lower().replace(" ", "-")
+```
+````
+
+**LLM output for a chat/explanation (no execution):**
+````
+Sure! Here's how the `slugify` function works:
+
+```python
+# This is a display block — never executed
+def slugify(text: str) -> str:
+    return text.lower().replace(" ", "-")
+```
+
+Each space is replaced with a hyphen, and the string is lowercased.
+````
+
+---
+
+## 2. AgentFile
+
+Every Runtime is driven by a YAML config. Paths are resolved relative to the YAML file's location — not the caller's CWD.
 
 ```yaml
 # agent.yaml
@@ -79,7 +139,7 @@ agent:
     - name: "run_command"
       enabled: true
       config:
-        timeout: 60                 # seconds before command is killed
+        timeout: 60                 # default timeout in seconds
         require_permission: true    # true = ask user before every shell command
 
     - name: "ask_user"
@@ -96,23 +156,62 @@ agent:
 
 ---
 
-## 2. Basic Usage
+## 3. Basic Usage
 
 ```python
 from codepilot import Runtime
 
 runtime = Runtime("agent.yaml")
 summary = runtime.run("Create a FastAPI hello-world server in main.py")
-print(summary)  # what the agent reported in done()
+print(summary)  # the string the agent passed to done()
 ```
 
-`run()` is **blocking** — it returns when the agent calls `done()`, hits `max_steps`, or is aborted. The return value is the summary string passed to `done()`, or `None` if the loop ended for any other reason.
+`run()` is **blocking** — it returns when the agent calls `done()`, hits `max_steps`, or is aborted. The return value is the `done()` summary string, or `None` if the loop ended for any other reason.
 
 ---
 
-## 3. Multi-turn Execution
+## 4. Streaming
 
-Call `run()` multiple times on the same `Runtime` instance. Each call appends to the shared conversation history. The LLM sees every prior task, every file it wrote, and every command it ran — so it won't re-create existing files or hallucinate about prior work.
+Enable streaming to receive the agent's reasoning text token-by-token, in real time, *before* any code executes. This dramatically improves perceived responsiveness.
+
+```python
+from codepilot import Runtime, on_stream
+
+runtime = Runtime("agent.yaml", stream=True)
+
+
+@on_stream(runtime)
+def handle_stream(text: str, **_):
+    """Fires with each chunk of pre-execution reasoning text."""
+    print(text, end="", flush=True)
+
+
+runtime.run("Refactor the database module to use async SQLAlchemy")
+```
+
+### What gets streamed
+
+The runtime streams **everything before the `codepilot` block** — this includes the agent's reasoning paragraph and any display ` ```python ` code blocks it uses in explanations. Once the ` ```codepilot ` fence is detected, streaming pauses while the code block is executed.
+
+For chat/question responses (no `codepilot` block), the **entire response** streams to the user.
+
+### Non-streaming mode
+
+Without `stream=True`, the full response is emitted as a single `STREAM` event when inference completes. The `on_stream` hook still fires — you see the complete reasoning text at once rather than token-by-token.
+
+```python
+runtime = Runtime("agent.yaml")   # stream=False by default
+
+@on_stream(runtime)
+def show_reasoning(text: str, **_):
+    print(f"\n{text}\n")
+```
+
+---
+
+## 5. Multi-turn Execution
+
+Call `run()` multiple times on the same `Runtime` instance. Each call appends to the shared conversation history. The LLM sees every prior task, every file it wrote, and every command it ran.
 
 ```python
 from codepilot import Runtime
@@ -125,17 +224,15 @@ runtime.run("Create a FastAPI app with a /items GET endpoint")
 # Turn 2 — agent has full context of what it built in turn 1
 runtime.run("Now add a POST /items endpoint with Pydantic validation")
 
-# Turn 3 — agent knows the full codebase it has built across both turns
+# Turn 3 — agent knows the full codebase it has built
 runtime.run("Add pytest tests for both endpoints")
 ```
 
-**The key point:** these are not isolated calls. The message history grows with each `run()`. The agent in turn 3 has seen everything from turns 1 and 2 — it knows the exact files it created and what's in them.
-
 ---
 
-## 4. Session Persistence
+## 6. Session Persistence
 
-Session backends are **independent** — you choose one at construction time.
+Session backends are chosen at construction time.
 
 | Backend | Storage | Survives restart | Config needed |
 |---|---|---|---|
@@ -144,26 +241,21 @@ Session backends are **independent** — you choose one at construction time.
 
 ### In-memory (default)
 
-History lives in RAM. Zero I/O, zero config. Ideal for a while-loop CLI where you want continuity within a run but don't need history to survive a process restart.
-
 ```python
-runtime = Runtime("agent.yaml")                          # memory, id="backendeng..."
+runtime = Runtime("agent.yaml")                          # memory, id = agent name
 runtime = Runtime("agent.yaml", session="memory")       # explicit, same thing
 runtime = Runtime("agent.yaml", session="memory", session_id="my-session")
 ```
 
 ### File-backed
 
-History is serialised to `~/.codepilot/sessions/<session_id>.json` after every completed `run()`. On Windows this is `%USERPROFILE%\.codepilot\sessions\`. The directory is created automatically and requires no elevated permissions.
+History is serialised to `~/.codepilot/sessions/<session_id>.json` after every `run()`. On Windows: `%USERPROFILE%\.codepilot\sessions\`. Directory is created automatically.
 
 ```python
-# Session id defaults to the agent name (lowercased, spaces → hyphens)
-runtime = Runtime("agent.yaml", session="file")
-
-# Explicit session id — more predictable
+runtime = Runtime("agent.yaml", session="file")                     # id = agent name
 runtime = Runtime("agent.yaml", session="file", session_id="ecommerce-api")
 
-# Custom session directory (override default ~/.codepilot/sessions/)
+# Custom session directory
 from pathlib import Path
 runtime = Runtime(
     "agent.yaml",
@@ -173,7 +265,7 @@ runtime = Runtime(
 )
 ```
 
-The session file format:
+Session file format:
 
 ```json
 {
@@ -187,38 +279,34 @@ The session file format:
 
 ---
 
-## 5. Resuming a Session
+## 7. Resuming a Session
 
-Pass the same `session_id` to a file-backed Runtime and the previous conversation is automatically loaded. The LLM picks up exactly where it left off.
+Pass the same `session_id` to a new file-backed Runtime and the prior conversation loads automatically.
 
 ```python
-# Session A — first run (process 1)
+# Process 1
 runtime = Runtime("agent.yaml", session="file", session_id="ecommerce-api")
 runtime.run("Create the products and orders FastAPI endpoints")
-# Process exits — session saved to ~/.codepilot/sessions/ecommerce-api.json
+# Process exits — session saved
 
 # -------- later, new process --------
 
-# Session A — resumed (process 2)
+# Process 2 — picks up exactly where process 1 left off
 runtime = Runtime("agent.yaml", session="file", session_id="ecommerce-api")
-# runtime.messages is already populated with the full prior conversation
 runtime.run("Add database migrations using Alembic")
-# Agent knows exactly what files it created in the previous session
 ```
 
 ### Listing saved sessions
 
-The `FileSession` backend exposes a `list_sessions()` method for building a session picker in a UI or CLI:
-
 ```python
 from codepilot import FileSession
 
-fs = FileSession(session_id="_", agent_name="_")   # dummy instance just to call list_sessions
+fs = FileSession(session_id="_", agent_name="_")
 for s in fs.list_sessions():
     print(f"{s['session_id']:30} {s['messages']:4} messages  updated {s['updated_at']}")
 ```
 
-Or inspect a specific session's metadata without loading all messages:
+### Inspecting a session without loading messages
 
 ```python
 from codepilot import FileSession
@@ -226,39 +314,39 @@ from codepilot import FileSession
 fs = FileSession(session_id="ecommerce-api", agent_name="BackendEngineer")
 meta = fs.metadata()
 if meta:
-    print(f"Session exists. Last updated: {meta['updated_at']}")
-    print(f"Saved at: {fs.path}")
+    print(f"Last updated: {meta['updated_at']}")
+    print(f"File path: {fs.path}")
 else:
     print("No saved session — will start fresh")
 ```
 
 ---
 
-## 6. Resetting a Session
+## 8. Resetting a Session
 
-Wipes all history — clears in-memory messages and deletes the file if using the file backend. The next `run()` starts completely fresh.
+Wipes all history and deletes the session file (if file-backed). The next `run()` starts completely fresh.
 
 ```python
 runtime = Runtime("agent.yaml", session="file", session_id="ecommerce-api")
 
 # ... some runs ...
 
-runtime.reset()  # wipe everything
+runtime.reset()
 runtime.run("Start over — build a GraphQL API instead")
 ```
 
 ---
 
-## 7. Hooks
+## 9. Hooks
 
 Hooks are the observability system. Every significant runtime event fires a hook. Register handlers to receive them in your application.
 
-All hook decorators replace the built-in default handler (which prints to stdout with emoji). The built-in defaults mean the library is useful out of the box with zero hook configuration.
+All built-in decorators replace the default stdout handler. The defaults work out of the box with zero configuration.
 
 ```python
 from codepilot import (
     Runtime,
-    on_think,
+    on_stream,
     on_tool_call,
     on_tool_result,
     on_ask_user,
@@ -268,37 +356,37 @@ from codepilot import (
     EventType,
 )
 
-runtime = Runtime("agent.yaml")
+runtime = Runtime("agent.yaml", stream=True)
 
 
-@on_think(runtime)
-def handle_think(message: str, **_):
-    """Fires every time the agent calls think("...")."""
-    print(f"[Agent] {message}")
+@on_stream(runtime)
+def handle_stream(text: str, **_):
+    """Fires with each chunk of the agent's reasoning text (before code executes)."""
+    print(text, end="", flush=True)
 
 
 @on_tool_call(runtime)
 def handle_tool_call(tool: str, args: dict, **_):
     """Fires before every tool executes."""
-    print(f"[→ {tool}] {args}")
+    print(f"\n⚙️  [{tool}] {args}")
 
 
 @on_tool_result(runtime)
 def handle_tool_result(tool: str, result: str, **_):
     """Fires after every tool returns."""
-    print(f"[← {tool}] {result[:120]}")
+    print(f"   ↳ {result[:200]}")
 
 
 @on_ask_user(runtime)
 def handle_ask(question: str, **_):
-    """Fires when the agent calls ask_user(). Separate from the answer flow."""
+    """Fires when the agent calls ask_user()."""
     print(f"\n❓ {question}")
 
 
 @on_finish(runtime)
 def handle_finish(summary: str, **_):
     """Fires when the agent calls done()."""
-    print(f"\n✅ {summary}")
+    print(f"\n✅ {summary}\n")
 
 
 @on_user_message_queued(runtime)
@@ -316,21 +404,13 @@ def handle_injected(message: str, **_):
 runtime.run("Refactor the database module to use async SQLAlchemy")
 ```
 
-### Manual hook registration (no decorator)
+### Manual hook registration
 
 ```python
 from codepilot import EventType
 
-runtime.hooks.register(EventType.THINK, lambda message, **_: print(message))
-runtime.hooks.register(EventType.FINISH, lambda summary, **_: save_to_db(summary))
-```
-
-### Removing the default handler
-
-```python
-# Replace default with your own (decorator does this automatically)
-runtime.hooks.clear(EventType.THINK)
-runtime.hooks.register(EventType.THINK, my_handler)
+runtime.hooks.register(EventType.STREAM,  lambda text, **_: print(text, end="", flush=True))
+runtime.hooks.register(EventType.FINISH,  lambda summary, **_: save_to_db(summary))
 ```
 
 ### Full event reference
@@ -339,7 +419,7 @@ runtime.hooks.register(EventType.THINK, my_handler)
 |---|---|---|
 | `START` | `task` | `run()` is called |
 | `STEP` | `step`, `max_steps` | Each agentic step begins |
-| `THINK` | `message` | Agent calls `think()` |
+| `STREAM` | `text` | Chunk of pre-execution reasoning text |
 | `TOOL_CALL` | `tool`, `args` | Before any tool executes |
 | `TOOL_RESULT` | `tool`, `result` | After any tool returns |
 | `ASK_USER` | `question` | Agent calls `ask_user()` |
@@ -350,13 +430,13 @@ runtime.hooks.register(EventType.THINK, my_handler)
 | `MAX_STEPS` | — | Loop exits because `max_steps` was reached |
 | `USER_MESSAGE_QUEUED` | `message` | `send_message()` called |
 | `USER_MESSAGE_INJECTED` | `message` | Queued message enters LLM context |
-| `SESSION_RESET` | — | `reset()` is called |
+| `SESSION_RESET` | — | `reset()` called |
 
 ---
 
-## 8. Permission Gating
+## 10. Permission Gating
 
-Any tool with `require_permission: true` in the AgentFile fires a `PERMISSION_REQUEST` hook before executing. Your handler returns `True` to approve or `False` to deny. If no handler is registered, the runtime falls back to a CLI `y/N` prompt.
+Any tool with `require_permission: true` fires a `PERMISSION_REQUEST` hook before executing. Return `True` to approve, `False` to deny. Falls back to a CLI `y/N` prompt if no handler is registered.
 
 ```python
 from codepilot import Runtime, on_permission_request
@@ -367,7 +447,7 @@ runtime = Runtime("agent.yaml")
 @on_permission_request(runtime)
 def gate(tool: str, description: str, **_) -> bool:
     """
-    tool        — "write_file" | "run_command" | "ask_user"
+    tool        — "write_file" | "run_command"
     description — human-readable description of the specific operation
     Return True to approve, False to deny.
     """
@@ -382,40 +462,40 @@ runtime.run("Deploy the application")
 
 ```python
 @on_permission_request(runtime)
-def auto_approve_reads_deny_writes(tool: str, description: str, **_) -> bool:
+def auto_gate(tool: str, description: str, **_) -> bool:
     if tool == "read_file":
         return True
-    if tool == "run_command" and description.startswith("Execute: python -m pytest"):
+    if tool == "run_command" and "pytest" in description:
         return True
-    return False  # deny everything else
+    return False   # deny everything else
 ```
 
 ---
 
-## 9. Mid-task Message Injection
+## 11. Mid-task Message Injection
 
-`runtime.run()` is blocking and runs on the calling thread. From any other thread, call `runtime.send_message()` to inject a message into the running agent. The message is:
+`runtime.run()` is blocking and runs on the calling thread. From any other thread, call `runtime.send_message()` to inject a message into the running agent.
 
 1. Queued immediately (non-blocking, thread-safe)
 2. Tagged `[USER MESSAGE]` — distinct from `[USER INPUT]` (the original task)
-3. Injected into the LLM context at the next step boundary
-4. The agent is **never** interrupted mid-step
+3. Injected into the LLM context at the **next step boundary** — never mid-step
 
 ```python
 import threading
-from codepilot import Runtime, on_think, on_user_message_injected
+import time
+from codepilot import Runtime, on_stream, on_user_message_injected
 
-runtime = Runtime("agent.yaml")
+runtime = Runtime("agent.yaml", stream=True)
 
 
-@on_think(runtime)
-def display(message: str, **_):
-    print(f"Agent: {message}")
+@on_stream(runtime)
+def show(text: str, **_):
+    print(text, end="", flush=True)
 
 
 @on_user_message_injected(runtime)
 def confirmed(message: str, **_):
-    print(f"[Your message is now in context]: {message}")
+    print(f"\n[Your message is now in context]: {message}")
 
 
 def run_agent():
@@ -425,8 +505,6 @@ def run_agent():
 agent_thread = threading.Thread(target=run_agent)
 agent_thread.start()
 
-# Inject a message while the agent is working
-import time
 time.sleep(5)
 runtime.send_message("Also add type hints to every function")
 
@@ -435,11 +513,175 @@ agent_thread.join()
 
 ---
 
-## 10. Custom Tools
+## 12. Multi-operation Steps
+
+The agent can perform multiple file operations in a single step, reducing round-trips and improving efficiency.
+
+### Multiple file writes
+
+Up to **5 `write_file()` calls** with `mode='w'` or `mode='a'` per step. Each call consumes the next payload block in order.
+
+**LLM output (writes two files in one step):**
+````
+Alright, both files are independent so I'll write them together.
+
+```codepilot
+# Two new files — order of write_file() matches order of payload blocks below.
+write_file("config.py")
+write_file("utils.py")
+```
+
+```python
+import json, os
+
+def load(path: str) -> dict:
+    if not os.path.exists(path):
+        return {}
+    with open(path) as f:
+        return json.load(f)
+```
+
+```python
+def slugify(text: str) -> str:
+    return text.lower().replace(" ", "-")
+```
+````
+
+**Limitation:** Only **one edit** (`mode='edit'` or `mode='insert'`) is allowed per step to avoid line-number conflicts. After an edit, the file's line numbers shift and subsequent edits would target wrong lines.
+
+### Multiple file reads
+
+Any number of `read_file()` calls per step — no limit.
+
+```python
+# LLM control block:
+read_file("config.py")
+read_file("utils.py")
+read_file("tests/test_config.py")
+```
+
+---
+
+## 13. Parallel Command Execution
+
+Run independent shell commands simultaneously using `execution="parallel"`. Parallel commands are queued during the control block and launched concurrently after the block finishes executing.
+
+```python
+# LLM control block — these run at the same time:
+run_command("pytest tests/test_config.py -v", execution="parallel")
+run_command("pytest tests/test_utils.py -v", execution="parallel")
+run_command("mypy src/ --strict", execution="parallel")
+```
+
+The default is `execution="inline"` which runs commands sequentially, one after another.
+
+```python
+# Sequential — waits for each before starting the next:
+run_command("pip install -r requirements.txt")           # inline (default)
+run_command("python -m pytest tests/ -v")               # inline
+```
+
+Mix inline and parallel in the same step — inline commands run first (sequentially), parallel commands run after all inline commands finish:
+
+```python
+run_command("pip install -r requirements.txt")          # inline — runs first
+run_command("pytest tests/unit/ -v", execution="parallel")    # parallel batch
+run_command("pytest tests/integration/ -v", execution="parallel")
+```
+
+---
+
+## 14. Background Commands with Timeout
+
+Use `background=True` to run a long-running process without blocking the entire step. Add a `timeout` to have the runtime wait for completion — if the process finishes within the timeout, you get the full output; if it's still running, you get its PID and execution continues.
+
+```python
+# Wait up to 30 seconds for the dev server to start, then move on.
+# If it finishes in time → full output returned.
+# If still running → "still running, PID: 1234" — process stays alive.
+run_command("uvicorn main:app --reload", background=True, timeout=30)
+```
+
+```python
+# Fire and forget — no wait, just a PID back immediately.
+run_command("npm run build:watch", background=True)
+```
+
+This eliminates the common pattern where agents loop and waste inference steps polling for a background process to complete.
+
+---
+
+## 15. Workspace Change Detection
+
+The runtime automatically detects when **you** modify files in the workspace between agent steps. If you edit a file while the agent is working, it will be notified at the start of the next step with exact line numbers of what changed.
+
+**What the agent sees in its context:**
+
+```
+[ENVIRONMENT CHANGE] 2026-02-21 16:30:12
+
+📝 Modified: main.py
+  Changed lines: 1-4, 47
+📄 Created: .env (3 lines)
+🗑️ Deleted: old_config.py
+```
+
+The agent is then instructed to re-read affected files before editing — because its cached line numbers may be wrong.
+
+**How it works:**
+
+- Tracking is **opt-in by file** — only files the agent has touched (read or written) are watched
+- Detection is **snapshot-based** — no background daemon, no file watchers, zero overhead between steps
+- Snapshots are taken at the end of each step and compared at the start of the next
+- Diff limits: 30 changed lines reported per file, 100 total across all files
+
+No configuration is required — this is always on.
+
+---
+
+## 16. Chat Mode
+
+The agent can respond to questions and explanations without executing any code. If the LLM produces a response with no ` ```codepilot ` block, the runtime treats it as a conversational reply: the response is fully streamed to the user and the loop exits cleanly.
+
+```python
+runtime = Runtime("agent.yaml", stream=True)
+
+@on_stream(runtime)
+def show(text: str, **_):
+    print(text, end="", flush=True)
+
+
+@on_finish(runtime)
+def done(summary: str, **_):
+    print(f"\n✅ {summary}")
+
+
+# Agent answers with natural markdown — no code executed
+runtime.run("How does the config loader handle missing files?")
+
+# Agent takes action — executes code
+runtime.run("Add a fallback default value to the config loader")
+```
+
+The agent freely uses ` ```python ` blocks to display code examples in its explanations — they are **never** executed. Only ` ```codepilot ` blocks execute.
+
+### Internal clock
+
+The agent's system prompt is refreshed every step with the current timestamp:
+
+```
+Directory: `./workspace` — OS: Windows 10 — Time: `2026-02-21 16:30:12`
+```
+
+This allows the agent to reason about time-sensitive tasks, deadlines, log timestamps, and how much time has elapsed between steps.
+
+---
+
+## 17. Custom Tools
 
 Register any callable as a tool. Its docstring is automatically pulled into the system prompt so the agent knows when and how to use it.
 
-**Important:** `exec()` discards return values. If your tool produces output the agent should see, you must explicitly call `runtime._append_execution(result)`.
+**Important:** `exec()` discards return values. If your tool produces output the agent should see, explicitly call `runtime._append_execution(result)`.
 
 ```python
 from codepilot import Runtime
@@ -453,7 +695,6 @@ def web_search(query: str):
     Use for library documentation, recent API changes, error lookups,
     or anything the codebase snapshot can't answer.
     """
-    # Your search implementation
     result = my_search_api(query)
     runtime._append_execution(f"[web_search] {result}")
 
@@ -477,7 +718,7 @@ runtime.run("Research the latest SQLAlchemy 2.0 async API and implement a connec
 ### Overriding a built-in tool
 
 ```python
-def safe_run_command(command: str, timeout: int = None, background: bool = False):
+def safe_run_command(command: str, timeout: int = None, background: bool = False, execution: str = "inline"):
     """
     Run a shell command. Restricted to read-only operations in this environment.
     Never import subprocess or os directly — always use this tool.
@@ -485,8 +726,7 @@ def safe_run_command(command: str, timeout: int = None, background: bool = False
     if any(cmd in command for cmd in ["rm", "del", "format", ">", "sudo"]):
         runtime._append_execution(f"[run_command] Blocked: '{command}' is not permitted.")
         return
-    # call original or implement your own
-    runtime._shell_tools.run_command(command, timeout=timeout, background=background)
+    runtime._shell_tools.run_command(command, timeout=timeout, background=background, execution=execution)
 
 
 runtime.register_tool("run_command", safe_run_command, replace=True)
@@ -494,7 +734,7 @@ runtime.register_tool("run_command", safe_run_command, replace=True)
 
 ---
 
-## 11. Aborting the Agent
+## 18. Aborting the Agent
 
 ```python
 import threading
@@ -514,20 +754,20 @@ agent_thread.join()
 
 ---
 
-## 12. Building a CLI Tool
+## 19. Building a CLI Tool
 
-The recommended pattern for a conversational CLI — in-memory session, while-loop, `reset` command:
+### Simple conversational CLI
 
 ```python
 import sys
-from codepilot import Runtime, on_think, on_finish, on_ask_user, EventType
+from codepilot import Runtime, on_stream, on_finish, on_ask_user
 
-runtime = Runtime("agent.yaml", session="memory")
+runtime = Runtime("agent.yaml", session="memory", stream=True)
 
 
-@on_think(runtime)
-def show_thinking(message: str, **_):
-    print(f"\n  💭 {message}")
+@on_stream(runtime)
+def show_stream(text: str, **_):
+    print(text, end="", flush=True)
 
 
 @on_finish(runtime)
@@ -563,12 +803,12 @@ while True:
     runtime.run(task)
 ```
 
-### File-backed CLI (survives restarts, named sessions)
+### File-backed CLI with named sessions
 
 ```python
 import sys
 import argparse
-from codepilot import Runtime, FileSession, on_think, on_finish
+from codepilot import Runtime, FileSession, on_stream, on_finish
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--session", default=None, help="Session ID to resume")
@@ -585,20 +825,18 @@ if args.list:
     sys.exit(0)
 
 session_id = args.session or "default"
-runtime = Runtime("agent.yaml", session="file", session_id=session_id)
+runtime = Runtime("agent.yaml", session="file", session_id=session_id, stream=True)
 
-# Inform user if resuming
 fs = FileSession(session_id=session_id, agent_name="")
 if fs.exists():
-    meta = fs.metadata()
-    print(f"Resuming session '{session_id}' ({len(runtime.messages)} messages in history)\n")
+    print(f"Resuming session '{session_id}' ({len(runtime.messages)} messages)\n")
 else:
     print(f"Starting new session '{session_id}'\n")
 
 
-@on_think(runtime)
-def thinking(message: str, **_):
-    print(f"  💭 {message}")
+@on_stream(runtime)
+def streaming(text: str, **_):
+    print(text, end="", flush=True)
 
 
 @on_finish(runtime)
@@ -626,7 +864,6 @@ while True:
 ```
 
 ```bash
-# Usage:
 python cli.py                              # new default session
 python cli.py --session ecommerce-api      # resume named session
 python cli.py --list                       # show all saved sessions
@@ -634,9 +871,9 @@ python cli.py --list                       # show all saved sessions
 
 ---
 
-## 13. Building a Web Server Integration
+## 20. Building a Web Server Integration
 
-FastAPI example with WebSocket streaming of hook events and a mid-task injection endpoint:
+FastAPI example with WebSocket streaming (token-by-token to the browser) and mid-task injection:
 
 ```python
 import asyncio
@@ -646,8 +883,7 @@ from codepilot import Runtime, EventType
 
 app = FastAPI()
 
-# One runtime per session (in production: store in a session map keyed by session_id)
-runtime = Runtime("agent.yaml", session="file", session_id="web-session")
+runtime = Runtime("agent.yaml", session="file", session_id="web-session", stream=True)
 
 # Bridge between sync hooks and async WebSocket
 _event_queue: asyncio.Queue = asyncio.Queue()
@@ -658,8 +894,9 @@ def _push(event: dict):
     asyncio.get_event_loop().call_soon_threadsafe(_event_queue.put_nowait, event)
 
 
-runtime.hooks.register(EventType.THINK,
-    lambda message, **_: _push({"type": "think", "message": message}))
+# Stream reasoning text token by token
+runtime.hooks.register(EventType.STREAM,
+    lambda text, **_: _push({"type": "stream", "text": text}))
 
 runtime.hooks.register(EventType.TOOL_CALL,
     lambda tool, args, **_: _push({"type": "tool_call", "tool": tool, "args": args}))
@@ -709,7 +946,7 @@ async def stream_events(websocket: WebSocket):
 
 ---
 
-## 14. Full API Surface
+## 21. Full API Surface
 
 ### `Runtime`
 
@@ -719,6 +956,7 @@ Runtime(
     session: str = "memory",      # "memory" | "file"
     session_id: str = None,       # defaults to agent name, slugified
     session_dir: Path = None,     # override ~/.codepilot/sessions/
+    stream: bool = False,         # True = token-by-token streaming
 )
 
 runtime.run(task: str) -> Optional[str]
@@ -742,18 +980,67 @@ runtime.hooks              # HookSystem — register/emit events manually
 runtime.registry           # ToolRegistry — inspect registered tools
 ```
 
+### Hook decorators
+
+```python
+from codepilot import (
+    on_stream,                  # STREAM — pre-execution reasoning text chunk
+    on_tool_call,               # TOOL_CALL — before any tool executes
+    on_tool_result,             # TOOL_RESULT — after any tool returns
+    on_ask_user,                # ASK_USER — agent called ask_user()
+    on_finish,                  # FINISH — agent called done()
+    on_permission_request,      # PERMISSION_REQUEST — awaiting approval
+    on_user_message_queued,     # USER_MESSAGE_QUEUED — send_message() called
+    on_user_message_injected,   # USER_MESSAGE_INJECTED — message in context
+)
+```
+
+### Built-in tools
+
+#### `write_file(path, start_line=None, end_line=None, after_line=None, mode='w')`
+
+| `mode` | Behaviour | Limit |
+|---|---|---|
+| `'w'` | Create or overwrite the whole file | 5 per step |
+| `'a'` | Append to end of file | 5 per step (shared with `'w'`) |
+| `'edit'` | Replace lines `start_line` to `end_line` | 1 per step |
+| `'insert'` | Insert after `after_line` (`0` = top of file) | 1 per step |
+
+Content always comes from the next payload block — never pass it as a string argument.
+
+#### `read_file(path, start_line=1, end_line=None)`
+
+Returns file content with 1-indexed line numbers. Multiple calls per step are allowed.
+
+#### `run_command(command, timeout=None, background=False, execution='inline')`
+
+| Parameter | Values | Behaviour |
+|---|---|---|
+| `execution` | `"inline"` (default) | Runs immediately, blocks until done |
+| `execution` | `"parallel"` | Queued; all parallel commands launched concurrently after the block |
+| `background` | `True` + `timeout=N` | Waits up to N seconds; returns partial output if still running (does not kill) |
+| `background` | `True` (no timeout) | Fire and forget; returns PID immediately |
+
+#### `ask_user(question)`
+
+Pauses execution and prompts the user for input. Fires the `ASK_USER` hook.
+
+#### `done(summary)`
+
+Marks the task complete. Fires the `FINISH` hook. `summary` should be a thorough, human-readable description of everything that was accomplished.
+
 ### `FileSession`
 
 ```python
 FileSession(session_id, agent_name, session_dir=None)
 
-.load() -> List[Dict]        # load messages from disk
-.save(messages)              # persist messages to disk (atomic write)
-.reset()                     # delete session file
-.exists() -> bool            # True if file exists on disk
+.load() -> List[Dict]          # load messages from disk
+.save(messages)                # persist messages to disk (atomic write)
+.reset()                       # delete session file
+.exists() -> bool              # True if file exists on disk
 .metadata() -> Optional[Dict]  # session metadata without messages
 .list_sessions() -> List[Dict] # all sessions in the session directory
-.path -> Path                # full path to the session file
+.path -> Path                  # full path to the session file
 .session_id -> str
 ```
 
@@ -781,4 +1068,4 @@ create_session(
 
 ---
 
-*CodePilot — code-native agents, zero JSON, full context.*
+*CodePilot v0.3.0 — code-native agents, zero JSON, full context.*

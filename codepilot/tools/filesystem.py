@@ -223,6 +223,13 @@ class FilesystemTools:
         self.runtime._append_execution(result)
         self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="write_file", result=result)
 
+        # Register with watcher so external changes are detected next step
+        if hasattr(self.runtime, '_watcher') and 'ERROR' not in result:
+            try:
+                self.runtime._watcher.register(self._safe_path(path))
+            except Exception:
+                pass
+
     def read_file(self, path: str, start_line: int = 1, end_line: int = None) -> str:
         """
         Read a file and return its content with 1-indexed line numbers.
@@ -254,4 +261,9 @@ class FilesystemTools:
 
         self.runtime._append_execution(result)
         self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="read_file", result=result)
+
+        # Register with watcher so external changes are detected next step
+        if hasattr(self.runtime, '_watcher'):
+            self.runtime._watcher.register(abs_path)
+
         return "\n".join(numbered)

@@ -10,6 +10,7 @@ from ..core.block_parser import BlockParser, CodeBlock
 from ..core.context import ContextManager
 from ..core.prompt import PromptManager
 from ..core.session import BaseSession, create_session
+from ..core.watcher import WorkspaceWatcher
 from ..engine.hooks import EventType, HookSystem
 from ..engine.provider import get_provider
 from ..tools.filesystem import FilesystemTools
@@ -24,6 +25,7 @@ _ROLE_ASSISTANT = "assistant"
 TAG_USER_INPUT       = "[USER INPUT]"
 TAG_USER_INJECTION   = "[USER MESSAGE]"
 TAG_EXECUTION_RESULT = "[EXECUTION RESULT]"
+TAG_ENV_CHANGE       = "[ENVIRONMENT CHANGE]"
 
 
 class Runtime:
@@ -99,6 +101,11 @@ class Runtime:
         self._register_enabled_tools()
 
         # ------------------------------------------------------------------ #
+        #  Workspace file change detection                                     #
+        # ------------------------------------------------------------------ #
+        self._watcher = WorkspaceWatcher()
+
+        # ------------------------------------------------------------------ #
         #  Session / persistence                                               #
         # ------------------------------------------------------------------ #
         _sid = session_id or self.config.name.lower().replace(" ", "-")
@@ -167,6 +174,15 @@ class Runtime:
             # 1. Drain mid-execution queue before next inference
             self._drain_message_queue()
 
+            # 1.5 Check for external workspace changes since last step
+            changes = self._watcher.check()
+            if changes:
+                self.messages.append({
+                    "role": _ROLE_USER,
+                    "content": changes,
+                })
+                self._watcher.snapshot_all()
+
             # 2. Build system prompt (snapshot refreshed every step)
             system_prompt = self._build_system_prompt()
 
@@ -196,14 +212,9 @@ class Runtime:
             control_block, payload_blocks = BlockParser.split(response_text)
 
             if control_block is None:
-                self._append_execution_result("[No executable code block in response.]")
-                continue
-
-            if control_block.language not in ("python", "py", ""):
-                self._append_execution_result(
-                    f"[Control block language '{control_block.language}' is not Python — ignored.]"
-                )
-                continue
+                # No ```codepilot block → conversational reply (may include
+                # display ```python blocks). Already streamed to user.
+                break
 
             # 5. Execute
             self._payload_queue    = list(payload_blocks)
@@ -220,6 +231,9 @@ class Runtime:
 
             if self._done:
                 break
+
+            # 7. Update watcher snapshots (baseline for next step's check)
+            self._watcher.snapshot_all()
 
         # Persist after every run() call
         self.session.save(self.messages)
@@ -338,17 +352,19 @@ class Runtime:
     #  Streaming inference                                                 #
     # ------------------------------------------------------------------ #
 
+    _CONTROL_FENCE = "```codepilot"
+    _HOLDBACK      = len(_CONTROL_FENCE)   # 12 chars
+
     def _stream_inference(self, system_prompt: str) -> str:
         """
         Stream the LLM response token by token.
 
-        Text before the first code fence is emitted immediately via STREAM
-        hooks for real-time user feedback.  Once the fence is detected, all
-        subsequent tokens are buffered silently.
+        Everything before the ```codepilot fence is emitted immediately via
+        STREAM hooks (including any display ```python blocks).  Once the
+        control fence is detected, all subsequent tokens are buffered silently.
 
-        A 2-character hold-back prevents incorrect emission when the fence
-        marker is split across two streaming chunks (e.g. chunk ends with
-        '`' and next starts with '``').
+        A 12-character hold-back prevents premature emission when the fence
+        marker is split across streaming chunks.
 
         Returns the complete response text for normal pipeline processing.
         """
@@ -368,12 +384,12 @@ class Runtime:
                 continue
 
             accumulated = "".join(chunks)
-            fence_pos   = accumulated.find("```")
+            fence_pos   = accumulated.find(self._CONTROL_FENCE)
 
             if fence_pos == -1:
-                # No fence yet — emit new text but hold back 2 chars so a
-                # fence split across chunks isn't prematurely streamed.
-                safe_end = len(accumulated) - 2
+                # No control fence yet — emit new text but hold back chars
+                # so the fence marker isn't prematurely streamed.
+                safe_end = len(accumulated) - self._HOLDBACK
                 if safe_end > pre_fence_emitted:
                     self.hooks.emit(
                         EventType.STREAM,
@@ -381,7 +397,7 @@ class Runtime:
                     )
                     pre_fence_emitted = safe_end
             else:
-                # Fence detected — emit any remaining pre-fence text
+                # Control fence detected — emit any remaining pre-fence text
                 if fence_pos > pre_fence_emitted:
                     self.hooks.emit(
                         EventType.STREAM,
@@ -389,7 +405,7 @@ class Runtime:
                     )
                 fence_found = True
 
-        # Flush any held-back text if the response was purely prose (no fence)
+        # Flush any held-back text if no control fence was found (chat mode)
         if not fence_found:
             accumulated = "".join(chunks)
             remaining   = accumulated[pre_fence_emitted:]
@@ -399,14 +415,14 @@ class Runtime:
         return "".join(chunks)
 
     def _emit_prefence_text(self, response_text: str):
-        """Emit pre-fence text as a single STREAM event (non-streaming mode)."""
-        fence_pos = response_text.find("```")
+        """Emit pre-control-fence text as a single STREAM event (non-streaming mode)."""
+        fence_pos = response_text.find(self._CONTROL_FENCE)
         if fence_pos > 0:
             pre_text = response_text[:fence_pos].strip()
             if pre_text:
                 self.hooks.emit(EventType.STREAM, text=pre_text)
         elif fence_pos == -1 and response_text.strip():
-            # No code block at all — still emit the text
+            # No control block at all — emit everything (display/chat)
             self.hooks.emit(EventType.STREAM, text=response_text.strip())
 
     # ------------------------------------------------------------------ #

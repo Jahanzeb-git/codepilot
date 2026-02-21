@@ -78,7 +78,7 @@ class ShellTools:
             self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="run_command", result=result)
             return result
 
-        # ---- Background: fire & forget ----
+        # ---- Background ----
         work_dir = self.runtime.config.runtime.work_dir
 
         if background:
@@ -86,7 +86,23 @@ class ShellTools:
                 command, shell=True, cwd=work_dir,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             )
-            result = f"[run_command] Started in background. PID: {proc.pid}"
+            if effective_timeout:
+                try:
+                    stdout, stderr = proc.communicate(timeout=effective_timeout)
+                    result = (
+                        f"[run_command:background] `{command}` finished.\n"
+                        f"STDOUT:\n{stdout}"
+                        f"STDERR:\n{stderr}"
+                        f"Return Code: {proc.returncode}"
+                    )
+                except subprocess.TimeoutExpired:
+                    result = (
+                        f"[run_command:background] `{command}` still running "
+                        f"after {effective_timeout}s (PID: {proc.pid}). "
+                        f"Process continues in background."
+                    )
+            else:
+                result = f"[run_command] Started in background. PID: {proc.pid}"
         else:
             # ---- Inline: run & wait ----
             try:

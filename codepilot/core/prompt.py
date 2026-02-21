@@ -1,5 +1,6 @@
 import os
 import platform
+from datetime import datetime
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 
@@ -48,5 +49,6 @@ class PromptManager:
             tool_definitions=tool_definitions,
             work_dir=work_dir,
             os_info=f"{platform.system()} {platform.release()}",
+            current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             codebase_snapshot=codebase_snapshot,
         )
