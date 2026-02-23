@@ -123,8 +123,8 @@ class Runtime:
         # ------------------------------------------------------------------ #
         self._payload_queue:    List[CodeBlock] = []
         self._execution_buffer: List[str]       = []
-        self._step_write_count: int = 0
-        self._step_edit_count:  int = 0
+        self._step_write_count:  int = 0
+        self._step_edited_files: set[str] = set()
 
         # ------------------------------------------------------------------ #
         #  Control flags                                                       #
@@ -168,7 +168,7 @@ class Runtime:
 
             # Reset per-step state
             self._step_write_count = 0
-            self._step_edit_count  = 0
+            self._step_edited_files = set()
             self._shell_tools.reset_step()
 
             # 1. Drain mid-execution queue before next inference

@@ -39,60 +39,76 @@ class FilesystemTools:
         end_line: int = None,
         after_line: int = None,
         mode: str = "w",
+        edits: list = None,
     ):
         """
         Write or edit a file. Content comes from the next Payload Block —
         never pass content as a string argument. Each write_file() call
         consumes one Payload Block in order.
 
-        mode='w'      — overwrite the entire file (default).
-        mode='a'      — append content to the end of the file.
-        mode='edit'   — replace lines start_line..end_line (1-indexed, inclusive).
-                        Always read_file first. One edit per step only.
-        mode='insert' — insert after after_line without removing anything.
-                        Use after_line=0 for top of file. One insert per step only.
+        mode='w'          — overwrite the entire file (default). Example: write_file("file.txt", mode="w")
+        mode='a'          — append content to the end of the file. Example: write_file("file.txt", mode="a")
+        mode='edit'       — replace lines start_line..end_line (1-indexed, inclusive). Example: write_file("file.txt", mode="edit", start_line=1, end_line=5)
+        mode='insert'     — insert after after_line without removing anything. Example: write_file("file.txt", mode="insert", after_line=5)
+        mode='multi_edit' — pass edits=[(start, end), (start, end)]. Safe for many edits. Each tuple have (start_line, end_line) in a list. Provide one payload block for each. Example: write_file("file.txt", mode="multi_edit", edits=[(1, 5), (10, 15)])
 
-        Up to 5 file writes (mode='w'/'a') are allowed per step.
-        Edits and inserts: one per step to prevent line-number drift.
+        Up to 5 file writes (mode='w'/'a') are allowed per step (you can call write_file multiple times in a single agentic step if each call is for a different file).
+        Edits: one per file per step to prevent line-number drift.
         """
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="write_file",
             args={
                 "path": path, "mode": mode,
                 "start_line": start_line, "end_line": end_line,
-                "after_line": after_line,
+                "after_line": after_line, "edits": edits,
             },
         )
 
         # ------------------------------------------------------------------ #
-        #  ALWAYS consume the payload block first to maintain ordering for    #
-        #  multi-file writes. If we return early (guard, error), the payload  #
-        #  for THIS call is still consumed so the next write_file() gets the  #
-        #  correct payload.                                                    #
+        #  ALWAYS consume the payload block(s) first to maintain ordering     #
         # ------------------------------------------------------------------ #
-        payload: Optional[CodeBlock] = self.runtime.pop_next_payload_block()
-        if payload is None:
-            result = (
-                f"[write_file] ERROR: No Payload Block found for '{path}'. "
-                "Provide a fenced code block for each write_file() call."
-            )
-            self.runtime._append_execution(result)
-            self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="write_file", result=result)
-            return
-
-        # ------------------------------------------------------------------ #
-        #  Step-level guards                                                   #
-        # ------------------------------------------------------------------ #
-        if mode in ("edit", "insert"):
-            if self.runtime._step_edit_count > 0:
+        payloads: list[CodeBlock] = []
+        if mode == "multi_edit":
+            if not edits:
+                result = "[write_file] ERROR: mode='multi_edit' requires the 'edits' parameter."
+                self.runtime._append_execution(result)
+                self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="write_file", result=result)
+                return
+            for _ in edits:
+                p = self.runtime.pop_next_payload_block()
+                if p is None:
+                    result = f"[write_file] ERROR: Not enough Payload Blocks for {len(edits)} edits."
+                    self.runtime._append_execution(result)
+                    self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="write_file", result=result)
+                    return
+                payloads.append(p)
+        else:
+            p = self.runtime.pop_next_payload_block()
+            if p is None:
                 result = (
-                    f"[write_file] ERROR: Only one edit/insert per step is allowed. "
-                    f"Skipped '{path}'. Use a separate step for additional edits."
+                    f"[write_file] ERROR: No Payload Block found for '{path}'. "
+                    "Provide a fenced code block for each write_file() call."
                 )
                 self.runtime._append_execution(result)
                 self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="write_file", result=result)
                 return
-            self.runtime._step_edit_count += 1
+            payloads.append(p)
+
+        # ------------------------------------------------------------------ #
+        #  Step-level guards                                                   #
+        # ------------------------------------------------------------------ #
+        if mode in ("edit", "insert", "multi_edit"):
+            edited_files = self.runtime._step_edited_files
+            if path in edited_files:
+                result = (
+                    f"[write_file] ERROR: Only one edit/insert per FILE per step. "
+                    f"'{path}' was already edited this step. Use a separate step."
+                )
+                self.runtime._append_execution(result)
+                self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="write_file", result=result)
+                return
+            edited_files.add(path)
+
         else:
             if self.runtime._step_write_count >= 5:
                 result = (
@@ -128,16 +144,46 @@ class FilesystemTools:
         #  and which failed.                                                   #
         # ------------------------------------------------------------------ #
         try:
-            new_content = payload.content
+            new_content = payloads[0].content if payloads else ""
             abs_path    = self._safe_path(path)
             parent      = os.path.dirname(abs_path)
             if parent:
                 os.makedirs(parent, exist_ok=True)
 
             # -------------------------------------------------------------- #
+            #  mode='multi_edit'                                               #
+            # -------------------------------------------------------------- #
+            if mode == "multi_edit":
+                if not os.path.isfile(abs_path):
+                    raise FileNotFoundError(f"Cannot edit '{path}': file does not exist.")
+
+                with open(abs_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+
+                # Pair edits with payloads, sort by start_line DESCENDING 
+                # (bottom-to-top) so earlier line numbers don't shift!
+                operations = list(zip(edits, payloads))
+                operations.sort(key=lambda op: op[0][0], reverse=True)
+                
+                applied = 0
+                for (s_line, e_line), block in operations:
+                    s_idx = max(0, s_line - 1)
+                    e_idx = min(len(lines), e_line)
+                    content = block.content
+                    if content and not content.endswith("\n"):
+                        content += "\n"
+                    lines = lines[:s_idx] + [content] + lines[e_idx:]
+                    applied += 1
+
+                with open(abs_path, "w", encoding="utf-8") as f:
+                    f.writelines(lines)
+                
+                result = f"[write_file] '{path}' multi-edited: applied {applied} block replacements."
+
+            # -------------------------------------------------------------- #
             #  mode='w'                                                        #
             # -------------------------------------------------------------- #
-            if mode == "w":
+            elif mode == "w":
                 with open(abs_path, "w", encoding="utf-8") as f:
                     f.write(new_content)
                 result = f"[write_file] '{path}' written ({len(new_content)} bytes)."

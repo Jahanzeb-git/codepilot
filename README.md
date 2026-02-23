@@ -997,14 +997,15 @@ from codepilot import (
 
 ### Built-in tools
 
-#### `write_file(path, start_line=None, end_line=None, after_line=None, mode='w')`
+#### `write_file(path, start_line=None, end_line=None, after_line=None, mode='w', edits=None)`
 
 | `mode` | Behaviour | Limit |
 |---|---|---|
 | `'w'` | Create or overwrite the whole file | 5 per step |
 | `'a'` | Append to end of file | 5 per step (shared with `'w'`) |
-| `'edit'` | Replace lines `start_line` to `end_line` | 1 per step |
-| `'insert'` | Insert after `after_line` (`0` = top of file) | 1 per step |
+| `'edit'` | Replace lines `start_line` to `end_line` | 1 per file per step |
+| `'insert'` | Insert after `after_line` (`0` = top of file) | 1 per file per step |
+| `'multi_edit'` | Provide `edits=[(s1, e1), (s2, e2)]`. Bottom-up replacement. | 1 per file per step |
 
 Content always comes from the next payload block — never pass it as a string argument.
 
