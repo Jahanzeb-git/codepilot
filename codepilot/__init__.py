@@ -32,7 +32,7 @@ Observable hooks
     runtime.run("Refactor the database module.")
 """
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 __author__  = "CodePilot"
 
 # Core entry point
