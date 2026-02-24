@@ -55,12 +55,30 @@ class FilesystemTools:
         Up to 5 file writes (mode='w'/'a') are allowed per step (you can call write_file multiple times in a single agentic step if each call is for a different file).
         Edits: one per file per step to prevent line-number drift.
         """
+        ui_status = ""
+        if mode == "w":
+            ui_status = f"Creating a file {path}..."
+        elif mode == "a":
+            ui_status = f"Appending to a file {path}..."
+        elif mode == "edit":
+            ui_status = f"Editing a file {path}: L{start_line}-{end_line}"
+        elif mode == "insert":
+            ui_status = f"Inserting into a file {path}: L{after_line}"
+        elif mode == "multi_edit":
+            if edits:
+                min_line = min(s for s, e in edits)
+                max_line = max(e for s, e in edits)
+                ui_status = f"Refactoring a file {path}: L{min_line}-{max_line}"
+            else:
+                ui_status = f"Refactoring a file {path}..."
+
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="write_file",
             args={
                 "path": path, "mode": mode,
                 "start_line": start_line, "end_line": end_line,
                 "after_line": after_line, "edits": edits,
+                "ui_status": ui_status,
             },
         )
 
@@ -284,9 +302,10 @@ class FilesystemTools:
         to confirm exact line numbers before touching anything.
         Multiple read_file() calls per step are allowed.
         """
+        ui_status = f"Reading a file {path}: L{start_line}-{end_line}" if end_line else f"Reading a file {path}..."
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="read_file",
-            args={"path": path, "start_line": start_line, "end_line": end_line},
+            args={"path": path, "start_line": start_line, "end_line": end_line, "ui_status": ui_status},
         )
         abs_path = self._safe_path(path)
         if not os.path.isfile(abs_path):
