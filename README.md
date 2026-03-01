@@ -2,7 +2,7 @@
 
 **CodePilot** is a code-native agentic framework for Python. The LLM writes executable code to act — no JSON schemas, no function-calling APIs, no tool wrappers. This document covers every feature with working code examples.
 
-**Version:** `0.3.0`
+**Version:** `0.4.0`
 
 > **Deployment note:** The shell tools (`execute`, `read_output`, `send_input`, `send_signal`, `kill_shell`) require a **POSIX system** (Linux/macOS). They rely on `pexpect` and will not work on Windows. Deploy your agent in a Linux container.
 
