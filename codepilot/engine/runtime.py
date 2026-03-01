@@ -16,7 +16,7 @@ from ..engine.provider import get_provider
 from ..tools.filesystem import FilesystemTools
 from ..tools.interaction import InteractionTools
 from ..tools.registry import ToolRegistry
-from ..tools.shell import ShellTools
+from ..tools.shell import ShellManager
 from ..tools.semantic import SemanticTools
 
 
@@ -95,12 +95,15 @@ class Runtime:
         self.prompt_manager  = PromptManager()
 
         self._fs_tools          = FilesystemTools(self)
-        self._shell_tools       = ShellTools(self)
+        self._shell_manager     = ShellManager(self)
         self._interaction_tools = InteractionTools(self)
         self._semantic_tools    = SemanticTools(self)
 
         self.registry = ToolRegistry()
         self._register_enabled_tools()
+
+        # Start default shell session (POSIX only)
+        self._shell_manager.start_default_shell()
 
         # ------------------------------------------------------------------ #
         #  Workspace file change detection                                     #
@@ -169,9 +172,8 @@ class Runtime:
             self.hooks.emit(EventType.STEP, step=step, max_steps=self.config.runtime.max_steps)
 
             # Reset per-step state
-            self._step_write_count = 0 
+            self._step_write_count = 0
             self._step_edited_files = set()
-            self._shell_tools.reset_step()
 
             # 1. Drain mid-execution queue before next inference
             self._drain_message_queue()
@@ -223,8 +225,7 @@ class Runtime:
             self._execution_buffer = []
             self._execute(control_block.content)
 
-            # 6. Flush parallel commands (if any were queued)
-            self._shell_tools.flush_parallel()
+            # 6. (reserved — no longer used)
 
             execution_result = "\n\n".join(self._execution_buffer).strip()
             if not execution_result:
@@ -239,6 +240,9 @@ class Runtime:
 
         # Persist after every run() call
         self.session.save(self.messages)
+
+        # Cleanup shell sessions
+        self._shell_manager.cleanup_all()
 
         if not self._done and not self._abort:
             if step >= self.config.runtime.max_steps:
@@ -325,12 +329,18 @@ class Runtime:
         enabled = (
             {tc.name for tc in self.config.tools if tc.enabled}
             if self.config.tools
-            else {"write_file", "read_file", "run_command", "ask_user", "semantic_search"}
+            else {"write_file", "read_file", "execute", "read_output",
+                  "send_input", "send_signal", "kill_shell",
+                  "ask_user", "semantic_search"}
         )
-        if "write_file"  in enabled: self.registry.register("write_file",  self._fs_tools.write_file)
-        if "read_file"   in enabled: self.registry.register("read_file",   self._fs_tools.read_file)
-        if "run_command" in enabled: self.registry.register("run_command", self._shell_tools.run_command)
-        if "ask_user"    in enabled: self.registry.register("ask_user",    self._interaction_tools.ask_user)
+        if "write_file"     in enabled: self.registry.register("write_file",     self._fs_tools.write_file)
+        if "read_file"      in enabled: self.registry.register("read_file",      self._fs_tools.read_file)
+        if "execute"        in enabled: self.registry.register("execute",        self._shell_manager.execute)
+        if "read_output"    in enabled: self.registry.register("read_output",    self._shell_manager.read_output)
+        if "send_input"     in enabled: self.registry.register("send_input",     self._shell_manager.send_input)
+        if "send_signal"    in enabled: self.registry.register("send_signal",    self._shell_manager.send_signal)
+        if "kill_shell"     in enabled: self.registry.register("kill_shell",     self._shell_manager.kill_shell)
+        if "ask_user"       in enabled: self.registry.register("ask_user",       self._interaction_tools.ask_user)
         if "semantic_search" in enabled: self.registry.register("semantic_search", self._semantic_tools.semantic_search)
         self.registry.register("done", self._tool_done)
 
@@ -354,6 +364,7 @@ class Runtime:
             tool_definitions=self.registry.get_definitions(),
             work_dir=self.config.runtime.work_dir,
             codebase_snapshot=self.context_manager.get_formatted_snapshot(),
+            shell_info=self._shell_manager.get_prompt_info(),
         )
 
     # ------------------------------------------------------------------ #

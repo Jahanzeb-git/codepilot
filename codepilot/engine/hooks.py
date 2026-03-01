@@ -51,9 +51,9 @@ class HookSystem:
         print(text, end="", flush=True)
 
     @staticmethod
-    def _default_tool_call(tool: str, args: dict, **_):
-        arg_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
-        print(f"\n⚙️  [{tool}]({arg_str})")
+    def _default_tool_call(tool: str, args: dict, label: str = "", **_):
+        display = label if label else ", ".join(f"{k}={v!r}" for k, v in args.items())
+        print(f"\n⚙️  [{tool}] {display}")
 
     @staticmethod
     def _default_tool_result(tool: str, result: str, **_):

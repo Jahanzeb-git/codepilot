@@ -4,6 +4,8 @@
 
 **Version:** `0.3.0`
 
+> **Deployment note:** The shell tools (`execute`, `read_output`, `send_input`, `send_signal`, `kill_shell`) require a **POSIX system** (Linux/macOS). They rely on `pexpect` and will not work on Windows. Deploy your agent in a Linux container.
+
 ---
 
 ## Installation
@@ -37,15 +39,14 @@ export TOGETHER_API_KEY="..."
 10. [Permission gating](#10-permission-gating)
 11. [Mid-task message injection](#11-mid-task-message-injection)
 12. [Multi-operation steps](#12-multi-operation-steps)
-13. [Parallel command execution](#13-parallel-command-execution)
-14. [Background commands with timeout](#14-background-commands-with-timeout)
-15. [Workspace change detection](#15-workspace-change-detection)
-16. [Chat mode](#16-chat-mode)
-17. [Custom tools](#17-custom-tools)
-18. [Aborting the agent](#18-aborting-the-agent)
-19. [Building a CLI tool](#19-building-a-cli-tool)
-20. [Building a web server integration](#20-building-a-web-server-integration)
-21. [Full API surface](#21-full-api-surface)
+13. [Shell tools](#13-shell-tools)
+14. [Workspace change detection](#14-workspace-change-detection)
+15. [Chat mode](#15-chat-mode)
+16. [Custom tools](#16-custom-tools)
+17. [Aborting the agent](#17-aborting-the-agent)
+18. [Building a CLI tool](#18-building-a-cli-tool)
+19. [Building a web server integration](#19-building-a-web-server-integration)
+20. [Full API surface](#20-full-api-surface)
 
 ---
 
@@ -70,9 +71,8 @@ The ` ```codepilot ` fence is the **only** block the runtime executes. Regular `
 Alright, I'll create the file and verify it runs.
 
 ```codepilot
-# Write the module, then immediately verify it imports
+# Write the module, then verify it runs
 write_file("utils.py")
-run_command("python -c 'import utils; print(utils.slugify(\"Hello World\"))'")
 ```
 
 ```python
@@ -136,13 +136,28 @@ agent:
     - name: "read_file"
       enabled: true
 
-    - name: "run_command"
+    - name: "execute"
       enabled: true
       config:
-        timeout: 60                 # default timeout in seconds
         require_permission: true    # true = ask user before every shell command
+        max_output_chars: 10000     # truncate long command output
+
+    - name: "read_output"
+      enabled: true
+
+    - name: "send_input"
+      enabled: true
+
+    - name: "send_signal"
+      enabled: true
+
+    - name: "kill_shell"
+      enabled: true
 
     - name: "ask_user"
+      enabled: true
+
+    - name: "semantic_search"
       enabled: true
 ```
 
@@ -249,7 +264,7 @@ runtime = Runtime("agent.yaml", session="memory", session_id="my-session")
 
 ### File-backed
 
-History is serialised to `~/.codepilot/sessions/<session_id>.json` after every `run()`. On Windows: `%USERPROFILE%\.codepilot\sessions\`. Directory is created automatically.
+History is serialised to `~/.codepilot/sessions/<session_id>.json` after every `run()`. Directory is created automatically.
 
 ```python
 runtime = Runtime("agent.yaml", session="file")                     # id = agent name
@@ -366,9 +381,13 @@ def handle_stream(text: str, **_):
 
 
 @on_tool_call(runtime)
-def handle_tool_call(tool: str, args: dict, **_):
-    """Fires before every tool executes."""
-    print(f"\n⚙️  [{tool}] {args}")
+def handle_tool_call(tool: str, args: dict, label: str = "", **_):
+    """Fires before every tool executes.
+    `label` is a human-readable description (e.g. "Running `pytest tests/`").
+    Falls back to args dump if label is not set.
+    """
+    display = label if label else str(args)
+    print(f"\n⚙️  [{tool}] {display}")
 
 
 @on_tool_result(runtime)
@@ -420,7 +439,7 @@ runtime.hooks.register(EventType.FINISH,  lambda summary, **_: save_to_db(summar
 | `START` | `task` | `run()` is called |
 | `STEP` | `step`, `max_steps` | Each agentic step begins |
 | `STREAM` | `text` | Chunk of pre-execution reasoning text |
-| `TOOL_CALL` | `tool`, `args` | Before any tool executes |
+| `TOOL_CALL` | `tool`, `args`, `label` | Before any tool executes |
 | `TOOL_RESULT` | `tool`, `result` | After any tool returns |
 | `ASK_USER` | `question` | Agent calls `ask_user()` |
 | `PERMISSION_REQUEST` | `tool`, `description` | Tool with `require_permission: true` fires |
@@ -436,7 +455,7 @@ runtime.hooks.register(EventType.FINISH,  lambda summary, **_: save_to_db(summar
 
 ## 10. Permission Gating
 
-Any tool with `require_permission: true` fires a `PERMISSION_REQUEST` hook before executing. Return `True` to approve, `False` to deny. Falls back to a CLI `y/N` prompt if no handler is registered.
+The `execute` tool (and optionally `write_file`) supports `require_permission: true` in the AgentFile. When enabled, a `PERMISSION_REQUEST` hook fires before the tool runs. Return `True` to approve, `False` to deny. Falls back to a CLI `y/N` prompt if no handler is registered.
 
 ```python
 from codepilot import Runtime, on_permission_request
@@ -447,7 +466,7 @@ runtime = Runtime("agent.yaml")
 @on_permission_request(runtime)
 def gate(tool: str, description: str, **_) -> bool:
     """
-    tool        — "write_file" | "run_command"
+    tool        — "write_file" | "execute"
     description — human-readable description of the specific operation
     Return True to approve, False to deny.
     """
@@ -465,7 +484,7 @@ runtime.run("Deploy the application")
 def auto_gate(tool: str, description: str, **_) -> bool:
     if tool == "read_file":
         return True
-    if tool == "run_command" and "pytest" in description:
+    if tool == "execute" and "pytest" in description:
         return True
     return False   # deny everything else
 ```
@@ -547,7 +566,24 @@ def slugify(text: str) -> str:
 ```
 ````
 
-**Limitation:** Only **one edit** (`mode='edit'` or `mode='insert'`) is allowed per step to avoid line-number conflicts. After an edit, the file's line numbers shift and subsequent edits would target wrong lines.
+### Multi-edit (multiple non-contiguous edits in one file)
+
+Use `mode='multi_edit'` with `edits=[(start1, end1), (start2, end2)]` to fix multiple ranges in one file without line-number drift. The runtime applies edits bottom-to-top automatically. One Payload Block per tuple, in order.
+
+```
+```codepilot
+# Fix L42-48 (error handling) and L55 (regex) in one step — no drift
+write_file("routes/profile.py", mode="multi_edit", edits=[(42, 48), (55, 55)])
+```
+
+```python
+# ... replacement for L42-48 ...
+```
+
+```python
+# ... replacement for L55 ...
+```
+```
 
 ### Multiple file reads
 
@@ -562,56 +598,93 @@ read_file("tests/test_config.py")
 
 ---
 
-## 13. Parallel Command Execution
+## 13. Shell Tools
 
-Run independent shell commands simultaneously using `execution="parallel"`. Parallel commands are queued during the control block and launched concurrently after the block finishes executing.
+The agent has a **persistent, non-blocking shell session system** powered by pexpect. Commands never hang the agent — output is captured up to a timeout and returned immediately.
 
-```python
-# LLM control block — these run at the same time:
-run_command("pytest tests/test_config.py -v", execution="parallel")
-run_command("pytest tests/test_utils.py -v", execution="parallel")
-run_command("mypy src/ --strict", execution="parallel")
-```
+> **Linux/macOS only.** pexpect requires POSIX. Deploy in a Linux container.
 
-The default is `execution="inline"` which runs commands sequentially, one after another.
+A default shell session (`"main"`) starts automatically when the Runtime is created. Its PID and status are shown in the agent's system prompt every step.
 
-```python
-# Sequential — waits for each before starting the next:
-run_command("pip install -r requirements.txt")           # inline (default)
-run_command("python -m pytest tests/ -v")               # inline
-```
+### execute — run a command
 
-Mix inline and parallel in the same step — inline commands run first (sequentially), parallel commands run after all inline commands finish:
+Runs a command, waits up to `timeout` seconds, returns whatever output is available.
 
 ```python
-run_command("pip install -r requirements.txt")          # inline — runs first
-run_command("pytest tests/unit/ -v", execution="parallel")    # parallel batch
-run_command("pytest tests/integration/ -v", execution="parallel")
+# LLM control block:
+
+# status: completed → command finished within timeout (includes return_code)
+execute("main", "pytest tests/ -v", 30)
+
+# status: running → timeout hit, process still alive
+execute("main", "pip install -r requirements.txt", 10)
+
+# Spin up a server on its own shell, in one step
+execute("server", "uvicorn app.main:app --host 0.0.0.0 --port 8000", 4, new_shell=True)
 ```
+
+### read_output — wait for more output
+
+Called after `execute` returned `status: running`. Waits up to `timeout` seconds for new output.
+
+- **New output available:** returns only the new delta (non-overlapping with previous output).
+- **No new output (command already done):** returns the complete accumulated output and collapses previous outputs in the context to save tokens.
+
+```python
+# LLM control block:
+read_output("main", 30)   # wait up to 30 more seconds
+```
+
+### send_input — interact with prompts
+
+Sends text to an interactive command waiting for user input.
+
+```python
+# LLM control block:
+send_input("main", "yes\n", 5)    # confirm a CLI prompt
+send_input("main", "admin\n", 5)  # enter a username
+```
+
+### send_signal — interrupt or stop
+
+```python
+# Interrupt foreground process (Ctrl+C) — shell survives
+send_signal("server", "SIGINT")
+
+# Terminate or kill the shell process entirely
+send_signal("server", "SIGTERM")
+send_signal("server", "SIGKILL")
+```
+
+### kill_shell — destroy a session
+
+```python
+kill_shell("server")   # terminates the process, removes the session
+```
+
+### Full example: server + test
+
+```python
+# Step 1 — LLM control block:
+# Start server on its own shell, verify startup logs within 4s
+execute("server", "uvicorn app.main:app --port 8000", 4, new_shell=True)
+
+# Step 2 — LLM control block (after seeing server startup logs):
+# Run tests against the live server from main shell
+execute("main", "pytest tests/test_api.py -v", 30)
+
+# Step 3 — LLM control block (after tests pass):
+# Shut server down cleanly
+send_signal("server", "SIGINT")
+```
+
+### Context deduplication
+
+When `read_output()` returns in full-mode (the command is already done, no new data), it automatically **removes the earlier outputs** for that command from the conversation history and returns one complete, consolidated result. This keeps the agent context lean on long-running tasks.
 
 ---
 
-## 14. Background Commands with Timeout
-
-Use `background=True` to run a long-running process without blocking the entire step. Add a `timeout` to have the runtime wait for completion — if the process finishes within the timeout, you get the full output; if it's still running, you get its PID and execution continues.
-
-```python
-# Wait up to 30 seconds for the dev server to start, then move on.
-# If it finishes in time → full output returned.
-# If still running → "still running, PID: 1234" — process stays alive.
-run_command("uvicorn main:app --reload", background=True, timeout=30)
-```
-
-```python
-# Fire and forget — no wait, just a PID back immediately.
-run_command("npm run build:watch", background=True)
-```
-
-This eliminates the common pattern where agents loop and waste inference steps polling for a background process to complete.
-
----
-
-## 15. Workspace Change Detection
+## 14. Workspace Change Detection
 
 The runtime automatically detects when **you** modify files in the workspace between agent steps. If you edit a file while the agent is working, it will be notified at the start of the next step with exact line numbers of what changed.
 
@@ -639,7 +712,7 @@ No configuration is required — this is always on.
 
 ---
 
-## 16. Chat Mode
+## 15. Chat Mode
 
 The agent can respond to questions and explanations without executing any code. If the LLM produces a response with no ` ```codepilot ` block, the runtime treats it as a conversational reply: the response is fully streamed to the user and the loop exits cleanly.
 
@@ -670,14 +743,14 @@ The agent freely uses ` ```python ` blocks to display code examples in its expla
 The agent's system prompt is refreshed every step with the current timestamp:
 
 ```
-Directory: `./workspace` — OS: Windows 10 — Time: `2026-02-21 16:30:12`
+Directory: `./workspace` — OS: Linux 5.15 — Time: `2026-03-01 17:00:00`
 ```
 
 This allows the agent to reason about time-sensitive tasks, deadlines, log timestamps, and how much time has elapsed between steps.
 
 ---
 
-## 17. Custom Tools
+## 16. Custom Tools
 
 Register any callable as a tool. Its docstring is automatically pulled into the system prompt so the agent knows when and how to use it.
 
@@ -718,23 +791,24 @@ runtime.run("Research the latest SQLAlchemy 2.0 async API and implement a connec
 ### Overriding a built-in tool
 
 ```python
-def safe_run_command(command: str, timeout: int = None, background: bool = False, execution: str = "inline"):
+def safe_execute(session_id: str, command: str, timeout: int = 10, new_shell: bool = False):
     """
     Run a shell command. Restricted to read-only operations in this environment.
     Never import subprocess or os directly — always use this tool.
     """
-    if any(cmd in command for cmd in ["rm", "del", "format", ">", "sudo"]):
-        runtime._append_execution(f"[run_command] Blocked: '{command}' is not permitted.")
+    blocked = ["rm", "del", "format", ">", "sudo", "pip install"]
+    if any(cmd in command for cmd in blocked):
+        runtime._append_execution(f"[execute] Blocked: '{command}' is not permitted.")
         return
-    runtime._shell_tools.run_command(command, timeout=timeout, background=background, execution=execution)
+    runtime._shell_manager.execute(session_id, command, timeout, new_shell)
 
 
-runtime.register_tool("run_command", safe_run_command, replace=True)
+runtime.register_tool("execute", safe_execute, replace=True)
 ```
 
 ---
 
-## 18. Aborting the Agent
+## 17. Aborting the Agent
 
 ```python
 import threading
@@ -754,7 +828,7 @@ agent_thread.join()
 
 ---
 
-## 19. Building a CLI Tool
+## 18. Building a CLI Tool
 
 ### Simple conversational CLI
 
@@ -871,7 +945,7 @@ python cli.py --list                       # show all saved sessions
 
 ---
 
-## 20. Building a Web Server Integration
+## 19. Building a Web Server Integration
 
 FastAPI example with WebSocket streaming (token-by-token to the browser) and mid-task injection:
 
@@ -898,8 +972,12 @@ def _push(event: dict):
 runtime.hooks.register(EventType.STREAM,
     lambda text, **_: _push({"type": "stream", "text": text}))
 
+# Tool activity — label gives a clean human-readable status string
 runtime.hooks.register(EventType.TOOL_CALL,
-    lambda tool, args, **_: _push({"type": "tool_call", "tool": tool, "args": args}))
+    lambda tool, args, label="", **_: _push({
+        "type": "tool_call", "tool": tool,
+        "label": label or tool,           # e.g. "Running `pytest tests/`"
+    }))
 
 runtime.hooks.register(EventType.TOOL_RESULT,
     lambda tool, result, **_: _push({"type": "tool_result", "tool": tool, "result": result[:300]}))
@@ -946,7 +1024,7 @@ async def stream_events(websocket: WebSocket):
 
 ---
 
-## 21. Full API Surface
+## 20. Full API Surface
 
 ### `Runtime`
 
@@ -1005,7 +1083,7 @@ from codepilot import (
 | `'a'` | Append to end of file | 5 per step (shared with `'w'`) |
 | `'edit'` | Replace lines `start_line` to `end_line` | 1 per file per step |
 | `'insert'` | Insert after `after_line` (`0` = top of file) | 1 per file per step |
-| `'multi_edit'` | Provide `edits=[(s1, e1), (s2, e2)]`. Bottom-up replacement. | 1 per file per step |
+| `'multi_edit'` | `edits=[(s1,e1), (s2,e2)]`. Runtime applies bottom-to-top. | 1 per file per step |
 
 Content always comes from the next payload block — never pass it as a string argument.
 
@@ -1013,14 +1091,34 @@ Content always comes from the next payload block — never pass it as a string a
 
 Returns file content with 1-indexed line numbers. Multiple calls per step are allowed.
 
-#### `run_command(command, timeout=None, background=False, execution='inline')`
+#### `execute(session_id, command, timeout=10, new_shell=False)`
 
-| Parameter | Values | Behaviour |
-|---|---|---|
-| `execution` | `"inline"` (default) | Runs immediately, blocks until done |
-| `execution` | `"parallel"` | Queued; all parallel commands launched concurrently after the block |
-| `background` | `True` + `timeout=N` | Waits up to N seconds; returns partial output if still running (does not kill) |
-| `background` | `True` (no timeout) | Fire and forget; returns PID immediately |
+Runs a command on a persistent shell session. Returns captured output up to `timeout` seconds.
+
+| Parameter | Description |
+|---|---|
+| `session_id` | Shell session to use. `"main"` always exists. |
+| `command` | Shell command string. |
+| `timeout` | Seconds to wait. Output captured on timeout. |
+| `new_shell` | `True` = create and use a new shell in one step. |
+
+Result includes `status: completed` (done, has `return_code`) or `status: running` (timed out, process alive).
+
+#### `read_output(session_id, timeout=5)`
+
+Read new output from the latest command. Returns delta (new content only) or full accumulated output if the command is already done. Full-mode collapses previous outputs from context automatically.
+
+#### `send_input(session_id, text, timeout=5)`
+
+Send text to an interactive command waiting for input. Returns new output after sending.
+
+#### `send_signal(session_id, signal='SIGINT')`
+
+Send `SIGINT` (Ctrl+C, shell survives), `SIGTERM`, or `SIGKILL` to the shell session.
+
+#### `kill_shell(session_id)`
+
+Terminate and remove a shell session entirely.
 
 #### `ask_user(question)`
 
