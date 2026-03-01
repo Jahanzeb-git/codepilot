@@ -4,7 +4,7 @@ import yaml
 import os
 from typing import Dict, Any
 
-
+ 
 class ModelConfig(BaseModel):
     provider: str = Field(..., description="LLM provider: 'anthropic', 'openai', or 'together'")
     name: str = Field(..., description="Model identifier, e.g. 'claude-3-5-sonnet-20241022'")
@@ -106,3 +106,4 @@ class AgentConfig(BaseModel):
 
 # Backward-compatible alias used in existing code
 AgentFile = AgentConfig
+

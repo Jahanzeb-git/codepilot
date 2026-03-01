@@ -17,6 +17,7 @@ from ..tools.filesystem import FilesystemTools
 from ..tools.interaction import InteractionTools
 from ..tools.registry import ToolRegistry
 from ..tools.shell import ShellTools
+from ..tools.semantic import SemanticTools
 
 
 _ROLE_USER      = "user"
@@ -96,6 +97,7 @@ class Runtime:
         self._fs_tools          = FilesystemTools(self)
         self._shell_tools       = ShellTools(self)
         self._interaction_tools = InteractionTools(self)
+        self._semantic_tools    = SemanticTools(self)
 
         self.registry = ToolRegistry()
         self._register_enabled_tools()
@@ -167,7 +169,7 @@ class Runtime:
             self.hooks.emit(EventType.STEP, step=step, max_steps=self.config.runtime.max_steps)
 
             # Reset per-step state
-            self._step_write_count = 0
+            self._step_write_count = 0 
             self._step_edited_files = set()
             self._shell_tools.reset_step()
 
@@ -239,7 +241,12 @@ class Runtime:
         self.session.save(self.messages)
 
         if not self._done and not self._abort:
-            self.hooks.emit(EventType.MAX_STEPS)
+            if step >= self.config.runtime.max_steps:
+                self.hooks.emit(EventType.MAX_STEPS)
+            else:
+                # Stream was naturally closed due to a conversational reply rather than a done() block.
+                # Emit a FINISH event so the UI gracefully restores its state.
+                self.hooks.emit(EventType.FINISH, summary="Agent replied. Standing by for next task.")
 
         return self._done_summary if self._done else None
 
@@ -318,12 +325,13 @@ class Runtime:
         enabled = (
             {tc.name for tc in self.config.tools if tc.enabled}
             if self.config.tools
-            else {"write_file", "read_file", "run_command", "ask_user"}
+            else {"write_file", "read_file", "run_command", "ask_user", "semantic_search"}
         )
         if "write_file"  in enabled: self.registry.register("write_file",  self._fs_tools.write_file)
         if "read_file"   in enabled: self.registry.register("read_file",   self._fs_tools.read_file)
         if "run_command" in enabled: self.registry.register("run_command", self._shell_tools.run_command)
         if "ask_user"    in enabled: self.registry.register("ask_user",    self._interaction_tools.ask_user)
+        if "semantic_search" in enabled: self.registry.register("semantic_search", self._semantic_tools.semantic_search)
         self.registry.register("done", self._tool_done)
 
     def _tool_done(self, summary: str = "Task complete."):
