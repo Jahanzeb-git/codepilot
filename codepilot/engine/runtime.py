@@ -77,6 +77,7 @@ class Runtime:
         session_id: Optional[str] = None,
         session_dir=None,
         stream: bool = False,
+        db_url: Optional[str] = None,
     ):
         """
         Args:
@@ -121,6 +122,7 @@ class Runtime:
             session_id=_sid,
             agent_name=self.config.name,
             session_dir=session_dir,
+            db_url=db_url,
         )
 
         self.messages: List[Dict[str, str]] = self.session.load()
