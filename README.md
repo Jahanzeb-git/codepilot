@@ -2,13 +2,14 @@
 
 **CodePilot** is a code-native agentic framework for Python. The LLM writes executable code to act — no JSON schemas, no function-calling APIs, no tool wrappers. This document covers every feature with working code examples.
 
-**Version:** `0.4.0`
+**Version:** `0.5.0`
 
 > **Linux only.** Both the shell tools (`execute`, `read_output`, `send_input`, `send_signal`, `kill_shell`) and `semantic_search` require **Linux**. They rely on `pexpect` and `grepai` — deploy your agent in a Linux container.
 >
-> **Docker tip:** Pre-install `grepai` in your image so it's not downloaded on every container start:
+> **Docker tip:** Pre-install `grepai` and `ripgrep` in your image:
 > ```dockerfile
 > RUN curl -sSL https://raw.githubusercontent.com/yoanbernabeu/grepai/main/install.sh | sh
+> RUN apt-get install -y ripgrep
 > ```
 
 ---
@@ -45,13 +46,14 @@ export TOGETHER_API_KEY="..."
 11. [Mid-task message injection](#11-mid-task-message-injection)
 12. [Multi-operation steps](#12-multi-operation-steps)
 13. [Shell tools](#13-shell-tools)
-14. [Workspace change detection](#14-workspace-change-detection)
-15. [Chat mode](#15-chat-mode)
-16. [Custom tools](#16-custom-tools)
-17. [Aborting the agent](#17-aborting-the-agent)
-18. [Building a CLI tool](#18-building-a-cli-tool)
-19. [Building a web server integration](#19-building-a-web-server-integration)
-20. [Full API surface](#20-full-api-surface)
+14. [Completion block](#14-completion-block)
+15. [Workspace change detection](#15-workspace-change-detection)
+16. [Chat mode](#16-chat-mode)
+17. [Custom tools](#17-custom-tools)
+18. [Aborting the agent](#18-aborting-the-agent)
+19. [Building a CLI tool](#19-building-a-cli-tool)
+20. [Building a web server integration](#20-building-a-web-server-integration)
+21. [Full API surface](#21-full-api-surface)
 
 ---
 
@@ -61,42 +63,64 @@ CodePilot uses a **code-as-interface** paradigm. Instead of the LLM describing a
 
 Each agent step:
 
-1. **LLM receives** the system prompt + full conversation history
-2. **LLM writes** a natural language reasoning paragraph (streamed to user), then a ` ```codepilot ` block (Python code)
+1. **LLM receives** the system prompt (refreshed every step) + full conversation history
+2. **LLM writes** a natural language reasoning paragraph (streamed to user in real time), then a ` ```codepilot ` block (Python code)
 3. **Runtime executes** the code block in a sandboxed environment with bound tool functions
 4. **Execution result** is appended to conversation history as `[EXECUTION RESULT]`
-5. **Repeat** until the agent calls `done()`, hits `max_steps`, or is aborted
+5. **Repeat** until the agent emits a ` ```completion ` block, hits `max_steps`, or is aborted
 
-### The `codepilot` fence
+### The three block types
 
-The ` ```codepilot ` fence is the **only** block the runtime executes. Regular ` ```python ` blocks are display-only markdown — the agent can freely use them for code examples in explanations without risk of execution.
+**Control Block** (` ```codepilot `) — the only block the runtime executes. Regular ` ```python ` blocks are display-only markdown the agent uses freely in explanations.
 
-**LLM output for an action:**
+**Payload Blocks** (` ```python `, ` ```js `, etc. after a codepilot block) — file content consumed by `write_file()` in order. Never executed.
+
+**Completion Block** (` ```completion `) — natural text that streams directly to the user in real time. Its presence marks the task complete — the agentic loop terminates after this step. Can be combined with the codepilot block and payload blocks in a single agentic step.
+
+### Response shapes
+
+**Action step (more work needed):**
 ````
-Alright, I'll create the file and verify it runs.
+Alright, let me read the file first to get the line numbers.
 
 ```codepilot
-# Write the module, then verify it runs
-write_file("utils.py")
-```
-
-```python
-def slugify(text: str) -> str:
-    return text.lower().replace(" ", "-")
+# Reading before editing — exact line numbers required.
+read_file("routes/profile.py", start_line=35, end_line=65)
 ```
 ````
 
-**LLM output for a chat/explanation (no execution):**
+**Single-step task (action + completion in one step):**
 ````
-Sure! Here's how the `slugify` function works:
+Got it — updating the timeout value.
 
-```python
-# This is a display block — never executed
-def slugify(text: str) -> str:
-    return text.lower().replace(" ", "-")
+```codepilot
+# Simple single-line edit, no read needed — we know the line.
+write_file("config.py", start_line=12, end_line=12, mode="edit")
 ```
 
-Each space is replaced with a hyphen, and the string is lowercased.
+```python
+TIMEOUT = 30
+```
+
+```completion
+Done. Updated TIMEOUT to 30s in config.py on line 12.
+```
+````
+
+**Chat/explanation (no execution, entire response streams):**
+````
+Sure! Here's how the config loader handles missing files:
+
+```python
+# Display block — never executed
+def load(path: str) -> dict:
+    if not os.path.exists(path):
+        return {}   # returns empty dict as default
+    with open(path) as f:
+        return json.load(f)
+```
+
+The fallback is an empty dict, so callers always get a valid dict — no None checks needed.
 ````
 
 ---
@@ -162,6 +186,9 @@ agent:
     - name: "ask_user"
       enabled: true
 
+    - name: "find"
+      enabled: true
+
     - name: "semantic_search"
       enabled: true
       config:
@@ -175,8 +202,8 @@ agent:
         # VoyageAI uses an OpenAI-compatible API — this is the default endpoint
         base_url: "https://api.voyageai.com/v1"
 
-        # Provider name passed to grepai internals (leave as "openai" — it's
-        # just the protocol name, not the vendor).
+        # Provider name passed to grepai internals (leave as "openai" —
+        # it's the protocol name, not the vendor)
         provider: "openai"
 
         # Maximum results returned per search (default: 5)
@@ -206,10 +233,10 @@ from codepilot import Runtime
 
 runtime = Runtime("agent.yaml")
 summary = runtime.run("Create a FastAPI hello-world server in main.py")
-print(summary)  # the string the agent passed to done()
+print(summary)  # the text the agent put in the completion block, or None
 ```
 
-`run()` is **blocking** — it returns when the agent calls `done()`, hits `max_steps`, or is aborted. The return value is the `done()` summary string, or `None` if the loop ended for any other reason.
+`run()` is **blocking** — it returns when the agent emits a completion block, hits `max_steps`, or is aborted. The return value is the completion block text, or `None` if the loop ended for any other reason.
 
 ---
 
@@ -225,7 +252,7 @@ runtime = Runtime("agent.yaml", stream=True)
 
 @on_stream(runtime)
 def handle_stream(text: str, **_):
-    """Fires with each chunk of pre-execution reasoning text."""
+    """Fires with each chunk of streamed text."""
     print(text, end="", flush=True)
 
 
@@ -234,13 +261,19 @@ runtime.run("Refactor the database module to use async SQLAlchemy")
 
 ### What gets streamed
 
-The runtime streams **everything before the `codepilot` block** — this includes the agent's reasoning paragraph and any display ` ```python ` code blocks it uses in explanations. Once the ` ```codepilot ` fence is detected, streaming pauses while the code block is executed.
+The runtime streams in two windows per step:
 
-For chat/question responses (no `codepilot` block), the **entire response** streams to the user.
+1. **Pre-fence text** — everything before the ` ```codepilot ` block. This is the agent's reasoning paragraph and any display ` ```python ` blocks used in explanations. Streams in real time as the LLM generates it.
+
+2. **Completion block** — the ` ```completion ` block content, when the task is done. Streams in real time directly to the user. The loop terminates after this.
+
+Everything between the two windows (the codepilot block, payload blocks) is buffered silently while tools execute.
+
+For **chat/question responses** (no `codepilot` block at all), the **entire response** streams token-by-token and the loop exits cleanly.
 
 ### Non-streaming mode
 
-Without `stream=True`, the full response is emitted as a single `STREAM` event when inference completes. The `on_stream` hook still fires — you see the complete reasoning text at once rather than token-by-token.
+Without `stream=True`, the full response is emitted as a single `STREAM` event when inference completes. The `on_stream` hook still fires — you see the complete text at once rather than token-by-token.
 
 ```python
 runtime = Runtime("agent.yaml")   # stream=False by default
@@ -404,7 +437,7 @@ runtime = Runtime("agent.yaml", stream=True)
 
 @on_stream(runtime)
 def handle_stream(text: str, **_):
-    """Fires with each chunk of the agent's reasoning text (before code executes)."""
+    """Fires for each text chunk — both pre-fence reasoning and completion block content."""
     print(text, end="", flush=True)
 
 
@@ -432,7 +465,7 @@ def handle_ask(question: str, **_):
 
 @on_finish(runtime)
 def handle_finish(summary: str, **_):
-    """Fires when the agent calls done()."""
+    """Fires when the task completes (completion block detected)."""
     print(f"\n✅ {summary}\n")
 
 
@@ -466,14 +499,14 @@ runtime.hooks.register(EventType.FINISH,  lambda summary, **_: save_to_db(summar
 |---|---|---|
 | `START` | `task` | `run()` is called |
 | `STEP` | `step`, `max_steps` | Each agentic step begins |
-| `STREAM` | `text` | Chunk of pre-execution reasoning text |
+| `STREAM` | `text` | Chunk of streamed text (pre-fence reasoning or completion block content) |
 | `TOOL_CALL` | `tool`, `args`, `label` | Before any tool executes |
 | `TOOL_RESULT` | `tool`, `result` | After any tool returns |
 | `ASK_USER` | `question` | Agent calls `ask_user()` |
 | `PERMISSION_REQUEST` | `tool`, `description` | Tool with `require_permission: true` fires |
 | `SECURITY_ERROR` | `error` | AST validation rejects the control block |
 | `RUNTIME_ERROR` | `error` | `exec()` throws an exception |
-| `FINISH` | `summary` | Agent calls `done()` |
+| `FINISH` | `summary` | Task complete — completion block detected |
 | `MAX_STEPS` | — | Loop exits because `max_steps` was reached |
 | `USER_MESSAGE_QUEUED` | `message` | `send_message()` called |
 | `USER_MESSAGE_INJECTED` | `message` | Queued message enters LLM context |
@@ -598,7 +631,7 @@ def slugify(text: str) -> str:
 
 Use `mode='multi_edit'` with `edits=[(start1, end1), (start2, end2)]` to fix multiple ranges in one file without line-number drift. The runtime applies edits bottom-to-top automatically. One Payload Block per tuple, in order.
 
-```
+````
 ```codepilot
 # Fix L42-48 (error handling) and L55 (regex) in one step — no drift
 write_file("routes/profile.py", mode="multi_edit", edits=[(42, 48), (55, 55)])
@@ -611,7 +644,7 @@ write_file("routes/profile.py", mode="multi_edit", edits=[(42, 48), (55, 55)])
 ```python
 # ... replacement for L55 ...
 ```
-```
+````
 
 ### Multiple file reads
 
@@ -702,7 +735,7 @@ execute("server", "uvicorn app.main:app --port 8000", 4, new_shell=True)
 execute("main", "pytest tests/test_api.py -v", 30)
 
 # Step 3 — LLM control block (after tests pass):
-# Shut server down cleanly
+# Shut server down cleanly — then use a completion block to finish
 send_signal("server", "SIGINT")
 ```
 
@@ -712,7 +745,69 @@ When `read_output()` returns in full-mode (the command is already done, no new d
 
 ---
 
-## 14. Workspace Change Detection
+## 14. Completion Block
+
+The ` ```completion ` block is how the agent signals a task is done. Its content is natural text that **streams directly to the user in real time** — token by token just like the pre-fence reasoning. When the runtime detects it, the agentic loop terminates after the current step.
+
+### Why it exists
+
+- **No wasted step** — `done()` required a dedicated agentic step just to call it. The completion block can be combined with the action step, saving a full LLM inference call on simple tasks.
+- **Real-time streaming** — the completion text reaches the user as the LLM generates it, not after.
+- **Natural** — the agent just writes its closing message as plain text inside the fence, rather than constructing a Python string argument.
+
+### Separate final step (multi-step tasks)
+
+After tests pass and all work is verified:
+
+````
+All green — both fixes are solid.
+
+```completion
+Fixed the 500 on profile email update: two bugs squashed.
+(1) `routes/profile.py:L42` — bare DB write had no error handling; wrapped in try/except,
+now returns a proper 400 on failure.
+(2) `utils/validators.py:L18` — email regex was rejecting `+` aliases; pattern updated.
+All tests pass. You're good to go.
+```
+````
+
+### Same-step completion (simple tasks)
+
+For simple tasks, combine everything in one agentic step:
+
+````
+Updating the timeout value.
+
+```codepilot
+write_file("config.py", start_line=12, end_line=12, mode="edit")
+```
+
+```python
+TIMEOUT = 30
+```
+
+```completion
+Done — updated TIMEOUT from 10 to 30 seconds in config.py:L12.
+```
+````
+
+### Receiving it in your app
+
+The completion block fires the `FINISH` hook with its text as `summary`:
+
+```python
+@on_finish(runtime)
+def handle_finish(summary: str, **_):
+    print(f"\n✅ {summary}\n")
+    save_to_database(summary)   # or send a notification, etc.
+
+summary = runtime.run("Fix the login bug")
+# summary == the completion block text, or None if loop ended another way
+```
+
+---
+
+## 15. Workspace Change Detection
 
 The runtime automatically detects when **you** modify files in the workspace between agent steps. If you edit a file while the agent is working, it will be notified at the start of the next step with exact line numbers of what changed.
 
@@ -740,7 +835,7 @@ No configuration is required — this is always on.
 
 ---
 
-## 15. Chat Mode
+## 16. Chat Mode
 
 The agent can respond to questions and explanations without executing any code. If the LLM produces a response with no ` ```codepilot ` block, the runtime treats it as a conversational reply: the response is fully streamed to the user and the loop exits cleanly.
 
@@ -757,28 +852,38 @@ def done(summary: str, **_):
     print(f"\n✅ {summary}")
 
 
-# Agent answers with natural markdown — no code executed
+# Agent answers with natural markdown — no code executed, streams fully
 runtime.run("How does the config loader handle missing files?")
 
-# Agent takes action — executes code
+# Agent takes action — executes code, ends with completion block
 runtime.run("Add a fallback default value to the config loader")
 ```
 
 The agent freely uses ` ```python ` blocks to display code examples in its explanations — they are **never** executed. Only ` ```codepilot ` blocks execute.
 
-### Internal clock
+### Step awareness
 
-The agent's system prompt is refreshed every step with the current timestamp:
+The agent's system prompt is refreshed every step with the current timestamp, OS, working directory, and a live step counter with progressive urgency:
 
 ```
-Directory: `./workspace` — OS: Linux 5.15 — Time: `2026-03-01 17:00:00`
+# Steps 1-9 of 30 — neutral
+Agentic step 3 / 30
+
+# Steps 10-22 of 30 — mild signal
+Agentic step 12 / 30 — 40% agentic steps consumed!
+
+# Steps 23-26 of 30 — approaching
+Agentic step 24 / 30 — 80% agentic steps consumed. Approaching step limit!
+
+# Steps 27-30 of 30 — urgent
+Agentic step 28 / 30 — 93% agentic steps consumed! Hard Limit Near!
 ```
 
-This allows the agent to reason about time-sensitive tasks, deadlines, log timestamps, and how much time has elapsed between steps.
+This allows the agent to reason about time, deadlines, and to self-regulate efficiency as it approaches the configured `max_steps` limit.
 
 ---
 
-## 16. Custom Tools
+## 17. Custom Tools
 
 Register any callable as a tool. Its docstring is automatically pulled into the system prompt so the agent knows when and how to use it.
 
@@ -836,7 +941,7 @@ runtime.register_tool("execute", safe_execute, replace=True)
 
 ---
 
-## 17. Aborting the Agent
+## 18. Aborting the Agent
 
 ```python
 import threading
@@ -856,7 +961,7 @@ agent_thread.join()
 
 ---
 
-## 18. Building a CLI Tool
+## 19. Building a CLI Tool
 
 ### Simple conversational CLI
 
@@ -973,7 +1078,7 @@ python cli.py --list                       # show all saved sessions
 
 ---
 
-## 19. Building a Web Server Integration
+## 20. Building a Web Server Integration
 
 FastAPI example with WebSocket streaming (token-by-token to the browser) and mid-task injection:
 
@@ -996,7 +1101,7 @@ def _push(event: dict):
     asyncio.get_event_loop().call_soon_threadsafe(_event_queue.put_nowait, event)
 
 
-# Stream reasoning text token by token
+# Stream reasoning text and completion block content token by token
 runtime.hooks.register(EventType.STREAM,
     lambda text, **_: _push({"type": "stream", "text": text}))
 
@@ -1052,7 +1157,7 @@ async def stream_events(websocket: WebSocket):
 
 ---
 
-## 20. Full API Surface
+## 21. Full API Surface
 
 ### `Runtime`
 
@@ -1066,7 +1171,7 @@ Runtime(
 )
 
 runtime.run(task: str) -> Optional[str]
-    # Blocking. Appends to history. Returns done() summary or None.
+    # Blocking. Appends to history. Returns completion block text or None.
 
 runtime.send_message(message: str)
     # Thread-safe. Non-blocking. Tagged [USER MESSAGE] in context.
@@ -1090,11 +1195,11 @@ runtime.registry           # ToolRegistry — inspect registered tools
 
 ```python
 from codepilot import (
-    on_stream,                  # STREAM — pre-execution reasoning text chunk
+    on_stream,                  # STREAM — pre-fence reasoning text or completion block content
     on_tool_call,               # TOOL_CALL — before any tool executes
     on_tool_result,             # TOOL_RESULT — after any tool returns
     on_ask_user,                # ASK_USER — agent called ask_user()
-    on_finish,                  # FINISH — agent called done()
+    on_finish,                  # FINISH — task complete (completion block detected)
     on_permission_request,      # PERMISSION_REQUEST — awaiting approval
     on_user_message_queued,     # USER_MESSAGE_QUEUED — send_message() called
     on_user_message_injected,   # USER_MESSAGE_INJECTED — message in context
@@ -1152,9 +1257,37 @@ Terminate and remove a shell session entirely.
 
 Pauses execution and prompts the user for input. Fires the `ASK_USER` hook.
 
+#### `find(pattern, scope='codebase', target=None, include=None, max_results=50)`
+
+Text / regex search across a file, multiple files, or the entire workspace. Results are returned as `file:line:matched_line` — one match per line.
+
+Uses **ripgrep** (`rg`) when available — fast and honours `.gitignore` automatically (ignores `node_modules`, build artifacts, lock files). Falls back to a pure-Python implementation when `rg` is not installed.
+
+| Parameter | Description |
+|---|---|
+| `pattern` | Regex pattern. Escape special chars: `r'validate_email\('` |
+| `scope` | `'file'` / `'files'` / `'codebase'` |
+| `target` | File path (str) or list of paths — required for `scope='file'/'files'` |
+| `include` | Glob filter for `scope='codebase'`. e.g. `'*.py'`, `'tests/**'` |
+| `max_results` | Cap on returned matches (default 50) |
+
+```python
+# LLM control block examples:
+find(pattern=r'validate_email\(', scope='file', target='routes/profile.py')
+find(pattern='TODO:', scope='files', target=['routes/profile.py', 'utils/validators.py'])
+find(pattern=r'class \w+Handler', scope='codebase', include='*.py')
+find(pattern='import torch', scope='codebase', include='tests/**')
+```
+
+**Install ripgrep** for best performance (optional — Python fallback is always available):
+```bash
+apt-get install ripgrep      # Debian/Ubuntu
+brew install ripgrep          # macOS
+```
+
 #### `semantic_search(query, mode='search', depth=2, top_k=5)`
 
-Semanticaly searches the codebase using the `voyage-code-3` embedding model via [grepai](https://github.com/yoanbernabeu/grepai). Finds code by concept — not text match.
+Semantically searches the codebase using the `voyage-code-3` embedding model via [grepai](https://github.com/yoanbernabeu/grepai). Finds code by concept — not text match. Use when you don't know which file or function to look at. Use `find()` when you know the exact symbol or string.
 
 **Requires** `VOYAGE_API_KEY` set in environment and `api_key_env: "VOYAGE_API_KEY"` in the AgentFile config.
 
@@ -1177,10 +1310,6 @@ export VOYAGE_API_KEY="pa-..."
 grepai internally reads `OPENAI_API_KEY`. The runtime automatically aliases your `VOYAGE_API_KEY` → `OPENAI_API_KEY` at subprocess launch — you never need to rename your env var.
 
 **grepai index location:** `~/.codepilot/grepai/<hash>/` — entirely outside your project. No `.grepai/` directory is created in your codebase.
-
-#### `done(summary)`
-
-Marks the task complete. Fires the `FINISH` hook. `summary` should be a thorough, human-readable description of everything that was accomplished.
 
 ### `FileSession`
 
@@ -1221,4 +1350,4 @@ create_session(
 
 ---
 
-*CodePilot v0.4.0 — code-native agents, zero JSON, full context.*
+*CodePilot v0.5.0 — code-native agents, zero JSON, full context.*
