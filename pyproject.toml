@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codepilot-ai"
-version = "0.5.0"
+version = "0.5.1"
 description = "A code-native agentic framework for building robust AI agents."
 readme = "README.md"
 authors = [
@@ -33,3 +33,9 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/Jahanzeb-git/codepilot"
 Repository = "https://github.com/Jahanzeb-git/codepilot"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"*" = ["*.j2", "*.md"]
