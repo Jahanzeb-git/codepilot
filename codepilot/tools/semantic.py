@@ -1,8 +1,15 @@
+"""
+Semantic code search via grepai for the CodePilot agentic runtime.
+
+Provides 1 tool: semantic_search (search, trace_callers, trace_callees, trace_graph).
+Requires Linux. grepai is auto-installed if missing.
+"""
+
 import subprocess
-import sys
 import json
 import os
 import shutil
+import hashlib
 import time
 from typing import TYPE_CHECKING
 from pathlib import Path
@@ -18,6 +25,8 @@ class SemanticTools:
         self.runtime = runtime
         self._setup_done = False
         self._watch_process = None
+        self._grepai_home: Path = None   # ~/.codepilot/grepai/<hash>/
+        self._cmd_base: str = "grepai"
 
     def cleanup(self):
         """Terminate the background grepai watch process."""
@@ -35,63 +44,55 @@ class SemanticTools:
         except Exception:
             pass
 
+    # ------------------------------------------------------------------
+    #  grepai home: ~/.codepilot/grepai/<8-char hash of work_dir>
+    #  Keeps ALL grepai state outside the user's project.
+    # ------------------------------------------------------------------
+
+    def _get_grepai_home(self, work_dir: str) -> Path:
+        """
+        Stable, unique directory for this work_dir's grepai index.
+        Lives at ~/.codepilot/grepai/<hash>/ — never inside the user's project.
+        """
+        digest = hashlib.sha256(work_dir.encode()).hexdigest()[:8]
+        home = Path.home() / ".codepilot" / "grepai" / digest
+        home.mkdir(parents=True, exist_ok=True)
+        return home
+
     def _run_grepai(self, args: list, **kwargs) -> subprocess.CompletedProcess:
-        """
-        Run a grepai subprocess with proper Windows shell handling.
-        Centralizes the sys.platform check to avoid inconsistency.
-        """
+        """Run a grepai subprocess. Always uses grepai_home as cwd."""
         cmd = [self._cmd_base] + args
-        if sys.platform == "win32":
-            kwargs["args"] = " ".join(f'"{p}"' if " " in p else p for p in cmd)
-            kwargs["shell"] = True
-        else:
-            kwargs["args"] = cmd
-        return subprocess.run(**kwargs)
+        kwargs.setdefault("cwd", str(self._grepai_home))
+        return subprocess.run(cmd, **kwargs)
 
     def _install_grepai_if_missing(self) -> str:
-        """
-        Dynamically detects OS and executes the canonical installation command for grepai.
-        Returns the executable name assuming it installs to system PATH.
-        """
+        """Install grepai via the official Linux shell script if not on PATH."""
         if shutil.which("grepai"):
             return "grepai"
 
-        # On Windows, grepai.ps1 usually drops it in AppData\Local\Programs\grepai
-        if sys.platform == "win32":
-            appdata = os.environ.get("LOCALAPPDATA")
-            if appdata:
-                win_path = Path(appdata) / "Programs" / "grepai" / "grepai.exe"
-                if win_path.exists():
-                    return str(win_path)
-
-        self.runtime.hooks.emit(EventType.TOOL_CALL, tool="semantic_search", args={"action": "installing grepai"})
+        self.runtime.hooks.emit(
+            EventType.TOOL_CALL, tool="semantic_search",
+            args={"action": "installing grepai"},
+            label="Installing grepai...",
+        )
 
         try:
-            if sys.platform == "win32":
-                cmd = ["powershell", "-Command", "irm https://raw.githubusercontent.com/yoanbernabeu/grepai/main/install.ps1 | iex"]
-                subprocess.run(cmd, check=True)
-
-                appdata = os.environ.get("LOCALAPPDATA")
-                if appdata:
-                    win_path = Path(appdata) / "Programs" / "grepai" / "grepai.exe"
-                    if win_path.exists():
-                        self.runtime.hooks.emit(EventType.TOOL_CALL, tool="semantic_search", args={"action": "successfully installed grepai to AppData"})
-                        return str(win_path)
-            else:
-                subprocess.run(
-                    ["sh", "-c", "curl -sSL https://raw.githubusercontent.com/yoanbernabeu/grepai/main/install.sh | sh"],
-                    check=True
-                )
-
-            self.runtime.hooks.emit(EventType.TOOL_CALL, tool="semantic_search", args={"action": "successfully installed grepai"})
-            return "grepai"
+            subprocess.run(
+                ["sh", "-c",
+                 "curl -sSL https://raw.githubusercontent.com/yoanbernabeu/grepai/main/install.sh | sh"],
+                check=True,
+            )
         except Exception as e:
-            self.runtime._append_execution(f"[semantic_search] Failed to install grepai: {e}")
-            return "grepai"
+            self.runtime._append_execution(
+                f"[semantic_search] Failed to install grepai: {e}"
+            )
+
+        return "grepai"
 
     def _ensure_setup(self):
         """
         Ensure grepai is installed, initialized, configured, and indexing.
+        All grepai state lives in ~/.codepilot/grepai/<hash>/ — never in work_dir.
         """
         if self._setup_done:
             return
@@ -99,29 +100,28 @@ class SemanticTools:
         tool_cfg = self.runtime._tool_config("semantic_search")
         work_dir = self.runtime.config.runtime.work_dir
 
-        # 1. Install via shell depending on OS
+        # 1. External grepai home
+        self._grepai_home = self._get_grepai_home(work_dir)
+
+        # 2. Install if missing
         self._cmd_base = self._install_grepai_if_missing()
 
-        # Default configurations
-        provider = tool_cfg.get("provider", "openai")
-        model = tool_cfg.get("model", "voyage-code-3")
-        base_url = tool_cfg.get("base_url", "https://api.voyageai.com/v1")
+        # 3. Config
+        provider    = tool_cfg.get("provider", "openai")
+        model       = tool_cfg.get("model", "voyage-code-3")
+        base_url    = tool_cfg.get("base_url", "https://api.voyageai.com/v1")
         api_key_env = tool_cfg.get("api_key_env", "VOYAGE_API_KEY")
 
-        grepai_dir = Path(work_dir) / ".grepai"
-        config_path = grepai_dir / "config.yaml"
+        config_path = self._grepai_home / ".grepai" / "config.yaml"
 
-        # 2. Run grepai init and write config ONLY if config doesn't already exist
         if not config_path.exists():
             try:
-                self._run_grepai(
-                    ["init"],
-                    cwd=work_dir, capture_output=True, text=True,
-                )
+                self._run_grepai(["init"], capture_output=True, text=True)
             except Exception as e:
-                self.runtime._append_execution(f"[semantic_search] Failed to run grepai init: {e}")
+                self.runtime._append_execution(
+                    f"[semantic_search] grepai init failed: {e}"
+                )
 
-            # 3. Write config.yaml with proper structure
             config_content = (
                 f"version: 1\n"
                 f"store:\n"
@@ -133,115 +133,129 @@ class SemanticTools:
                 f"  parallelism: 1\n"
             )
             try:
-                grepai_dir.mkdir(parents=True, exist_ok=True)
+                config_path.parent.mkdir(parents=True, exist_ok=True)
                 config_path.write_text(config_content)
             except Exception as e:
-                self.runtime._append_execution(f"[semantic_search] Warning: Could not write {config_path}: {e}")
+                self.runtime._append_execution(
+                    f"[semantic_search] Could not write config: {e}"
+                )
 
-        # 4. Start watching to index
-        self.runtime.hooks.emit(EventType.TOOL_CALL, tool="semantic_search", args={"action": "starting grepai watch"})
+        # 4. Start watch daemon — indexes work_dir, stores index in grepai_home
+        self.runtime.hooks.emit(
+            EventType.TOOL_CALL, tool="semantic_search",
+            args={"action": "indexing codebase"},
+            label="Indexing codebase for semantic search...",
+        )
         try:
             env = os.environ.copy()
             if api_key_env in env:
                 env["OPENAI_API_KEY"] = env[api_key_env]
 
-            if sys.platform == "win32":
-                popen_cmd = f'"{self._cmd_base}" watch --no-ui'
-                self._watch_process = subprocess.Popen(
-                    popen_cmd, shell=True,
-                    cwd=work_dir, env=env,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-            else:
-                self._watch_process = subprocess.Popen(
-                    [self._cmd_base, "watch", "--no-ui"],
-                    cwd=work_dir, env=env,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-            self._wait_for_index(work_dir, env, timeout=120)
+            self._watch_process = subprocess.Popen(
+                [self._cmd_base, "watch", "--no-ui", "--path", work_dir],
+                cwd=str(self._grepai_home), env=env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            self._wait_for_index(env, timeout=120)
         except Exception as e:
-            self.runtime._append_execution(f"[semantic_search] Failed to start grepai watch: {e}")
+            self.runtime._append_execution(
+                f"[semantic_search] Failed to start grepai watch: {e}"
+            )
 
         self._setup_done = True
 
-    def _wait_for_index(self, work_dir: str, env: dict, timeout: int = 120):
-        """
-        Poll `grepai status` until at least one file is indexed or timeout expires.
-        This ensures the initial embedding pass is complete before the first search.
-        """
+    def _wait_for_index(self, env: dict, timeout: int = 120):
+        """Poll grepai status until at least one file is indexed."""
         deadline = time.time() + timeout
         while time.time() < deadline:
             time.sleep(3)
             try:
                 r = self._run_grepai(
                     ["status", "--no-ui"],
-                    cwd=work_dir, env=env,
-                    capture_output=True, text=True, timeout=10,
+                    env=env, capture_output=True, text=True, timeout=10,
                 )
                 if "Files indexed: 0" not in r.stdout:
                     return
             except Exception:
                 pass
         self.runtime._append_execution(
-            "[semantic_search] Warning: grepai index not ready after "
-            f"{timeout}s — search may return partial results."
+            f"[semantic_search] Index not ready after {timeout}s "
+            "— search may return partial results."
         )
 
-    def semantic_search(self, query: str, mode: str = "search", depth: int = 2, top_k: int = 5) -> str:
+    # ------------------------------------------------------------------
+    #  Tool entry point
+    # ------------------------------------------------------------------
+
+    def semantic_search(
+        self, query: str, mode: str = "search",
+        depth: int = 2, top_k: int = 5,
+    ) -> str:
         """
         Semantically search the codebase or trace function dependencies using the
         voyage-code-3 embedding model. Finds code by concept — not text match — so
-        you land on exactly the right file and line without reading through files linearly.
+        you land on exactly the right file and line without grepping.
+
         Modes:
           'search'        — find code matching a natural language concept.
           'trace_callers' — find every call-site of a function/method.
           'trace_callees' — find everything a function/method calls internally.
-          'trace_graph'   — full dependency tree up to `depth` levels deep. Use this
-                            before fixing a function that might break its dependents —
-                            it reveals the blast radius so you don't introduce regressions.
-        Use `top_k` to control how many results you get back (default 5).
-        DO NOT use this tool when you already know the exact file path and lines — just `read_file`
-        instead. Also skip it for tiny files you can read in one shot or for simple
-        text matching where `run_command` with grep is faster.
+          'trace_graph'   — full dependency tree up to `depth` levels deep. 
+
+        Tips for better queries:
+          - Be descriptive: "user login validation" > "login"
+          - Use natural language: "where are users saved" > "save user"
+          - Describe intent, not syntax: "error handling in API layer"
+
+        Use `top_k` to limit results (default 5).
+        Skip this tool when you already know the exact file — use `read_file` instead.
         """
         self._ensure_setup()
 
-        tool_cfg = self.runtime._tool_config("semantic_search")
-        timeout = tool_cfg.get("timeout", 60)
+        tool_cfg    = self.runtime._tool_config("semantic_search")
+        timeout     = tool_cfg.get("timeout", 60)
         max_results = tool_cfg.get("max_results", top_k)
-        max_chars = tool_cfg.get("max_output_chars", 8000)
+        max_chars   = tool_cfg.get("max_output_chars", 8000)
+        work_dir    = self.runtime.config.runtime.work_dir
 
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="semantic_search",
-            args={"query": query, "mode": mode, "depth": depth, "top_k": top_k},
+            args={"query": query, "mode": mode},
+            label=f"Semantic search: {query!r}",
         )
 
-        work_dir = self.runtime.config.runtime.work_dir
-
-        # Inject API key: grepai's openai provider reads OPENAI_API_KEY, so alias it.
+        # API key alias: VOYAGE_API_KEY → OPENAI_API_KEY for grepai
         env = os.environ.copy()
         api_key_env = tool_cfg.get("api_key_env", "VOYAGE_API_KEY")
         if api_key_env in env:
             env["OPENAI_API_KEY"] = env[api_key_env]
 
+        # Build command args per mode
         if mode == "search":
-            cmd_args = ["search", query, "--json"]
+            cmd_args = ["search", query, "--json", "--compact", "--path", work_dir]
         elif mode == "trace_callers":
-            cmd_args = ["trace", "callers", query]
+            cmd_args = ["trace", "callers", query, "--path", work_dir]
         elif mode == "trace_callees":
-            cmd_args = ["trace", "callees", query]
+            cmd_args = ["trace", "callees", query, "--path", work_dir]
         elif mode == "trace_graph":
-            cmd_args = ["trace", "graph", query, "--depth", str(depth), "--json"]
+            cmd_args = [
+                "trace", "graph", query,
+                "--depth", str(depth), "--json", "--path", work_dir,
+            ]
         else:
-            result = f"[semantic_search] Error: Invalid mode '{mode}'. Use 'search', 'trace_callers', 'trace_callees', or 'trace_graph'."
+            result = (
+                f"[semantic_search] Invalid mode '{mode}'. "
+                "Use 'search', 'trace_callers', 'trace_callees', or 'trace_graph'."
+            )
             self.runtime._append_execution(result)
-            self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="semantic_search", result=result)
+            self.runtime.hooks.emit(
+                EventType.TOOL_RESULT, tool="semantic_search", result=result,
+            )
             return result
 
         try:
             r = self._run_grepai(
-                cmd_args,
-                cwd=work_dir, env=env,
+                cmd_args, env=env,
                 capture_output=True, text=True, timeout=timeout,
             )
 
@@ -257,26 +271,33 @@ class SemanticTools:
                             data = data[:max_results]
                             output = json.dumps(data, indent=2)
                             if total > max_results:
-                                output += f"\n\n[Showing top {max_results} of {total} results]"
+                                output += (
+                                    f"\n\n[Showing top {max_results} "
+                                    f"of {total} results]"
+                                )
                     except json.JSONDecodeError:
                         pass
 
                 # Character-level safety cap
                 if len(output) > max_chars:
-                    output = output[:max_chars] + f"\n\n[Output truncated at {max_chars} chars]"
+                    output = (
+                        output[:max_chars]
+                        + f"\n\n[Truncated at {max_chars} chars]"
+                    )
 
-                result = f"=== Semantic Search Results ({mode}) ===\n{output}"
+                result = f"=== Semantic Search ({mode}) ===\n{output}"
             else:
                 result = (
                     f"=== Semantic Search Error ({mode}) ===\n"
-                    f"Return Code: {r.returncode}\nSTDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
+                    f"Code: {r.returncode}\n{r.stderr.strip()}"
                 )
         except subprocess.TimeoutExpired:
-            cmd = [self._cmd_base] + cmd_args
-            result = f"[semantic_search] Command `{' '.join(cmd)}` timed out after {timeout}s."
+            result = f"[semantic_search] Timed out after {timeout}s."
         except Exception as e:
-            result = f"[semantic_search] Execution failed: {e}"
+            result = f"[semantic_search] Failed: {e}"
 
         self.runtime._append_execution(result)
-        self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="semantic_search", result=result)
+        self.runtime.hooks.emit(
+            EventType.TOOL_RESULT, tool="semantic_search", result=result,
+        )
         return result

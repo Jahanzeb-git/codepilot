@@ -14,12 +14,8 @@ Two backends are supported:
 
     FileSession      — serialises the message history to a JSON file on disk
                        so the context survives process restarts.  The file is
-                       written to a user-writable directory that requires no
-                       elevated permissions on any platform:
-
-                           Windows : %USERPROFILE%\\.codepilot\\sessions\\
-                           macOS   : ~/.codepilot/sessions/
-                           Linux   : ~/.codepilot/sessions/
+                       written to ~/.codepilot/sessions/ which is always
+                       user-writable without elevated permissions.
 
 Usage (via Runtime — the preferred interface):
 
@@ -41,7 +37,6 @@ from __future__ import annotations
 import json
 import os
 import pathlib
-import platform
 import time
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
@@ -53,15 +48,10 @@ from typing import Dict, List, Optional
 
 def _default_session_dir() -> pathlib.Path:
     """
-    Return a platform-appropriate, user-writable directory for session files.
+    Return a user-writable directory for session files.
     Created automatically if it doesn't exist.
     """
-    if platform.system() == "Windows":
-        base = pathlib.Path(os.environ.get("USERPROFILE", pathlib.Path.home()))
-    else:
-        base = pathlib.Path.home()
-
-    session_dir = base / ".codepilot" / "sessions"
+    session_dir = pathlib.Path.home() / ".codepilot" / "sessions"
     session_dir.mkdir(parents=True, exist_ok=True)
     return session_dir
 
@@ -137,8 +127,7 @@ class FileSession(BaseSession):
     """
     Persists the conversation history as a JSON file on disk.
 
-    The file is stored in ``~/.codepilot/sessions/`` (or
-    ``%USERPROFILE%\\.codepilot\\sessions\\`` on Windows) which is always
+    The file is stored in ``~/.codepilot/sessions/`` which is always
     user-writable without elevated permissions.
 
     File format::

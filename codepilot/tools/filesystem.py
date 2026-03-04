@@ -53,7 +53,7 @@ class FilesystemTools:
         mode='multi_edit' — pass edits=[(start, end), (start, end)]. Safe for many edits. Each tuple have (start_line, end_line) in a list. Provide one payload block for each. Example: write_file("file.txt", mode="multi_edit", edits=[(1, 5), (10, 15)])
 
         Up to 5 file writes (mode='w'/'a') are allowed per step (you can call write_file multiple times in a single agentic step if each call is for a different file).
-        Edits: one per file per step to prevent line-number drift.
+        Edits: one per file per agentic step to prevent line-number drift.
         """
         ui_status = ""
         if mode == "w":
@@ -300,7 +300,7 @@ class FilesystemTools:
         Output format per line:  '    6 | self.timeout = 5'
         Always call this before write_file with mode='edit' or mode='insert'
         to confirm exact line numbers before touching anything.
-        Multiple read_file() calls per step are allowed.
+        Multiple read_file() calls per agentic step are allowed.
         """
         ui_status = f"Reading a file {path}: L{start_line}-{end_line}" if end_line else f"Reading a file {path}..."
         self.runtime.hooks.emit(

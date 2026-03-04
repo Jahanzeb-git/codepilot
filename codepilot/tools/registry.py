@@ -55,7 +55,7 @@ class ToolRegistry:
 
         Format per tool:
             tool_name(param: type = default, ...) -> ...
-                First paragraph of the docstring.
+                Full docstring (indented).
         """
         lines = []
         for name, func in sorted(self._tools.items()):
@@ -65,11 +65,15 @@ class ToolRegistry:
                 sig = ""
 
             doc = inspect.getdoc(func) or "No description."
-            # Use only the first paragraph of the docstring to keep prompt tight.
-            short_doc = doc.split("\n\n")[0].strip()
+            # Indent every line of the docstring so it visually nests under
+            # the tool signature — keeps the prompt scannable.
+            indented = "\n".join(
+                f"    {line}" if line.strip() else ""
+                for line in doc.splitlines()
+            )
 
             lines.append(f"• {name}{sig}")
-            lines.append(f"    {short_doc}")
+            lines.append(indented)
             lines.append("")
 
         return "\n".join(lines).strip()

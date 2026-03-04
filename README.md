@@ -4,7 +4,12 @@
 
 **Version:** `0.4.0`
 
-> **Deployment note:** The shell tools (`execute`, `read_output`, `send_input`, `send_signal`, `kill_shell`) require a **POSIX system** (Linux/macOS). They rely on `pexpect` and will not work on Windows. Deploy your agent in a Linux container.
+> **Linux only.** Both the shell tools (`execute`, `read_output`, `send_input`, `send_signal`, `kill_shell`) and `semantic_search` require **Linux**. They rely on `pexpect` and `grepai` — deploy your agent in a Linux container.
+>
+> **Docker tip:** Pre-install `grepai` in your image so it's not downloaded on every container start:
+> ```dockerfile
+> RUN curl -sSL https://raw.githubusercontent.com/yoanbernabeu/grepai/main/install.sh | sh
+> ```
 
 ---
 
@@ -159,6 +164,29 @@ agent:
 
     - name: "semantic_search"
       enabled: true
+      config:
+        # VoyageAI API key env var — REQUIRED for semantic search to work.
+        # Get a free key at https://www.voyageai.com/
+        api_key_env: "VOYAGE_API_KEY"
+
+        # Embedding model — voyage-code-3 is purpose-built for code search
+        model: "voyage-code-3"
+
+        # VoyageAI uses an OpenAI-compatible API — this is the default endpoint
+        base_url: "https://api.voyageai.com/v1"
+
+        # Provider name passed to grepai internals (leave as "openai" — it's
+        # just the protocol name, not the vendor).
+        provider: "openai"
+
+        # Maximum results returned per search (default: 5)
+        top_k: 5
+
+        # Max seconds to wait for a grepai command (default: 60)
+        timeout: 60
+
+        # Truncate output to prevent context overflow (default: 8000 chars)
+        max_output_chars: 8000
 ```
 
 **Supported providers:**
@@ -1124,6 +1152,32 @@ Terminate and remove a shell session entirely.
 
 Pauses execution and prompts the user for input. Fires the `ASK_USER` hook.
 
+#### `semantic_search(query, mode='search', depth=2, top_k=5)`
+
+Semanticaly searches the codebase using the `voyage-code-3` embedding model via [grepai](https://github.com/yoanbernabeu/grepai). Finds code by concept — not text match.
+
+**Requires** `VOYAGE_API_KEY` set in environment and `api_key_env: "VOYAGE_API_KEY"` in the AgentFile config.
+
+**First call is slow** (~30-120s): grepai auto-installs if missing, indexes the entire `work_dir`, then searches. Subsequent calls are fast.
+
+| `mode` | What it does |
+|---|---|
+| `'search'` | Find files/functions matching a natural language concept |
+| `'trace_callers'` | Find every place that calls a given function/method |
+| `'trace_callees'` | Find everything a function calls internally |
+| `'trace_graph'` | Full dependency tree up to `depth` levels — use before modifying code with wide blast radius |
+
+**Environment setup:**
+
+```bash
+export VOYAGE_API_KEY="pa-..."
+```
+
+**How the API key flows:**
+grepai internally reads `OPENAI_API_KEY`. The runtime automatically aliases your `VOYAGE_API_KEY` → `OPENAI_API_KEY` at subprocess launch — you never need to rename your env var.
+
+**grepai index location:** `~/.codepilot/grepai/<hash>/` — entirely outside your project. No `.grepai/` directory is created in your codebase.
+
 #### `done(summary)`
 
 Marks the task complete. Fires the `FINISH` hook. `summary` should be a thorough, human-readable description of everything that was accomplished.
@@ -1167,4 +1221,4 @@ create_session(
 
 ---
 
-*CodePilot v0.3.0 — code-native agents, zero JSON, full context.*
+*CodePilot v0.4.0 — code-native agents, zero JSON, full context.*

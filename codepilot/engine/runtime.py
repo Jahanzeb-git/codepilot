@@ -16,6 +16,7 @@ from ..engine.provider import get_provider
 from ..tools.filesystem import FilesystemTools
 from ..tools.interaction import InteractionTools
 from ..tools.registry import ToolRegistry
+from ..tools.search import SearchTools
 from ..tools.shell import ShellManager
 from ..tools.semantic import SemanticTools
 
@@ -98,6 +99,7 @@ class Runtime:
         self._shell_manager     = ShellManager(self)
         self._interaction_tools = InteractionTools(self)
         self._semantic_tools    = SemanticTools(self)
+        self._search_tools      = SearchTools(self)
 
         self.registry = ToolRegistry()
         self._register_enabled_tools()
@@ -188,7 +190,7 @@ class Runtime:
                 self._watcher.snapshot_all()
 
             # 2. Build system prompt (snapshot refreshed every step)
-            system_prompt = self._build_system_prompt()
+            system_prompt = self._build_system_prompt(step, self.config.runtime.max_steps)
 
             # 3. LLM inference (streaming or blocking)
             try:
@@ -213,7 +215,7 @@ class Runtime:
             self.messages.append({"role": _ROLE_ASSISTANT, "content": response_text})
 
             # 4. Parse response
-            control_block, payload_blocks = BlockParser.split(response_text)
+            control_block, payload_blocks, completion_block = BlockParser.split(response_text)
 
             if control_block is None:
                 # No ```codepilot block → conversational reply (may include
@@ -225,17 +227,20 @@ class Runtime:
             self._execution_buffer = []
             self._execute(control_block.content)
 
-            # 6. (reserved — no longer used)
-
+            # 6. Assemble execution result and feed back as next user turn
             execution_result = "\n\n".join(self._execution_buffer).strip()
             if not execution_result:
                 execution_result = "[Control block executed with no output.]"
             self._append_execution_result(execution_result)
 
-            if self._done:
+            # 7. Completion block → task is done, loop terminates
+            if completion_block is not None:
+                self._done         = True
+                self._done_summary = completion_block.content.strip()
+                self.hooks.emit(EventType.FINISH, summary=self._done_summary)
                 break
 
-            # 7. Update watcher snapshots (baseline for next step's check)
+            # 8. Update watcher snapshots (baseline for next step's check)
             self._watcher.snapshot_all()
 
         # Persist after every run() call
@@ -331,32 +336,20 @@ class Runtime:
             if self.config.tools
             else {"write_file", "read_file", "execute", "read_output",
                   "send_input", "send_signal", "kill_shell",
-                  "ask_user", "semantic_search"}
+                  "ask_user", "semantic_search", "find"}
         )
-        if "write_file"     in enabled: self.registry.register("write_file",     self._fs_tools.write_file)
-        if "read_file"      in enabled: self.registry.register("read_file",      self._fs_tools.read_file)
-        if "execute"        in enabled: self.registry.register("execute",        self._shell_manager.execute)
-        if "read_output"    in enabled: self.registry.register("read_output",    self._shell_manager.read_output)
-        if "send_input"     in enabled: self.registry.register("send_input",     self._shell_manager.send_input)
-        if "send_signal"    in enabled: self.registry.register("send_signal",    self._shell_manager.send_signal)
-        if "kill_shell"     in enabled: self.registry.register("kill_shell",     self._shell_manager.kill_shell)
-        if "ask_user"       in enabled: self.registry.register("ask_user",       self._interaction_tools.ask_user)
+        if "write_file"      in enabled: self.registry.register("write_file",      self._fs_tools.write_file)
+        if "read_file"       in enabled: self.registry.register("read_file",       self._fs_tools.read_file)
+        if "execute"         in enabled: self.registry.register("execute",         self._shell_manager.execute)
+        if "read_output"     in enabled: self.registry.register("read_output",     self._shell_manager.read_output)
+        if "send_input"      in enabled: self.registry.register("send_input",      self._shell_manager.send_input)
+        if "send_signal"     in enabled: self.registry.register("send_signal",     self._shell_manager.send_signal)
+        if "kill_shell"      in enabled: self.registry.register("kill_shell",      self._shell_manager.kill_shell)
+        if "ask_user"        in enabled: self.registry.register("ask_user",        self._interaction_tools.ask_user)
         if "semantic_search" in enabled: self.registry.register("semantic_search", self._semantic_tools.semantic_search)
-        self.registry.register("done", self._tool_done)
+        if "find"            in enabled: self.registry.register("find",            self._search_tools.find)
 
-    def _tool_done(self, summary: str = "Task complete."):
-        """
-        Call when the task is fully complete and verified.
-        Provide a thorough natural summary: everything created, changed, and
-        confirmed working. This is the final message the user sees — make it
-        a complete account, not a one-liner.
-        """
-        self._done         = True
-        self._done_summary = summary
-        self._append_execution(f"[done] {summary}")
-        self.hooks.emit(EventType.FINISH, summary=summary)
-
-    def _build_system_prompt(self) -> str:
+    def _build_system_prompt(self, step: int = 0, max_steps: int = 0) -> str:
         return self.prompt_manager.render(
             agent_name=self.config.name,
             agent_role=self.config.role or "",
@@ -365,31 +358,50 @@ class Runtime:
             work_dir=self.config.runtime.work_dir,
             codebase_snapshot=self.context_manager.get_formatted_snapshot(),
             shell_info=self._shell_manager.get_prompt_info(),
+            step_info=self._build_step_info(step, max_steps),
         )
+
+    @staticmethod
+    def _build_step_info(step: int, max_steps: int) -> str:
+        """Generate a step-awareness line with progressive urgency signals."""
+        if not max_steps:
+            return ""
+        pct  = round(step / max_steps * 100)
+        base = f"Agentic step {step} / {max_steps}"
+        if pct >= 90:
+            return f"{base} — {pct}% agentic steps consumed! Hard Limit Near!"
+        if pct >= 75:
+            return f"{base} — {pct}% agentic steps consumed. Approaching step limit!"
+        if pct >= 33:
+            return f"{base} — {pct}% agentic steps consumed!"
+        return base
 
     # ------------------------------------------------------------------ #
     #  Streaming inference                                                 #
     # ------------------------------------------------------------------ #
 
-    _CONTROL_FENCE = "```codepilot"
-    _HOLDBACK      = len(_CONTROL_FENCE)   # 12 chars
+    _CONTROL_FENCE    = "```codepilot"
+    _COMPLETION_FENCE = "```completion"
+    _HOLDBACK         = max(len(_CONTROL_FENCE), len(_COMPLETION_FENCE))  # 13 chars
 
     def _stream_inference(self, system_prompt: str) -> str:
         """
-        Stream the LLM response token by token.
+        Stream the LLM response token by token — 3-state machine:
 
-        Everything before the ```codepilot fence is emitted immediately via
-        STREAM hooks (including any display ```python blocks).  Once the
-        control fence is detected, all subsequent tokens are buffered silently.
+          'streaming'  — before the codepilot fence: emit to user in real time.
+          'buffering'  — after codepilot fence, before completion fence: buffer silently.
+          'completing' — inside the completion fence: emit to user in real time.
 
-        A 12-character hold-back prevents premature emission when the fence
-        marker is split across streaming chunks.
+        A 13-character hold-back prevents premature emission when fence markers
+        are split across streaming chunks.
 
         Returns the complete response text for normal pipeline processing.
         """
-        chunks: list            = []
-        pre_fence_emitted: int  = 0
-        fence_found: bool       = False
+        chunks:              list = []
+        pre_fence_emitted:   int  = 0
+        compl_emitted:       int  = 0  # absolute offset of last emitted completion char
+        compl_content_start: int  = 0  # absolute offset where completion block content begins
+        state:               str  = "streaming"
 
         for chunk in self.provider.chat_stream(
             messages=self.messages,
@@ -398,43 +410,69 @@ class Runtime:
             max_tokens=self.config.model.max_tokens,
         ):
             chunks.append(chunk)
-
-            if fence_found:
-                continue
-
             accumulated = "".join(chunks)
-            fence_pos   = accumulated.find(self._CONTROL_FENCE)
 
-            if fence_pos == -1:
-                # No control fence yet — emit new text but hold back chars
-                # so the fence marker isn't prematurely streamed.
+            if state == "streaming":
+                fence_pos = accumulated.find(self._CONTROL_FENCE)
+                if fence_pos == -1:
+                    # No control fence yet — emit but hold back to avoid
+                    # prematurely streaming a fence split across chunks.
+                    safe_end = len(accumulated) - self._HOLDBACK
+                    if safe_end > pre_fence_emitted:
+                        self.hooks.emit(EventType.STREAM,
+                                        text=accumulated[pre_fence_emitted:safe_end])
+                        pre_fence_emitted = safe_end
+                else:
+                    # Control fence found — flush remaining pre-fence text.
+                    if fence_pos > pre_fence_emitted:
+                        self.hooks.emit(EventType.STREAM,
+                                        text=accumulated[pre_fence_emitted:fence_pos])
+                    state = "buffering"
+
+            # Use `if` (not elif) so a transition in the same chunk is handled immediately.
+            if state == "buffering":
+                comp_pos = accumulated.find(self._COMPLETION_FENCE)
+                if comp_pos != -1:
+                    newline_pos = accumulated.find("\n", comp_pos)
+                    if newline_pos != -1:
+                        compl_content_start = newline_pos + 1
+                        compl_emitted       = compl_content_start
+                        state = "completing"
+
+            if state == "completing":
+                # Emit completion content with holdback (avoids emitting
+                # the closing ``` which appears at the very end).
                 safe_end = len(accumulated) - self._HOLDBACK
-                if safe_end > pre_fence_emitted:
-                    self.hooks.emit(
-                        EventType.STREAM,
-                        text=accumulated[pre_fence_emitted:safe_end],
-                    )
-                    pre_fence_emitted = safe_end
-            else:
-                # Control fence detected — emit any remaining pre-fence text
-                if fence_pos > pre_fence_emitted:
-                    self.hooks.emit(
-                        EventType.STREAM,
-                        text=accumulated[pre_fence_emitted:fence_pos],
-                    )
-                fence_found = True
+                if safe_end > compl_emitted:
+                    self.hooks.emit(EventType.STREAM,
+                                    text=accumulated[compl_emitted:safe_end])
+                    compl_emitted = safe_end
 
-        # Flush any held-back text if no control fence was found (chat mode)
-        if not fence_found:
-            accumulated = "".join(chunks)
-            remaining   = accumulated[pre_fence_emitted:]
+        # ------------------------------------------------------------------ #
+        # Final flush — emit any content held back by the sliding window.    #
+        # ------------------------------------------------------------------ #
+        accumulated = "".join(chunks)
+
+        if state == "streaming":
+            # No codepilot block at all — pure conversation, flush everything.
+            remaining = accumulated[pre_fence_emitted:]
             if remaining:
                 self.hooks.emit(EventType.STREAM, text=remaining)
 
-        return "".join(chunks)
+        elif state == "completing":
+            # Use BlockParser to get the clean, trimmed completion block content
+            # and emit whatever the holdback window was still sitting on.
+            _, _, completion_block = BlockParser.split(accumulated)
+            if completion_block:
+                already_emitted = compl_emitted - compl_content_start
+                remaining = completion_block.content[already_emitted:]
+                if remaining:
+                    self.hooks.emit(EventType.STREAM, text=remaining)
+
+        return accumulated
 
     def _emit_prefence_text(self, response_text: str):
-        """Emit pre-control-fence text as a single STREAM event (non-streaming mode)."""
+        """Emit pre-fence text and completion block content as STREAM events (non-streaming mode)."""
         fence_pos = response_text.find(self._CONTROL_FENCE)
         if fence_pos > 0:
             pre_text = response_text[:fence_pos].strip()
@@ -443,6 +481,12 @@ class Runtime:
         elif fence_pos == -1 and response_text.strip():
             # No control block at all — emit everything (display/chat)
             self.hooks.emit(EventType.STREAM, text=response_text.strip())
+            return  # No completion block possible without a control block
+
+        # Emit completion block content if present
+        _, _, completion_block = BlockParser.split(response_text)
+        if completion_block and completion_block.content.strip():
+            self.hooks.emit(EventType.STREAM, text=completion_block.content.strip())
 
     # ------------------------------------------------------------------ #
     #  Sandbox + execution                                                 #

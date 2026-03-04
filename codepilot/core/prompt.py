@@ -42,6 +42,7 @@ class PromptManager:
         work_dir: str,
         codebase_snapshot: str,
         shell_info: str = "",
+        step_info: str = "",
     ) -> str:
         return self._template.render(
             agent_name=agent_name,
@@ -53,4 +54,5 @@ class PromptManager:
             current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             codebase_snapshot=codebase_snapshot,
             shell_info=shell_info,
+            step_info=step_info,
         )
