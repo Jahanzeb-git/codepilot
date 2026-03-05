@@ -118,10 +118,10 @@ In a single step, combine **INDEPENDENT** operations freely to save steps:
 - Read + search together when they don't depend on each other.
 
 **DEPENDENT** actions CANNOT share a step:
-- ❌ NEVER `write_file` twice for editing the same file. Use `multi_edit`.
-- ❌ NEVER `read_file` after editing it in the same block. Wait for `[EXECUTION RESULT]`.
-- ❌ NEVER edit before reading — you need exact line numbers first.
-- ❌ NEVER `execute` in the same step as `write_file` — verify in a separate step.
+- NEVER `write_file` twice for editing the same file. Use `multi_edit`.
+- NEVER `read_file` after editing it in the same block. Wait for `[EXECUTION RESULT]`.
+- NEVER edit before reading — you need exact line numbers first.
+- NEVER `execute` in the same step as `write_file` — verify in a separate step.
 
 ---
 ## SHELL SESSIONS

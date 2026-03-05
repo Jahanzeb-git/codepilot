@@ -2,7 +2,7 @@
 
 **CodePilot** is a code-native agentic framework for Python. The LLM writes executable code to act — no JSON schemas, no function-calling APIs, no tool wrappers. This document covers every feature with working code examples.
 
-**Version:** `0.5.0`
+**Version:** `0.6.0`
 
 > **Linux only.** Both the shell tools (`execute`, `read_output`, `send_input`, `send_signal`, `kill_shell`) and `semantic_search` require **Linux**. They rely on `pexpect` and `grepai` — deploy your agent in a Linux container.
 >
@@ -39,21 +39,22 @@ export TOGETHER_API_KEY="..."
 4. [Streaming](#4-streaming)
 5. [Multi-turn execution](#5-multi-turn-execution)
 6. [Session persistence](#6-session-persistence)
-7. [Resuming a session](#7-resuming-a-session)
-8. [Resetting a session](#8-resetting-a-session)
-9. [Hooks — full observability](#9-hooks)
-10. [Permission gating](#10-permission-gating)
-11. [Mid-task message injection](#11-mid-task-message-injection)
-12. [Multi-operation steps](#12-multi-operation-steps)
-13. [Shell tools](#13-shell-tools)
-14. [Completion block](#14-completion-block)
-15. [Workspace change detection](#15-workspace-change-detection)
-16. [Chat mode](#16-chat-mode)
-17. [Custom tools](#17-custom-tools)
-18. [Aborting the agent](#18-aborting-the-agent)
-19. [Building a CLI tool](#19-building-a-cli-tool)
-20. [Building a web server integration](#20-building-a-web-server-integration)
-21. [Full API surface](#21-full-api-surface)
+7. [Context memory management](#7-context-memory-management)
+8. [Resuming a session](#8-resuming-a-session)
+9. [Resetting a session](#9-resetting-a-session)
+10. [Hooks — full observability](#10-hooks)
+11. [Permission gating](#11-permission-gating)
+12. [Mid-task message injection](#12-mid-task-message-injection)
+13. [Multi-operation steps](#13-multi-operation-steps)
+14. [Shell tools](#14-shell-tools)
+15. [Completion block](#15-completion-block)
+16. [Workspace change detection](#16-workspace-change-detection)
+17. [Chat mode](#17-chat-mode)
+18. [Custom tools](#18-custom-tools)
+19. [Aborting the agent](#19-aborting-the-agent)
+20. [Building a CLI tool](#20-building-a-cli-tool)
+21. [Building a web server integration](#21-building-a-web-server-integration)
+22. [Full API surface](#22-full-api-surface)
 
 ---
 
@@ -310,10 +311,11 @@ runtime.run("Add pytest tests for both endpoints")
 
 Session backends are chosen at construction time.
 
-| Backend | Storage | Survives restart | Config needed |
+| Backend | Storage | Survives restart | Best for |
 |---|---|---|---|
-| `"memory"` (default) | RAM only | ❌ | None |
-| `"file"` | `~/.codepilot/sessions/` | ✅ | `session_id` |
+| `"memory"` (default) | RAM only | ❌ | Scripts, one-off tasks |
+| `"file"` | `~/.codepilot/sessions/` | ✅ | CLI tools, local dev |
+| `"db"` | Any SQL database | ✅ | Web apps, containers, multi-user |
 
 ### In-memory (default)
 
@@ -353,9 +355,131 @@ Session file format:
 }
 ```
 
+### Database-backed
+
+Persists history to any SQLAlchemy-compatible database. The `codepilot_sessions` table is created automatically — no migration scripts needed. This is the correct backend for web apps deployed in containers.
+
+```bash
+# Install the db extras
+pip install codepilot-ai[db]          # SQLite or PostgreSQL
+pip install psycopg2-binary           # PostgreSQL driver only
+```
+
+```python
+# SQLite — simple, zero-config, great for local persistence
+runtime = Runtime(
+    "agent.yaml",
+    session="db",
+    session_id="user-42",
+    db_url="sqlite:///./codepilot.db",
+)
+
+# PostgreSQL — for containers, Cloud Run, multi-user apps
+import os
+runtime = Runtime(
+    "agent.yaml",
+    session="db",
+    session_id=f"user-{user_id}",
+    db_url=os.environ["DATABASE_URL"],
+)
+```
+
+**Persistence behaviour:**
+
+| Moment | What happens |
+|---|---|
+| `Runtime(...)` construction | One `SELECT` — loads prior messages for the session_id, or `[]` for new sessions |
+| Each `run()` call | All agentic steps run **fully in-memory** — zero DB I/O during inference |
+| `run()` completes | One atomic `UPSERT` — full messages list written to DB |
+| New `Runtime(...)` same `session_id` | One `SELECT` — session fully restored |
+| `runtime.reset()` | `DELETE` row — clean slate |
+
+**Listing all sessions:**
+
+```python
+from codepilot import DatabaseSession
+
+ds = DatabaseSession(session_id="_", db_url="sqlite:///./codepilot.db")
+for s in ds.list_sessions():
+    print(f"{s['session_id']:30} {s['messages']:4} messages")
+```
+
 ---
 
-## 7. Resuming a Session
+## 7. Context Memory Management
+
+For long-running sessions, CodePilot automatically manages the LLM's context window using a three-zone progressive compression system. It requires zero configuration — the defaults are tuned for typical coding sessions.
+
+### How it works
+
+At the start of every `run()` call, *before* the new task is appended:
+
+1. **Task-level summarization** — if the most recently completed task exceeds `min_task_tokens`, a summarizer LLM call compresses it to a single `[TASK SUMMARY]` message (~150 tokens). The new task prompt is passed to the summarizer so retention is biased toward what matters next.
+2. **Global summarization** — if total context exceeds `global_summary_threshold` × `max_context_tokens`, the oldest half of messages is collapsed into a single `[GLOBAL SUMMARY]` message.
+3. **Active task** — always kept 100% raw, never touched.
+
+Small tasks (quick edits, short commands) stay raw permanently — the threshold prevents compressing tasks that don't need it.
+
+### Configuration
+
+Add a `memory:` block to your `agent.yaml`. All fields are optional — the defaults work well:
+
+```yaml
+agent:
+  name: "BackendEngineer"
+  model:
+    provider: "anthropic"
+    name: "claude-opus-4-5"
+    api_key_env: "ANTHROPIC_API_KEY"
+
+  memory:
+    # Token estimator (chars / chars_per_token = tokens)
+    # Tune once by spot-checking against your tokenizer. ±15% error is fine.
+    chars_per_token: 3.8
+
+    # Your model's context window limit
+    max_context_tokens: 120000
+
+    # Task-level summarization: only summarize tasks larger than this.
+    # Default 4000 means small edits (typically ~1400 tokens) are kept raw.
+    # Raise to skip all task-level summarization; lower to compress aggressively.
+    min_task_tokens: 4000
+
+    # Target length for each task summary (in tokens)
+    task_summary_max_tokens: 200
+
+    # Global summarization triggers when total context exceeds this fraction
+    # of max_context_tokens. 0.7 = trigger at 84k tokens for a 120k model.
+    global_summary_threshold: 0.7
+
+    # Target length for the single global summary message
+    global_summary_max_tokens: 500
+```
+
+### What the LLM sees in a long session
+
+```
+[GLOBAL SUMMARY]         ← oldest tasks, collapsed into one ~500-token overview
+[TASK SUMMARY]           ← task N, ~150 tokens
+[TASK SUMMARY]           ← task N+1, ~150 tokens (or raw if under threshold)
+[USER INPUT] + steps     ← active task, 100% raw
+```
+
+The system prompt always includes a **Global State Memory** block — a live structured JSON snapshot of what the agent has done (files created/modified, commands run, open issues) updated after every summarization:
+
+```json
+{
+  "objective": "Building a FastAPI e-commerce backend",
+  "files_created": ["main.py", "models/user.py", "routes/users.py"],
+  "files_modified": ["routes/users.py (L31-52, POST handler)"],
+  "commands_run": ["pytest tests/ — 12 passed"],
+  "open_issues": ["Email verification not implemented"]
+}
+```
+
+---
+
+## 8. Resuming a Session
 
 Pass the same `session_id` to a new file-backed Runtime and the prior conversation loads automatically.
 
