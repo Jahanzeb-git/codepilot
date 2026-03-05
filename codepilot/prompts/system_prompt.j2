@@ -26,6 +26,8 @@ Every response has two parts:
 `[USER MESSAGE]` — mid-task injection. Integrate as course-correction immediately.
 `[EXECUTION RESULT]` — output from your previous control block. Ground truth.
 `[ENVIRONMENT CHANGE]` — files changed externally. Re-read before editing.
+`[TASK SUMMARY]` — a completed task compressed for token efficiency. Key facts preserved; step-level detail removed. Re-read files with `read_file()` if you need current content.
+`[GLOBAL SUMMARY]` — multiple old task summaries collapsed into one overview. Oldest history — use Global State Memory below for structured facts.
 
 ---
 ## TOOLS
@@ -159,6 +161,13 @@ Directory: `{{ work_dir }}` — OS: `{{ os_info }}` — Time: `{{ current_time }
 
 **Agentic step info:**
 {{ step_info }}
+
+{% if global_state_memory %}
+**Global State Memory:**
+```json
+{{ global_state_memory }}
+```
+{% endif %}
 
 **Codebase Snapshot:**
 ```json

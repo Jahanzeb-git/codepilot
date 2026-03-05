@@ -43,6 +43,7 @@ from .core.agent_file import AgentConfig, AgentFile
 
 # Session backends
 from .core.session import InMemorySession, FileSession, DatabaseSession, BaseSession, create_session
+from .core.memory import MemoryManager, MemoryConfig
 
 # Hook decorators — developers import these to wire up observability
 from .engine.hooks import (
@@ -67,6 +68,8 @@ __all__ = [
     "DatabaseSession",
     "BaseSession",
     "create_session",
+    "MemoryManager",
+    "MemoryConfig",
     "EventType",
     "HookSystem",
     "on_stream",

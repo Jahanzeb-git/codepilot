@@ -8,6 +8,7 @@ from ..core.agent_file import AgentConfig
 from ..core.ast_validator import ASTValidator, SecurityViolation
 from ..core.block_parser import BlockParser, CodeBlock
 from ..core.context import ContextManager
+from ..core.memory import MemoryManager, MemoryConfig
 from ..core.prompt import PromptManager
 from ..core.session import BaseSession, create_session
 from ..core.watcher import WorkspaceWatcher
@@ -128,6 +129,22 @@ class Runtime:
         self.messages: List[Dict[str, str]] = self.session.load()
 
         # ------------------------------------------------------------------ #
+        #  Context memory manager                                              #
+        # ------------------------------------------------------------------ #
+        _mem_cfg = self.config.memory
+        self._memory = MemoryManager(
+            config=MemoryConfig(
+                chars_per_token=_mem_cfg.chars_per_token,
+                max_context_tokens=_mem_cfg.max_context_tokens,
+                min_task_tokens=_mem_cfg.min_task_tokens,
+                task_summary_max_tokens=_mem_cfg.task_summary_max_tokens,
+                global_summary_threshold=_mem_cfg.global_summary_threshold,
+                global_summary_max_tokens=_mem_cfg.global_summary_max_tokens,
+            ),
+            provider=self.provider,
+        )
+
+        # ------------------------------------------------------------------ #
         #  Per-step ephemeral state                                            #
         # ------------------------------------------------------------------ #
         self._payload_queue:    List[CodeBlock] = []
@@ -162,6 +179,11 @@ class Runtime:
         """
         self._done  = False
         self._abort = False
+
+        # Context compression: summarize the previous task (if any)
+        # BEFORE appending the new task — the new task prompt is passed
+        # to the summarizer for context-aware compression.
+        self.messages = self._memory.process(self.messages, new_task=task)
 
         self.messages.append({
             "role": _ROLE_USER,
@@ -361,6 +383,7 @@ class Runtime:
             codebase_snapshot=self.context_manager.get_formatted_snapshot(),
             shell_info=self._shell_manager.get_prompt_info(),
             step_info=self._build_step_info(step, max_steps),
+            global_state_memory=self._memory.get_state_json(),
         )
 
     @staticmethod
