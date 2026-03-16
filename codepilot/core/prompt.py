@@ -43,6 +43,7 @@ class PromptManager:
         codebase_snapshot: str,
         shell_info: str = "",
         step_info: str = "",
+        context_stress: str = "",
         global_state_memory: str = "",
     ) -> str:
         return self._template.render(
@@ -56,5 +57,6 @@ class PromptManager:
             codebase_snapshot=codebase_snapshot,
             shell_info=shell_info,
             step_info=step_info,
+            context_stress=context_stress,
             global_state_memory=global_state_memory,
         )

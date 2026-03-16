@@ -2,21 +2,25 @@
 codepilot.core.memory
 ~~~~~~~~~~~~~~~~~~~~~
 
-Context memory manager for long-running agentic sessions.
+Agent-driven context management for long-running agentic sessions.
 
-Implements a three-zone progressive context compression system:
+The agent manages its own context window using three internal tools:
 
-    Zone 0  — Active task: 100% raw context (non-negotiable).
-    Zone 1  — Task summaries: each completed task collapsed to a single
-              [TASK SUMMARY] message (~100-200 tokens) when pushed out
-              by the next task submission.
-    Zone 2  — Global summary: when accumulated task summaries exceed a
-              token threshold, the older half is collapsed into a single
-              [GLOBAL SUMMARY] message.
+    archive_context(position, summary)
+        — compress a completed task's messages into an agent-provided
+          summary. Original messages are stored for later reveal.
 
-Summarization is task-aware: the summarizer receives the NEW task prompt
-as context so it can bias retention toward information relevant to the
-upcoming work.
+    reveal_context(position)
+        — restore an archived task's full messages in-place.
+
+    list_archived_context()
+        — review what has been archived (summaries + token savings).
+
+A token stress signal is injected into the system prompt every step,
+giving the agent the information it needs to make context decisions.
+
+Global summarization remains as a safety net at 90% context utilisation
+— it fires only when the agent hasn't kept things under control.
 
 Global State Memory is a structured JSON snapshot of the session's
 cumulative actions (files created, modified, commands run, etc.) and
@@ -27,7 +31,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+import re
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..engine.provider import LLMProvider
@@ -36,33 +41,47 @@ logger = logging.getLogger(__name__)
 
 
 # -----------------------------------------------------------------------
-# Configuration dataclass
+# tiktoken setup — cl100k_base with provider fudge factors
 # -----------------------------------------------------------------------
 
-class MemoryConfig:
-    """
-    Holds all tuning knobs for the context memory system.
-    Populated from the `memory:` section in the AgentFile YAML.
-    """
+try:
+    import tiktoken
+    _ENCODING = tiktoken.get_encoding("cl100k_base")
+except ImportError:
+    _ENCODING = None
+    logger.warning(
+        "tiktoken not installed — falling back to character-based estimation. "
+        "Install with: pip install tiktoken"
+    )
 
-    def __init__(
-        self,
-        chars_per_token: float = 3.8,
-        max_context_tokens: int = 120_000,
-        min_task_tokens: int = 800,
-        task_summary_max_tokens: int = 200,
-        global_summary_threshold: float = 0.7,
-        global_summary_max_tokens: int = 500,
-    ):
-        self.chars_per_token = chars_per_token
-        self.max_context_tokens = max_context_tokens
-        self.min_task_tokens = min_task_tokens
-        self.task_summary_max_tokens = task_summary_max_tokens
-        # Absolute token count at which global summarization triggers
-        self.global_summary_threshold_tokens = int(
-            max_context_tokens * global_summary_threshold
-        )
-        self.global_summary_max_tokens = global_summary_max_tokens
+PROVIDER_FUDGE = {
+    "anthropic": 1.1,   # cl100k undercounts ~10% for Claude
+    "openai":    1.0,   # exact
+    "together":  1.0,   # Qwen uses cl100k natively
+}
+
+
+def count_tokens(text: str, provider: str = "openai") -> int:
+    """
+    Count tokens using cl100k_base with provider-specific fudge factor.
+
+    tiktoken (Rust-backed) encodes ~1-5M tokens/sec.
+    A 50k-token context encodes in ~20ms.
+    """
+    if not text:
+        return 0
+    fudge = PROVIDER_FUDGE.get(provider, 1.0)
+    if _ENCODING is not None:
+        return int(len(_ENCODING.encode(text)) * fudge)
+    # Fallback: character-based estimate (~3.8 chars/token)
+    return int(len(text) / 3.8 * fudge)
+
+
+def count_messages_tokens(
+    messages: List[Dict], provider: str = "openai"
+) -> int:
+    """Sum token counts across all message contents."""
+    return sum(count_tokens(m.get("content", ""), provider) for m in messages)
 
 
 # -----------------------------------------------------------------------
@@ -70,96 +89,124 @@ class MemoryConfig:
 # -----------------------------------------------------------------------
 
 TAG_USER_INPUT     = "[USER INPUT]"
-TAG_TASK_SUMMARY   = "[TASK SUMMARY]"
+TAG_ARCHIVED_TASK  = "[ARCHIVED TASK"   # e.g. "[ARCHIVED TASK 3]"
 TAG_GLOBAL_SUMMARY = "[GLOBAL SUMMARY]"
 
 
 # -----------------------------------------------------------------------
-# Token estimator
+# Task map — find which messages belong to which task
 # -----------------------------------------------------------------------
 
-def estimate_tokens(obj: Any, chars_per_token: float = 3.8) -> int:
-    """
-    Fast token estimate from character count.
-    ±15% error — fine for threshold checks, not for billing.
-    """
-    if isinstance(obj, str):
-        return int(len(obj) / chars_per_token)
-    return int(len(json.dumps(obj, ensure_ascii=False)) / chars_per_token)
+_TASK_PATTERN    = re.compile(r"^\[Task (\d+)\]")
+_ARCHIVED_PATTERN = re.compile(r"^\[ARCHIVED TASK (\d+)\]")
 
 
-# -----------------------------------------------------------------------
-# Task boundary detection
-# -----------------------------------------------------------------------
-
-def find_task_boundaries(messages: List[Dict]) -> List[int]:
+def find_task_map(
+    messages: List[Dict],
+) -> Dict[int, Tuple[int, int, bool]]:
     """
-    Return the indices in `messages` where each task starts.
-    A task starts at a message whose content begins with [USER INPUT].
+    Scan messages and return a mapping of task positions to their ranges.
 
     Returns:
-        [i0, i1, i2, ...] — start indices of task 0, 1, 2, ...
-        Ordered from oldest to newest.
+        {position: (start_idx, end_idx, is_archived)}
+        start_idx is inclusive, end_idx is exclusive.
     """
-    boundaries = []
+    task_map: Dict[int, Tuple[int, int, bool]] = {}
+    open_tasks: List[Tuple[int, int]] = []   # (position, start_idx)
+
     for i, msg in enumerate(messages):
         content = msg.get("content", "")
+
+        # Archived task — always a single message
+        archived_match = _ARCHIVED_PATTERN.match(content)
+        if archived_match:
+            # Close any open task first
+            if open_tasks:
+                pos, start = open_tasks.pop()
+                task_map[pos] = (start, i, False)
+            a_pos = int(archived_match.group(1))
+            task_map[a_pos] = (i, i + 1, True)
+            continue
+
+        # New task boundary
+        task_match = _TASK_PATTERN.match(content)
+        if task_match:
+            # Close previous open task
+            if open_tasks:
+                pos, start = open_tasks.pop()
+                task_map[pos] = (start, i, False)
+            t_pos = int(task_match.group(1))
+            open_tasks.append((t_pos, i))
+            continue
+
+        # Legacy format: [USER INPUT] without [Task N] prefix
         if content.startswith(TAG_USER_INPUT):
-            boundaries.append(i)
-    return boundaries
+            if open_tasks:
+                pos, start = open_tasks.pop()
+                task_map[pos] = (start, i, False)
+            # Assign position 0 for legacy — scan will build correctly
+            # when multiple legacy tasks exist (they just use order)
+            legacy_pos = max(task_map.keys(), default=0) + 1 if task_map else 1
+            open_tasks.append((legacy_pos, i))
+
+    # Close the last open task
+    if open_tasks:
+        pos, start = open_tasks.pop()
+        task_map[pos] = (start, len(messages), False)
+
+    return task_map
 
 
-def extract_task_messages(
-    messages: List[Dict],
-    boundaries: List[int],
-    task_index: int,
-) -> List[Dict]:
-    """
-    Return the slice of messages belonging to a specific task
-    (by its index in the boundaries list).
-    """
-    start = boundaries[task_index]
-    if task_index + 1 < len(boundaries):
-        end = boundaries[task_index + 1]
-    else:
-        end = len(messages)
-    return messages[start:end]
+def get_highest_task_position(messages: List[Dict]) -> int:
+    """Return the highest task position found in messages, or 0 if none."""
+    highest = 0
+    for msg in messages:
+        content = msg.get("content", "")
+        m = _TASK_PATTERN.match(content)
+        if m:
+            highest = max(highest, int(m.group(1)))
+        m = _ARCHIVED_PATTERN.match(content)
+        if m:
+            highest = max(highest, int(m.group(1)))
+    return highest
 
 
 # -----------------------------------------------------------------------
-# Summarization prompts
+# Configuration
 # -----------------------------------------------------------------------
 
-_TASK_SUMMARY_PROMPT = """\
-You are a context compression assistant. Summarize the following completed \
-agent task into a structured summary. The user is about to submit a new task \
-(shown below) — bias your summary toward retaining information that may be \
-relevant to the upcoming task.
+class MemoryConfig:
+    """
+    Tuning knobs for the context memory system.
+    Populated from the `memory:` section in the AgentFile YAML.
+    """
 
-## New task the user is about to submit:
-{new_task}
+    def __init__(
+        self,
+        max_context_tokens: int = 120_000,
+        global_summary_threshold: float = 0.9,
+        global_summary_max_tokens: int = 500,
+        provider_name: str = "openai",
+    ):
+        self.max_context_tokens = max_context_tokens
+        self.provider_name = provider_name
+        # Safety-net threshold — fires only when agent hasn't archived enough
+        self.global_summary_threshold_tokens = int(
+            max_context_tokens * global_summary_threshold
+        )
+        self.global_summary_max_tokens = global_summary_max_tokens
 
-## Completed task to summarize:
-{task_content}
 
-## Output format (respond ONLY with this JSON, no markdown fences):
-{{
-  "task": "<what the user asked for>",
-  "files_read": ["<file:lines if relevant>"],
-  "files_created": ["<file>"],
-  "files_modified": ["<file:lines — what changed>"],
-  "commands_run": ["<command — outcome>"],
-  "result": "<concise outcome description>",
-  "key_details": "<any critical details the next task might need>"
-}}
-"""
+# -----------------------------------------------------------------------
+# Summarization prompt (global safety net only)
+# -----------------------------------------------------------------------
 
 _GLOBAL_SUMMARY_PROMPT = """\
 You are a context compression assistant. Summarize the following sequence of \
-completed task summaries into a single cohesive global summary. Preserve key \
+completed task content into a single cohesive global summary. Preserve key \
 facts: files created/modified, critical decisions, unresolved issues.
 
-## Task summaries to compress:
+## Content to compress:
 {summaries}
 
 ## Output format (respond ONLY with this JSON, no markdown fences):
@@ -174,13 +221,62 @@ facts: files created/modified, critical decisions, unresolved issues.
 
 
 # -----------------------------------------------------------------------
+# Context Archive — reversible storage for archived tasks
+# -----------------------------------------------------------------------
+
+class ContextArchive:
+    """
+    Stores original messages for archived tasks so they can be revealed.
+
+    Each entry maps a task position to the list of message dicts that
+    were replaced by the archive summary.
+    """
+
+    def __init__(self):
+        self._store: Dict[int, List[Dict]] = {}
+
+    def archive(self, position: int, messages: List[Dict]) -> None:
+        """Store a task's original messages."""
+        self._store[position] = list(messages)
+
+    def reveal(self, position: int) -> List[Dict]:
+        """Remove and return the original messages for a task."""
+        return self._store.pop(position)
+
+    def is_archived(self, position: int) -> bool:
+        return position in self._store
+
+    def list_all(self) -> Dict[int, List[Dict]]:
+        return dict(self._store)
+
+    def token_count(self, position: int, provider: str = "openai") -> int:
+        """Return the token count of an archived task's original messages."""
+        msgs = self._store.get(position, [])
+        return count_messages_tokens(msgs, provider)
+
+    def clear_position(self, position: int) -> None:
+        """Permanently delete an archived task (used by global summarizer)."""
+        self._store.pop(position, None)
+
+    def serialize(self) -> Dict:
+        return {"store": {str(k): v for k, v in self._store.items()}}
+
+    @classmethod
+    def deserialize(cls, data: Dict) -> "ContextArchive":
+        inst = cls()
+        raw = data.get("store", {})
+        inst._store = {int(k): v for k, v in raw.items()}
+        return inst
+
+
+# -----------------------------------------------------------------------
 # Global State Memory
 # -----------------------------------------------------------------------
 
 class GlobalStateMemory:
     """
     Structured snapshot of cumulative session state.
-    Updated incrementally after each task summarization.
+    Updated incrementally after global summarization.
     Rendered into the system prompt every step.
     """
 
@@ -194,17 +290,15 @@ class GlobalStateMemory:
             "key_decisions": [],
         }
 
-    def update_from_task_summary(self, summary_json: Dict) -> None:
-        """Merge a task summary's structured data into the global state."""
+    def update_from_global_summary(self, summary_json: Dict) -> None:
+        """Merge a global summary's structured data into the global state."""
         if not summary_json:
             return
 
-        # Update objective with latest task context
-        task = summary_json.get("task", "")
-        if task:
-            self._state["objective"] = task
+        overview = summary_json.get("session_overview", "")
+        if overview:
+            self._state["objective"] = overview
 
-        # Merge lists — deduplicate by converting to set where appropriate
         for key in ("files_created", "files_modified", "commands_run"):
             new_items = summary_json.get(key, [])
             if isinstance(new_items, list):
@@ -214,31 +308,20 @@ class GlobalStateMemory:
                         existing.append(item)
                 self._state[key] = existing
 
-        # Carry forward unresolved issues
         unresolved = summary_json.get("unresolved", [])
         if isinstance(unresolved, list):
             for item in unresolved:
                 if item and item not in self._state["open_issues"]:
                     self._state["open_issues"].append(item)
 
-        # Key decisions from global summaries
         decisions = summary_json.get("key_decisions", [])
         if isinstance(decisions, list):
             for item in decisions:
                 if item and item not in self._state["key_decisions"]:
                     self._state["key_decisions"].append(item)
 
-    def update_from_global_summary(self, summary_json: Dict) -> None:
-        """Merge a global summary's structured data into the global state."""
-        self.update_from_task_summary(summary_json)
-
-        overview = summary_json.get("session_overview", "")
-        if overview:
-            self._state["objective"] = overview
-
     def render(self) -> str:
         """Render the global state as formatted JSON for the system prompt."""
-        # Only include non-empty fields
         rendered = {k: v for k, v in self._state.items() if v}
         if not rendered:
             return ""
@@ -261,161 +344,60 @@ class GlobalStateMemory:
 
 class MemoryManager:
     """
-    Orchestrates context compression for long-running sessions.
+    Orchestrates agent-driven context management.
 
-    Called at the start of each run() with the new task prompt.
-    Modifies self.messages in-place to compress previous tasks
-    according to the three-zone architecture.
+    Responsibilities:
+      - Token counting (tiktoken cl100k_base)
+      - Context stress calculation (per-task breakdown)
+      - ContextArchive management (archive/reveal storage)
+      - Global summarization safety net (90% threshold)
+      - Global State Memory (structured facts in system prompt)
     """
 
     def __init__(self, config: MemoryConfig, provider: "LLMProvider"):
         self.config = config
         self.provider = provider
         self.global_state = GlobalStateMemory()
+        self.archive = ContextArchive()
 
-    def process(
-        self,
-        messages: List[Dict],
-        new_task: str,
-    ) -> List[Dict]:
+    # ------------------------------------------------------------------
+    # Safety-net global summarization
+    # ------------------------------------------------------------------
+
+    def process(self, messages: List[Dict]) -> List[Dict]:
         """
-        Called at the START of run(), BEFORE the new task is appended.
+        Safety-net only. Called at the start of run().
 
-        1. Find task boundaries in messages
-        2. Identify the most recent completed task (the one that just finished)
-        3. If it exceeds min_task_tokens → summarize it (task-aware)
-        4. Check total context → if over global threshold → global summarize
-        5. Return the modified messages list
-
-        Args:
-            messages:  The current self.messages (will be modified in-place)
-            new_task:  The user's new task prompt (for context-aware summarization)
-
-        Returns:
-            The (possibly modified) messages list.
+        If total tokens exceed the 90% threshold and the agent hasn't kept
+        things under control, fire global summarization to prevent overflow.
         """
-        boundaries = find_task_boundaries(messages)
+        total = count_messages_tokens(messages, self.config.provider_name)
 
-        # Need at least one completed task to summarize
-        if len(boundaries) < 1:
-            return messages
-
-        # The most recent task is the one that just completed.
-        # We summarize it now, before appending the new task.
-        last_task_idx = len(boundaries) - 1
-        last_task_msgs = extract_task_messages(messages, boundaries, last_task_idx)
-
-        # Check if it's already summarized
-        if last_task_msgs and last_task_msgs[0].get("content", "").startswith(TAG_TASK_SUMMARY):
-            # Already summarized — skip task-level, go to global check
-            pass
-        else:
-            # Estimate tokens for the last completed task
-            task_tokens = sum(
-                estimate_tokens(m.get("content", ""), self.config.chars_per_token)
-                for m in last_task_msgs
+        if total > self.config.global_summary_threshold_tokens:
+            logger.info(
+                "Global safety net triggered: %d tokens > %d threshold",
+                total, self.config.global_summary_threshold_tokens,
             )
-
-            if task_tokens > self.config.min_task_tokens:
-                # Summarize the last completed task
-                messages = self._summarize_task(
-                    messages, boundaries, last_task_idx, new_task
-                )
-            # else: task is small enough, keep as-is
-
-        # --- Global summarization check ---
-        total_tokens = sum(
-            estimate_tokens(m.get("content", ""), self.config.chars_per_token)
-            for m in messages
-        )
-
-        if total_tokens > self.config.global_summary_threshold_tokens:
             messages = self._global_summarize(messages)
 
         return messages
 
-    # ------------------------------------------------------------------
-    # Task-level summarization
-    # ------------------------------------------------------------------
-
-    def _summarize_task(
-        self,
-        messages: List[Dict],
-        boundaries: List[int],
-        task_index: int,
-        new_task: str,
-    ) -> List[Dict]:
-        """
-        Replace all messages of a single task with one [TASK SUMMARY] message.
-        """
-        start = boundaries[task_index]
-        if task_index + 1 < len(boundaries):
-            end = boundaries[task_index + 1]
-        else:
-            end = len(messages)
-
-        task_msgs = messages[start:end]
-
-        # Build the content string from all task messages
-        task_content = "\n\n".join(
-            f"[{m['role']}]\n{m['content']}" for m in task_msgs
-        )
-
-        # LLM summarization call
-        prompt = _TASK_SUMMARY_PROMPT.format(
-            new_task=new_task,
-            task_content=task_content,
-        )
-
-        try:
-            summary_text = self.provider.chat(
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-                max_tokens=int(self.config.task_summary_max_tokens * self.config.chars_per_token),
-            )
-
-            # Parse the JSON response
-            summary_json = self._parse_json_response(summary_text)
-
-            # Update global state memory
-            if summary_json:
-                self.global_state.update_from_task_summary(summary_json)
-
-            # Format the summary message
-            summary_content = f"{TAG_TASK_SUMMARY}\n{summary_text}"
-
-        except Exception as e:
-            logger.warning(f"Task summarization failed: {e}. Keeping raw context.")
-            return messages
-
-        # Replace task messages with single summary
-        summary_msg = {"role": "user", "content": summary_content}
-        messages = messages[:start] + [summary_msg] + messages[end:]
-
-        return messages
-
-    # ------------------------------------------------------------------
-    # Global summarization
-    # ------------------------------------------------------------------
-
     def _global_summarize(self, messages: List[Dict]) -> List[Dict]:
         """
-        When total tokens exceed the global threshold, find the midpoint
-        and collapse everything in the older half into a global summary.
+        Collapse the older half of context into a [GLOBAL SUMMARY].
+
+        When an [ARCHIVED TASK N] placeholder is consumed, its ContextArchive
+        entry is permanently deleted — the original is no longer recoverable.
         """
-        # Calculate cumulative token counts to find the midpoint
-        total_tokens = sum(
-            estimate_tokens(m.get("content", ""), self.config.chars_per_token)
-            for m in messages
-        )
-        midpoint_target = total_tokens // 2
+        total = count_messages_tokens(messages, self.config.provider_name)
+        midpoint_target = total // 2
 
         # Walk from start, accumulating tokens until we cross midpoint
         cumulative = 0
         split_index = 0
         for i, msg in enumerate(messages):
-            cumulative += estimate_tokens(
-                msg.get("content", ""), self.config.chars_per_token
+            cumulative += count_tokens(
+                msg.get("content", ""), self.config.provider_name
             )
             if cumulative >= midpoint_target:
                 split_index = i + 1
@@ -424,10 +406,21 @@ class MemoryManager:
         if split_index <= 0:
             return messages
 
-        # The older half to collapse
         older_messages = messages[:split_index]
 
-        # Collect summaries from the older half
+        # Permanently delete any ContextArchive entries being consumed
+        for msg in older_messages:
+            content = msg.get("content", "")
+            m = _ARCHIVED_PATTERN.match(content)
+            if m:
+                pos = int(m.group(1))
+                self.archive.clear_position(pos)
+                logger.info(
+                    "Global summarizer permanently deleted archive for Task %d",
+                    pos,
+                )
+
+        # Build the text to summarise
         summaries_text = "\n\n---\n\n".join(
             m.get("content", "") for m in older_messages
         )
@@ -438,7 +431,7 @@ class MemoryManager:
             summary_text = self.provider.chat(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,
-                max_tokens=int(self.config.global_summary_max_tokens * self.config.chars_per_token),
+                max_tokens=int(self.config.global_summary_max_tokens * 4),
             )
 
             summary_json = self._parse_json_response(summary_text)
@@ -450,13 +443,62 @@ class MemoryManager:
                 "content": f"{TAG_GLOBAL_SUMMARY}\n{summary_text}",
             }
 
-            # Replace older half with single global summary
             messages = [global_msg] + messages[split_index:]
 
         except Exception as e:
-            logger.warning(f"Global summarization failed: {e}. Keeping context as-is.")
+            logger.warning(
+                "Global summarization failed: %s. Keeping context as-is.", e
+            )
 
         return messages
+
+    # ------------------------------------------------------------------
+    # Context stress signal
+    # ------------------------------------------------------------------
+
+    def build_context_stress(self, messages: List[Dict]) -> str:
+        """
+        Build the context stress signal for the system prompt.
+
+        Returns a human-readable string with total token usage and
+        per-task breakdown, updated every agentic step.
+        """
+        provider = self.config.provider_name
+        total = count_messages_tokens(messages, provider)
+        max_tok = self.config.max_context_tokens
+        pct = round(total / max_tok * 100) if max_tok else 0
+
+        tmap = find_task_map(messages)
+
+        lines = [f"Context: {total:,} / {max_tok:,} tokens ({pct}%)"]
+
+        if tmap:
+            # Find the active task (highest position)
+            active_pos = max(tmap.keys())
+
+            for pos in sorted(tmap.keys()):
+                start, end, is_archived = tmap[pos]
+                if is_archived:
+                    summary_preview = messages[start]["content"].split(
+                        "\n", 1
+                    )[-1][:80]
+                    lines.append(
+                        f"  Task {pos}: ARCHIVED "
+                        f"— \"{summary_preview}...\""
+                    )
+                else:
+                    task_tokens = count_messages_tokens(
+                        messages[start:end], provider
+                    )
+                    marker = " ← active" if pos == active_pos else ""
+                    lines.append(
+                        f"  Task {pos}: {task_tokens:,} tokens{marker}"
+                    )
+
+        if pct >= 70:
+            lines.append("⚡ Context stress elevated.")
+
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -464,23 +506,16 @@ class MemoryManager:
 
     @staticmethod
     def _parse_json_response(text: str) -> Optional[Dict]:
-        """
-        Parse a JSON response from the summarizer LLM.
-        Handles cases where the LLM wraps the JSON in markdown fences.
-        """
+        """Parse a JSON response, handling markdown fences."""
         cleaned = text.strip()
-
-        # Strip markdown code fences if present
         if cleaned.startswith("```"):
-            lines = cleaned.split("\n")
-            # Remove first and last lines (fences)
-            if len(lines) >= 3:
-                cleaned = "\n".join(lines[1:-1]).strip()
-
+            raw_lines = cleaned.split("\n")
+            if len(raw_lines) >= 3:
+                cleaned = "\n".join(raw_lines[1:-1]).strip()
         try:
             return json.loads(cleaned)
         except json.JSONDecodeError:
-            logger.warning(f"Could not parse summarizer JSON: {cleaned[:200]}")
+            logger.warning("Could not parse summarizer JSON: %s", cleaned[:200])
             return None
 
     def get_state_json(self) -> str:
@@ -488,9 +523,19 @@ class MemoryManager:
         return self.global_state.render()
 
     def serialize_state(self) -> Dict:
-        """Serialize the global state for persistence (e.g. in session data)."""
-        return self.global_state.to_dict()
+        """Serialize full memory state for session persistence."""
+        return {
+            "global_state": self.global_state.to_dict(),
+            "archive": self.archive.serialize(),
+        }
 
     def restore_state(self, data: Dict) -> None:
-        """Restore global state from persisted data."""
-        self.global_state = GlobalStateMemory.from_dict(data)
+        """Restore full memory state from persisted data."""
+        if not data:
+            return
+        gs = data.get("global_state")
+        if gs:
+            self.global_state = GlobalStateMemory.from_dict(gs)
+        arch = data.get("archive")
+        if arch:
+            self.archive = ContextArchive.deserialize(arch)

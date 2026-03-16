@@ -97,6 +97,13 @@ class BaseSession(ABC):
     def session_id(self) -> str:
         """Unique identifier for this session."""
 
+    def save_extra(self, data: Dict) -> None:
+        """Persist additional session state (archive, counters)."""
+
+    def load_extra(self) -> Dict:
+        """Load additional session state."""
+        return {}
+
 
 # ---------------------------------------------------------------------------
 # In-memory backend
@@ -114,6 +121,7 @@ class InMemorySession(BaseSession):
     def __init__(self, session_id: str = "default"):
         self._session_id = session_id
         self._messages: List[Dict] = []
+        self._extra: Dict = {}
 
     def load(self) -> List[Dict]:
         return list(self._messages)
@@ -123,6 +131,13 @@ class InMemorySession(BaseSession):
 
     def reset(self) -> None:
         self._messages = []
+        self._extra = {}
+
+    def save_extra(self, data: Dict) -> None:
+        self._extra = dict(data)
+
+    def load_extra(self) -> Dict:
+        return dict(self._extra)
 
     @property
     def session_id(self) -> str:
@@ -199,6 +214,7 @@ class FileSession(BaseSession):
             "created_at":  existing.get("created_at", time.time()),
             "updated_at":  time.time(),
             "messages":    messages,
+            "extra":       existing.get("extra", {}),
         }
 
         # Atomic write: write to a temp file then rename so a crash mid-write
@@ -257,6 +273,35 @@ class FileSession(BaseSession):
             except (json.JSONDecodeError, OSError):
                 continue
         return sessions
+
+    def save_extra(self, data: Dict) -> None:
+        """Persist extra data into the session JSON file."""
+        existing: Dict = {}
+        if self._path.exists():
+            try:
+                with open(self._path, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        existing["extra"] = data
+        existing["updated_at"] = time.time()
+
+        tmp_path = self._path.with_suffix(".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2, ensure_ascii=False)
+        tmp_path.replace(self._path)
+
+    def load_extra(self) -> Dict:
+        """Load extra data from the session JSON file."""
+        if not self._path.exists():
+            return {}
+        try:
+            with open(self._path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("extra", {})
+        except (json.JSONDecodeError, OSError):
+            return {}
 
     def __repr__(self) -> str:
         return f"FileSession(id={self._session_id!r}, path={self._path})"
@@ -359,7 +404,12 @@ class DatabaseSession(BaseSession):
         if row is None:
             return []
         try:
-            return json.loads(row[0])
+            parsed = json.loads(row[0])
+            # New format: {"messages": [...], "extra": {...}}
+            if isinstance(parsed, dict) and "messages" in parsed:
+                return parsed["messages"]
+            # Old format: plain list
+            return parsed if isinstance(parsed, list) else []
         except (json.JSONDecodeError, TypeError):
             return []
 
@@ -371,7 +421,14 @@ class DatabaseSession(BaseSession):
         """
         sa   = self._sa
         now  = time.time()
-        data = json.dumps(messages, ensure_ascii=False)
+
+        # Wrap messages with extra data for persistence
+        existing_extra = self.load_extra()
+        payload_obj = {
+            "messages": messages,
+            "extra": existing_extra,
+        }
+        data = json.dumps(payload_obj, ensure_ascii=False)
 
         with self._engine.begin() as conn:
             exists = conn.execute(
@@ -480,6 +537,58 @@ class DatabaseSession(BaseSession):
         Not required for SQLite.
         """
         self._engine.dispose()
+
+    def save_extra(self, data: Dict) -> None:
+        """Persist extra data alongside messages in the database."""
+        sa = self._sa
+        now = time.time()
+
+        with self._engine.begin() as conn:
+            row = conn.execute(
+                sa.select(self._table.c.messages)
+                .where(self._table.c.session_id == self._session_id)
+            ).fetchone()
+
+            if row is None:
+                return
+
+            try:
+                parsed = json.loads(row[0])
+                if isinstance(parsed, dict):
+                    parsed["extra"] = data
+                else:
+                    # Old format migration
+                    parsed = {"messages": parsed, "extra": data}
+            except (json.JSONDecodeError, TypeError):
+                return
+
+            conn.execute(
+                sa.update(self._table)
+                .where(self._table.c.session_id == self._session_id)
+                .values(
+                    messages=json.dumps(parsed, ensure_ascii=False),
+                    updated_at=now,
+                )
+            )
+
+    def load_extra(self) -> Dict:
+        """Load extra data from the database."""
+        sa = self._sa
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                sa.select(self._table.c.messages)
+                .where(self._table.c.session_id == self._session_id)
+            ).fetchone()
+
+        if row is None:
+            return {}
+        try:
+            parsed = json.loads(row[0])
+            if isinstance(parsed, dict):
+                return parsed.get("extra", {})
+            return {}  # Old format — no extra
+        except (json.JSONDecodeError, TypeError):
+            return {}
 
     def __repr__(self) -> str:
         return f"DatabaseSession(id={self._session_id!r}, url={self._db_url!r})"

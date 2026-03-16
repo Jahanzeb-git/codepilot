@@ -33,11 +33,8 @@ class RuntimeConfig(BaseModel):
 
 
 class MemoryConfigModel(BaseModel):
-    chars_per_token: float = Field(default=3.8, gt=0)
     max_context_tokens: int = Field(default=120_000, gt=0)
-    min_task_tokens: int = Field(default=800, ge=0)
-    task_summary_max_tokens: int = Field(default=200, gt=0)
-    global_summary_threshold: float = Field(default=0.7, gt=0.0, le=1.0)
+    global_summary_threshold: float = Field(default=0.9, gt=0.0, le=1.0)
     global_summary_max_tokens: int = Field(default=500, gt=0)
 
 

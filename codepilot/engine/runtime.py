@@ -1,5 +1,6 @@
 import os
 import queue
+import re
 import threading
 import traceback
 from typing import Dict, List, Optional, Any
@@ -8,12 +9,16 @@ from ..core.agent_file import AgentConfig
 from ..core.ast_validator import ASTValidator, SecurityViolation
 from ..core.block_parser import BlockParser, CodeBlock
 from ..core.context import ContextManager
-from ..core.memory import MemoryManager, MemoryConfig
+from ..core.memory import (
+    MemoryManager, MemoryConfig, find_task_map,
+    get_highest_task_position, TAG_USER_INPUT,
+)
 from ..core.prompt import PromptManager
 from ..core.session import BaseSession, create_session
 from ..core.watcher import WorkspaceWatcher
 from ..engine.hooks import EventType, HookSystem
 from ..engine.provider import get_provider
+from ..tools.context import ContextTools
 from ..tools.filesystem import FilesystemTools
 from ..tools.interaction import InteractionTools
 from ..tools.registry import ToolRegistry
@@ -25,7 +30,6 @@ from ..tools.semantic import SemanticTools
 _ROLE_USER      = "user"
 _ROLE_ASSISTANT = "assistant"
 
-TAG_USER_INPUT       = "[USER INPUT]"
 TAG_USER_INJECTION   = "[USER MESSAGE]"
 TAG_EXECUTION_RESULT = "[EXECUTION RESULT]"
 TAG_ENV_CHANGE       = "[ENVIRONMENT CHANGE]"
@@ -102,6 +106,7 @@ class Runtime:
         self._interaction_tools = InteractionTools(self)
         self._semantic_tools    = SemanticTools(self)
         self._search_tools      = SearchTools(self)
+        self._context_tools     = ContextTools(self)
 
         self.registry = ToolRegistry()
         self._register_enabled_tools()
@@ -134,15 +139,23 @@ class Runtime:
         _mem_cfg = self.config.memory
         self._memory = MemoryManager(
             config=MemoryConfig(
-                chars_per_token=_mem_cfg.chars_per_token,
                 max_context_tokens=_mem_cfg.max_context_tokens,
-                min_task_tokens=_mem_cfg.min_task_tokens,
-                task_summary_max_tokens=_mem_cfg.task_summary_max_tokens,
                 global_summary_threshold=_mem_cfg.global_summary_threshold,
                 global_summary_max_tokens=_mem_cfg.global_summary_max_tokens,
+                provider_name=self.config.model.provider.lower(),
             ),
             provider=self.provider,
         )
+
+        # Restore memory state (archive + global state) from session
+        extra = self.session.load_extra()
+        if extra.get("memory_state"):
+            self._memory.restore_state(extra["memory_state"])
+
+        # ------------------------------------------------------------------ #
+        #  Task position counter                                               #
+        # ------------------------------------------------------------------ #
+        self._task_counter = get_highest_task_position(self.messages) + 1
 
         # ------------------------------------------------------------------ #
         #  Per-step ephemeral state                                            #
@@ -180,14 +193,15 @@ class Runtime:
         self._done  = False
         self._abort = False
 
-        # Context compression: summarize the previous task (if any)
-        # BEFORE appending the new task — the new task prompt is passed
-        # to the summarizer for context-aware compression.
-        self.messages = self._memory.process(self.messages, new_task=task)
+        # Safety-net: global summarization if context is dangerously high
+        self.messages = self._memory.process(self.messages)
 
+        # Assign a stable task position and append the new task
+        self._task_counter += 1
+        task_pos = self._task_counter
         self.messages.append({
             "role": _ROLE_USER,
-            "content": f"{TAG_USER_INPUT}\n{task}",
+            "content": f"[Task {task_pos}]{TAG_USER_INPUT}\n{task}",
         })
 
         self.hooks.emit(EventType.START, task=task)
@@ -213,16 +227,21 @@ class Runtime:
                 })
                 self._watcher.snapshot_all()
 
-            # 2. Build system prompt (snapshot refreshed every step)
+            # 2. Build system prompt (with context stress signal)
             system_prompt = self._build_system_prompt(step, self.config.runtime.max_steps)
+
+            # 2.5 Render messages with XML task wrappers for LLM visibility
+            rendered_msgs = self._render_messages_for_llm()
 
             # 3. LLM inference (streaming or blocking)
             try:
                 if self._stream:
-                    response_text = self._stream_inference(system_prompt)
+                    response_text = self._stream_inference(
+                        system_prompt, messages=rendered_msgs
+                    )
                 else:
                     response_text = self.provider.chat(
-                        messages=self.messages,
+                        messages=rendered_msgs,
                         system=system_prompt,
                         temperature=self.config.model.temperature,
                         max_tokens=self.config.model.max_tokens,
@@ -269,6 +288,9 @@ class Runtime:
 
         # Persist after every run() call
         self.session.save(self.messages)
+        self.session.save_extra({
+            "memory_state": self._memory.serialize_state(),
+        })
 
         # Cleanup shell sessions
         self._shell_manager.cleanup_all()
@@ -373,6 +395,11 @@ class Runtime:
         if "semantic_search" in enabled: self.registry.register("semantic_search", self._semantic_tools.semantic_search)
         if "find"            in enabled: self.registry.register("find",            self._search_tools.find)
 
+        # Context management tools (always enabled)
+        self.registry.register("archive_context",       self._context_tools.archive_context)
+        self.registry.register("reveal_context",        self._context_tools.reveal_context)
+        self.registry.register("list_archived_context", self._context_tools.list_archived_context)
+
     def _build_system_prompt(self, step: int = 0, max_steps: int = 0) -> str:
         return self.prompt_manager.render(
             agent_name=self.config.name,
@@ -383,6 +410,7 @@ class Runtime:
             codebase_snapshot=self.context_manager.get_formatted_snapshot(),
             shell_info=self._shell_manager.get_prompt_info(),
             step_info=self._build_step_info(step, max_steps),
+            context_stress=self._memory.build_context_stress(self.messages),
             global_state_memory=self._memory.get_state_json(),
         )
 
@@ -402,6 +430,56 @@ class Runtime:
         return base
 
     # ------------------------------------------------------------------ #
+    #  XML task wrappers for LLM visibility                                #
+    # ------------------------------------------------------------------ #
+
+    _TASK_PREFIX_RE = re.compile(r"^\[Task \d+\]")
+
+    def _render_messages_for_llm(self) -> List[Dict]:
+        """
+        Create a copy of messages with XML task wrappers added.
+
+        Non-archived tasks are wrapped:
+            <task_N>
+            [USER INPUT]
+            ...messages...
+            </task_N>
+
+        Archived tasks remain as-is (single [ARCHIVED TASK N] message).
+        The internal [Task N] prefix is stripped — the XML tag replaces it.
+        """
+        tmap = find_task_map(self.messages)
+
+        # Build fast lookups: which message indices open/close a task?
+        opens:  Dict[int, int] = {}   # msg_idx → task_position
+        closes: Dict[int, int] = {}   # msg_idx → task_position
+
+        for pos, (start, end, is_archived) in tmap.items():
+            if not is_archived:
+                opens[start] = pos
+                closes[end - 1] = pos
+
+        rendered = []
+        for i, msg in enumerate(self.messages):
+            content = msg.get("content", "")
+
+            # Strip the internal [Task N] prefix — XML tag replaces it
+            if self._TASK_PREFIX_RE.match(content):
+                content = self._TASK_PREFIX_RE.sub("", content, count=1)
+
+            # Add opening XML tag
+            if i in opens:
+                content = f"<task_{opens[i]}>\n{content}"
+
+            # Add closing XML tag
+            if i in closes:
+                content = f"{content}\n</task_{closes[i]}>"
+
+            rendered.append({**msg, "content": content})
+
+        return rendered
+
+    # ------------------------------------------------------------------ #
     #  Streaming inference                                                 #
     # ------------------------------------------------------------------ #
 
@@ -409,7 +487,9 @@ class Runtime:
     _COMPLETION_FENCE = "```completion"
     _HOLDBACK         = max(len(_CONTROL_FENCE), len(_COMPLETION_FENCE))  # 13 chars
 
-    def _stream_inference(self, system_prompt: str) -> str:
+    def _stream_inference(
+        self, system_prompt: str, messages: List[Dict] = None
+    ) -> str:
         """
         Stream the LLM response token by token — 3-state machine:
 
@@ -422,6 +502,7 @@ class Runtime:
 
         Returns the complete response text for normal pipeline processing.
         """
+        msgs = messages if messages is not None else self.messages
         chunks:              list = []
         pre_fence_emitted:   int  = 0
         compl_emitted:       int  = 0  # absolute offset of last emitted completion char
@@ -429,7 +510,7 @@ class Runtime:
         state:               str  = "streaming"
 
         for chunk in self.provider.chat_stream(
-            messages=self.messages,
+            messages=msgs,
             system=system_prompt,
             temperature=self.config.model.temperature,
             max_tokens=self.config.model.max_tokens,
