@@ -53,28 +53,28 @@ class HookSystem:
     @staticmethod
     def _default_tool_call(tool: str, args: dict, label: str = "", **_):
         display = label if label else ", ".join(f"{k}={v!r}" for k, v in args.items())
-        print(f"\n⚙️  [{tool}] {display}")
+        print(f"\n[{tool}] {display}")
 
     @staticmethod
     def _default_tool_result(tool: str, result: str, **_):
         preview = result[:300] + ("…" if len(result) > 300 else "")
-        print(f"   ↳ {preview}")
+        print(f"{preview}")
 
     @staticmethod
     def _default_security_error(error: str, **_):
-        print(f"\n🔒 Security violation: {error}")
+        print(f"\nSecurity violation: {error}")
 
     @staticmethod
     def _default_runtime_error(error: str, **_):
-        print(f"\n❌ Runtime error:\n{error}")
+        print(f"\nRuntime error:\n{error}")
 
     @staticmethod
     def _default_finish(summary: str, **_):
-        print(f"\n✅ Done: {summary}")
+        print(f"\nDone: {summary}")
 
     @staticmethod
     def _default_max_steps(**_):
-        print("\n⚠️  Maximum step limit reached. Agent stopped.")
+        print("\nMaximum step limit reached. Agent stopped.")
 
     # ------------------------------------------------------------------
     # Public API

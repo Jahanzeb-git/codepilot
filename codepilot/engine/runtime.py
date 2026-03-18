@@ -3,7 +3,9 @@ import queue
 import re
 import threading
 import traceback
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
+
+from ..core.prompt import SystemPromptParts
 
 from ..core.agent_file import AgentConfig
 from ..core.ast_validator import ASTValidator, SecurityViolation
@@ -17,7 +19,7 @@ from ..core.prompt import PromptManager
 from ..core.session import BaseSession, create_session
 from ..core.watcher import WorkspaceWatcher
 from ..engine.hooks import EventType, HookSystem
-from ..engine.provider import get_provider
+from ..engine.provider import get_provider, AnthropicProvider
 from ..tools.context import ContextTools
 from ..tools.filesystem import FilesystemTools
 from ..tools.interaction import InteractionTools
@@ -33,6 +35,10 @@ _ROLE_ASSISTANT = "assistant"
 TAG_USER_INJECTION   = "[USER MESSAGE]"
 TAG_EXECUTION_RESULT = "[EXECUTION RESULT]"
 TAG_ENV_CHANGE       = "[ENVIRONMENT CHANGE]"
+
+# Background timer delay for upgrading Anthropic cache TTL to 1h.
+# Set to 4.5 minutes — just before the default 5min TTL expires.
+_CACHE_REFRESH_DELAY = 4.5 * 60  # 270 seconds
 
 
 class Runtime:
@@ -55,6 +61,7 @@ class Runtime:
 
     Multi-turn
     ----------
+     
     Calling ``runtime.run(task)`` multiple times continues the conversation.
     To start fresh, call ``runtime.reset()`` first.
 
@@ -178,6 +185,12 @@ class Runtime:
         self._message_queue: queue.Queue    = queue.Queue()
         self._loop_lock:     threading.Lock = threading.Lock()
 
+        # ------------------------------------------------------------------ #
+        #  Cache TTL refresh timer (Anthropic only)                            #
+        # ------------------------------------------------------------------ #
+        self._cache_timer: Optional[threading.Timer] = None
+        self._last_system_prompt: Optional[SystemPromptParts] = None
+
     # ====================================================================== #
     #  Public API                                                             #
     # ====================================================================== #
@@ -233,6 +246,9 @@ class Runtime:
             # 2.5 Render messages with XML task wrappers for LLM visibility
             rendered_msgs = self._render_messages_for_llm()
 
+            # 2.9 Cancel any pending cache refresh timer before inference
+            self._cancel_cache_timer()
+
             # 3. LLM inference (streaming or blocking)
             try:
                 if self._stream:
@@ -256,6 +272,10 @@ class Runtime:
 
             # LLM output → assistant role
             self.messages.append({"role": _ROLE_ASSISTANT, "content": response_text})
+
+            # Schedule cache TTL refresh (Anthropic only)
+            self._last_system_prompt = system_prompt
+            self._schedule_cache_timer()
 
             # 4. Parse response
             control_block, payload_blocks, completion_block = BlockParser.split(response_text)
@@ -292,6 +312,9 @@ class Runtime:
             "memory_state": self._memory.serialize_state(),
         })
 
+        # Note: do NOT cancel the cache timer here.
+        # It should fire between tasks to upgrade TTL to 1h.
+
         # Cleanup shell sessions
         self._shell_manager.cleanup_all()
 
@@ -307,6 +330,7 @@ class Runtime:
 
     def reset(self):
         """Wipe the entire conversation history and start fresh."""
+        self._cancel_cache_timer()
         self.messages = []
         self.session.reset()
         self.hooks.emit(EventType.SESSION_RESET)
@@ -400,7 +424,7 @@ class Runtime:
         self.registry.register("reveal_context",        self._context_tools.reveal_context)
         self.registry.register("list_archived_context", self._context_tools.list_archived_context)
 
-    def _build_system_prompt(self, step: int = 0, max_steps: int = 0) -> str:
+    def _build_system_prompt(self, step: int = 0, max_steps: int = 0) -> SystemPromptParts:
         return self.prompt_manager.render(
             agent_name=self.config.name,
             agent_role=self.config.role or "",
@@ -428,6 +452,47 @@ class Runtime:
         if pct >= 33:
             return f"{base} — {pct}% agentic steps consumed!"
         return base
+
+    # ------------------------------------------------------------------ #
+    #  Cache TTL refresh timer (Anthropic only)                            #
+    # ------------------------------------------------------------------ #
+
+    def _cancel_cache_timer(self) -> None:
+        """Cancel any pending cache refresh timer."""
+        if self._cache_timer is not None:
+            self._cache_timer.cancel()
+            self._cache_timer = None
+
+    def _schedule_cache_timer(self) -> None:
+        """
+        Start a background timer that fires after 4.5 minutes of inactivity.
+
+        When it fires, it sends a minimal (1-token) inference call to upgrade
+        the conversational cache breakpoint TTL from 5 minutes to 1 hour.
+
+        Only activates for AnthropicProvider — other providers do automatic
+        caching and don't benefit from explicit TTL management.
+        """
+        if not isinstance(self.provider, AnthropicProvider):
+            return
+
+        self._cancel_cache_timer()
+
+        def _refresh():
+            """Background thread: fire refresh_cache_ttl on the provider."""
+            try:
+                self.provider.refresh_cache_ttl(
+                    messages=self._render_messages_for_llm(),
+                    system=self._last_system_prompt,
+                )
+            except Exception:
+                pass  # Best-effort — failure just means cache expires naturally.
+            finally:
+                self._cache_timer = None
+
+        self._cache_timer = threading.Timer(_CACHE_REFRESH_DELAY, _refresh)
+        self._cache_timer.daemon = True  # Don't block process exit.
+        self._cache_timer.start()
 
     # ------------------------------------------------------------------ #
     #  XML task wrappers for LLM visibility                                #
@@ -488,7 +553,7 @@ class Runtime:
     _HOLDBACK         = max(len(_CONTROL_FENCE), len(_COMPLETION_FENCE))  # 13 chars
 
     def _stream_inference(
-        self, system_prompt: str, messages: List[Dict] = None
+        self, system_prompt: Union[str, SystemPromptParts], messages: List[Dict] = None
     ) -> str:
         """
         Stream the LLM response token by token — 3-state machine:
