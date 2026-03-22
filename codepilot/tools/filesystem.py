@@ -196,7 +196,27 @@ class FilesystemTools:
                 with open(abs_path, "w", encoding="utf-8") as f:
                     f.writelines(lines)
                 
-                result = f"[write_file] '{path}' multi-edited: applied {applied} block replacements."
+                # Report each block in original top-to-bottom order so the
+                # LLM can cross-reference against its own codepilot block.
+                block_details = []
+                for (s_line, e_line), block in sorted(
+                    zip(edits, payloads), key=lambda op: op[0][0]
+                ):
+                    new_lines = block.content.count("\n") + (
+                        1 if block.content and not block.content.endswith("\n") else 0
+                    )
+                    block_details.append(f"L{s_line}–{e_line} → {new_lines} lines")
+
+                with open(abs_path, "r", encoding="utf-8") as f:
+                    total_lines = sum(1 for _ in f)
+
+                detail_str = ", ".join(f"[{d}]" for d in block_details)
+                result = (
+                    f"[write_file] '{path}' multi-edited: "
+                    f"applied {applied} block replacements "
+                    f"({detail_str}). "
+                    f"File now has {total_lines} lines total."
+                )
 
             # -------------------------------------------------------------- #
             #  mode='w'                                                        #
@@ -204,7 +224,13 @@ class FilesystemTools:
             elif mode == "w":
                 with open(abs_path, "w", encoding="utf-8") as f:
                     f.write(new_content)
-                result = f"[write_file] '{path}' written ({len(new_content)} bytes)."
+                line_count = new_content.count("\n") + (
+                    1 if new_content and not new_content.endswith("\n") else 0
+                )
+                result = (
+                    f"[write_file] '{path}' written "
+                    f"({len(new_content)} bytes, {line_count} lines)."
+                )
 
             # -------------------------------------------------------------- #
             #  mode='a'                                                        #
@@ -212,7 +238,16 @@ class FilesystemTools:
             elif mode == "a":
                 with open(abs_path, "a", encoding="utf-8") as f:
                     f.write(new_content)
-                result = f"[write_file] '{path}' appended ({len(new_content)} bytes)."
+                appended_lines = new_content.count("\n") + (
+                    1 if new_content and not new_content.endswith("\n") else 0
+                )
+                with open(abs_path, "r", encoding="utf-8") as f:
+                    total_lines = sum(1 for _ in f)
+                result = (
+                    f"[write_file] '{path}' appended "
+                    f"({len(new_content)} bytes, {appended_lines} lines). "
+                    f"File now has {total_lines} lines total."
+                )
 
             # -------------------------------------------------------------- #
             #  mode='edit'                                                     #

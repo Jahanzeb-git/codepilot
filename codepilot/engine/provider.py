@@ -127,13 +127,15 @@ class AnthropicProvider(LLMProvider):
     _SYSTEM_CACHE_TTL = "1h"       # system prompt → survives between tasks
     _CONV_CACHE_TTL   = None       # conversation → 5min default (omit ttl field)
 
-    def __init__(self, api_key: str, model: str):
+    def __init__(self, api_key: str, model: str, thinking_enabled: bool = False, thinking_budget: int = 8000):
         try:
             from anthropic import Anthropic
         except ImportError:
             raise ImportError("Install the anthropic package: pip install anthropic")
-        self.client = Anthropic(api_key=api_key)
-        self.model  = model
+        self.client           = Anthropic(api_key=api_key)
+        self.model            = model
+        self.thinking_enabled = thinking_enabled
+        self.thinking_budget  = thinking_budget
 
     # ------------------------------------------------------------------ #
     #  System prompt → two content blocks with cache_control               #
@@ -295,16 +297,36 @@ class AnthropicProvider(LLMProvider):
         kwargs = dict(
             model=self.model,
             messages=self._add_rolling_breakpoint(messages),
-            temperature=temperature,
+            # Extended thinking requires temperature=1.0 — enforce it regardless
+            # of what the agent config says.
+            temperature=1.0 if self.thinking_enabled else temperature,
             max_tokens=max_tokens,
         )
+
+        if self.thinking_enabled:
+            kwargs["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": self.thinking_budget,
+            }
 
         system_blocks = self._build_system_blocks(system)
         if system_blocks:
             kwargs["system"] = system_blocks
 
         response = self.client.messages.create(**kwargs)
-        return response.content[0].text
+
+        # Reconstruct the full response string, including thinking tags so they:
+        #   (a) stream to the user via _emit_prefence_text in non-stream mode, and
+        #   (b) are stored in the assistant turn for conversational continuity.
+        # Iterating blocks is also the crash-safe way to extract text —
+        # content[0] is a ThinkingBlock when extended thinking is on.
+        parts = []
+        for block in response.content:
+            if block.type == "thinking":
+                parts.append(f"<thinking>\n{block.thinking}\n</thinking>")
+            elif block.type == "text":
+                parts.append(block.text)
+        return "\n".join(parts)
 
     def chat_stream(
         self,
@@ -316,17 +338,52 @@ class AnthropicProvider(LLMProvider):
         kwargs = dict(
             model=self.model,
             messages=self._add_rolling_breakpoint(messages),
-            temperature=temperature,
+            temperature=1.0 if self.thinking_enabled else temperature,
             max_tokens=max_tokens,
         )
+
+        if self.thinking_enabled:
+            kwargs["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": self.thinking_budget,
+            }
 
         system_blocks = self._build_system_blocks(system)
         if system_blocks:
             kwargs["system"] = system_blocks
 
-        with self.client.messages.stream(**kwargs) as stream:
-            for text in stream.text_stream:
-                yield text
+        if self.thinking_enabled:
+            # Use the raw event stream so we can intercept thinking blocks and
+            # wrap them in tags before they hit the runtime's state machine.
+            # The state machine emits everything before the first ```codepilot
+            # fence to the user in real time — thinking tags ride that path
+            # naturally with zero changes to the streaming logic.
+            from anthropic.types import (
+                ContentBlockStartEvent,
+                ContentBlockDeltaEvent,
+                ContentBlockStopEvent,
+            )
+            in_thinking = False
+            with self.client.messages.stream(**kwargs) as stream:
+                for event in stream:
+                    if isinstance(event, ContentBlockStartEvent):
+                        if event.content_block.type == "thinking":
+                            in_thinking = True
+                            yield "<thinking>\n"
+                        else:
+                            in_thinking = False
+                    elif isinstance(event, ContentBlockDeltaEvent):
+                        if event.delta.type == "thinking_delta":
+                            yield event.delta.thinking
+                        elif event.delta.type == "text_delta":
+                            yield event.delta.text
+                    elif isinstance(event, ContentBlockStopEvent) and in_thinking:
+                        yield "\n</thinking>\n"
+                        in_thinking = False
+        else:
+            with self.client.messages.stream(**kwargs) as stream:
+                for text in stream.text_stream:
+                    yield text
 
 
 class AlibabaProvider(LLMProvider):
@@ -438,7 +495,11 @@ def get_provider(config) -> LLMProvider:
     if provider_name == "openai":
         return OpenAIProvider(api_key, config.name)
     elif provider_name == "anthropic":
-        return AnthropicProvider(api_key, config.name)
+        return AnthropicProvider(
+            api_key, config.name,
+            thinking_enabled=config.thinking.enabled,
+            thinking_budget=config.thinking.budget_tokens,
+        )
     elif provider_name == "alibaba":
         return AlibabaProvider(api_key, config.name)
     else:

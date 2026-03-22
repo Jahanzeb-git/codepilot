@@ -76,7 +76,7 @@ class ASTValidator(ast.NodeVisitor):
                        "subprocess.check_output"}
             if attr_chain in blocked:
                 raise SecurityViolation(
-                    f"Direct call to '{attr_chain}' is blocked. Use run_command() instead."
+                    f"Direct call to '{attr_chain}' is blocked. Use execute() shell tool instead."
                 )
         self.generic_visit(node)
 

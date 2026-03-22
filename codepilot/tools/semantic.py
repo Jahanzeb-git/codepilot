@@ -208,7 +208,7 @@ class SemanticTools:
           - Describe intent, not syntax: "error handling in API layer"
 
         Use `top_k` to limit results (default 5).
-        Skip this tool when you already know the exact file — use `read_file` instead.
+        Skip this tool when you already know the exact file's content of focus.
         """
         self._ensure_setup()
 

@@ -2,7 +2,7 @@
 
 **CodePilot** is a code-native agentic framework for Python. The LLM writes executable code to act — no JSON schemas, no function-calling APIs, no tool wrappers. This document covers every feature with working code examples.
 
-**Version:** `0.6.0`
+**Version:** `0.8.0`
 
 > **Linux only.** Both the shell tools (`execute`, `read_output`, `send_input`, `send_signal`, `kill_shell`) and `semantic_search` require **Linux**. They rely on `pexpect` and `grepai` — deploy your agent in a Linux container.
 >
@@ -26,7 +26,7 @@ Set your LLM provider key before running anything:
 # Pick one
 export ANTHROPIC_API_KEY="sk-ant-..."
 export OPENAI_API_KEY="sk-..."
-export TOGETHER_API_KEY="..."
+export DASHSCOPE_API_KEY="..."
 ```
 
 ---
@@ -140,11 +140,14 @@ agent:
   system_prompt: "./prompts/instructions.md"
 
   model:
-    provider: "anthropic"           # "anthropic" | "openai" | "together"
-    name: "claude-opus-4-5"
-    api_key_env: "ANTHROPIC_API_KEY"
+    provider: "alibaba"             # "anthropic" | "openai" | "alibaba"
+    name: "qwen-max"
+    api_key_env: "DASHSCOPE_API_KEY"
     temperature: 0.2
     max_tokens: 8096
+    thinking:                       # Anthropic only: extended reasoning
+      enabled: false
+      budget_tokens: 8000
 
   runtime:
     work_dir: "./workspace"         # where the agent reads/writes files
@@ -223,7 +226,7 @@ agent:
 |---|---|---|
 | `anthropic` | `claude-opus-4-5`, `claude-sonnet-4-5` | `ANTHROPIC_API_KEY` |
 | `openai` | `gpt-4o`, `gpt-4-turbo` | `OPENAI_API_KEY` |
-| `together` | `mistralai/Mixtral-8x7B-Instruct-v0.1` | `TOGETHER_API_KEY` |
+| `alibaba` | `qwen-max`, `qwen-plus`, `qwen-turbo` | `DASHSCOPE_API_KEY` |
 
 ---
 

@@ -5,12 +5,26 @@ import os
 from typing import Dict, Any
 
  
+class ThinkingConfig(BaseModel):
+    """Extended thinking config — Anthropic models only."""
+    enabled: bool = False
+    budget_tokens: int = Field(
+        default=8000, gt=0,
+        description="Max tokens the model may spend on internal reasoning."
+    )
+
+
 class ModelConfig(BaseModel):
     provider: str = Field(..., description="LLM provider: 'anthropic', 'openai', or 'alibaba'")
     name: str = Field(..., description="Model identifier, e.g. 'claude-3-5-sonnet-20241022'")
     api_key_env: str = Field(default="OPENAI_API_KEY", description="Name of the env var holding the API key")
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     max_tokens: int = Field(default=4096, gt=0)
+    thinking: ThinkingConfig = Field(
+        default_factory=ThinkingConfig,
+        description="Extended thinking settings (Anthropic only). "
+                    "When enabled, temperature is forced to 1.0 automatically."
+    )
 
 
 class ToolConfig(BaseModel):

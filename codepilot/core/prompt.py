@@ -1,5 +1,6 @@
 import os
 import platform
+from pathlib import Path
 from datetime import datetime
 from typing import NamedTuple
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -45,22 +46,18 @@ class PromptManager:
 
     def __init__(self, template_path: str = None):
         if template_path is None:
-            template_path = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                "..", "prompts", "system_prompt.j2",
-            )
+            template_path = Path(__file__).parent / ".." / "prompts" / "system_prompt.j2"
 
-        template_path = os.path.abspath(template_path)
-        template_dir  = os.path.dirname(template_path)
-        template_file = os.path.basename(template_path)
+        template_path = Path(template_path).resolve()
+        template_dir  = template_path.parent
+        template_file = template_path.name
 
-        env = Environment(
-            loader=select_autoescape(),
-            keep_trailing_newline=True,
+        engine = Environment(
+            loader=FileSystemLoader(template_dir),
+            autoescape=select_autoescape(),
+            keep_trailing_newline=True
         )
-        # Use FileSystemLoader so Jinja2 can find any {% include %} partials later.
-        env.loader = FileSystemLoader(template_dir)
-        self._template = env.get_template(template_file)
+        self._template = engine.get_template(template_file)
 
     def render(
         self,
@@ -93,7 +90,7 @@ class PromptManager:
         # Split on the ENVIRONMENT section header.
         # The marker lives in the dynamic half so that the static part ends
         # with a clean trailing newline after the RULES section.
-        idx = full.find(_CACHE_SPLIT_MARKER)
+        idx = full.find(_CACHE_SPLIT_MARKER) 
         if idx == -1:
             # Marker missing (custom template?) — treat everything as static.
             return SystemPromptParts(static=full, dynamic="")

@@ -34,7 +34,7 @@ class BlockParser:
             # preserve any intentional blank lines inside the content.
             content = content.rstrip("\n")
             blocks.append(CodeBlock(language=lang, content=content, index=idx))
-        return blocks
+        return blocks   
 
     @classmethod
     def split(cls, text: str) -> Tuple[Optional[CodeBlock], List[CodeBlock], Optional[CodeBlock]]:
