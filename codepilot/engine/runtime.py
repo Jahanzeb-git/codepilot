@@ -435,7 +435,6 @@ class Runtime:
             shell_info=self._shell_manager.get_prompt_info(),
             step_info=self._build_step_info(step, max_steps),
             context_stress=self._memory.build_context_stress(self.messages),
-            global_state_memory=self._memory.get_state_json(),
         )
 
     @staticmethod

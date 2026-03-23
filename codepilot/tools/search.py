@@ -79,25 +79,18 @@ class SearchTools:
         max_results: int = 50,
     ) -> str:
         """
-        Search for a text pattern (regex) across a file, multiple files, or
-        the whole codebase. Results are returned as 'file:line:matched_line'
-        — one match per line. Uses ripgrep when available (fast, honours
-        .gitignore automatically), otherwise falls back to a Python walker.
+        Search for a text pattern (regex) across a file, list of files, or the
+        whole codebase. Returns one 'file:line:matched_line' per matching line.
 
-        scope='file'      — search one file. target='path/to/file.py'
-        scope='files'     — search multiple files. target=['a.py', 'b.py']
-        scope='codebase'  — search the entire workspace. Use include='*.py'
-                            to restrict by glob pattern (avoids noise from
-                            node_modules, build artifacts, lock files).
+        scope='file'     — single file. target='path/to/file.py'
+        scope='files'    — multiple files. target=['a.py', 'b.py']
+        scope='codebase' — entire workspace. Use include='*.py' to restrict by glob.
 
         Examples:
-          find(pattern=r'validate_email\(', scope='file', target='routes/profile.py')
-          find(pattern='TODO:', scope='files', target=['routes/profile.py', 'utils/validators.py'])
-          find(pattern=r'class \w+Handler', scope='codebase', include='*.py')
-          find(pattern='import torch', scope='codebase', include='tests/**')
+          find(pattern=r'class \w+Error', scope='codebase', include='*.py')
+          find(pattern=r'def login\(', scope='file', target='routes/auth.py')
 
-        Pattern is a regex. Escape special chars: r'validate_email\(' not 'validate_email('.
-        Results capped at max_results (default 50).
+        Use raw strings for regex special chars: r'validate_email\(' not 'validate_email('.
         """
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="find",

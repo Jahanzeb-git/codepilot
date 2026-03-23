@@ -21,18 +21,13 @@ giving the agent the information it needs to make context decisions.
 
 Global summarization remains as a safety net at 90% context utilisation
 — it fires only when the agent hasn't kept things under control.
-
-Global State Memory is a structured JSON snapshot of the session's
-cumulative actions (files created, modified, commands run, etc.) and
-is injected into the system prompt every step.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Dict, List, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..engine.provider import LLMProvider
@@ -203,20 +198,12 @@ class MemoryConfig:
 
 _GLOBAL_SUMMARY_PROMPT = """\
 You are a context compression assistant. Summarize the following sequence of \
-completed task content into a single cohesive global summary. Preserve key \
-facts: files created/modified, critical decisions, unresolved issues.
+completed task content into a single cohesive paragraph. Preserve key facts: \
+files created or modified, critical decisions made, and any unresolved issues. \
+Write in plain prose — no JSON, no headers, no lists.
 
 ## Content to compress:
 {summaries}
-
-## Output format (respond ONLY with this JSON, no markdown fences):
-{{
-  "session_overview": "<what has been accomplished so far>",
-  "files_created": ["<file>"],
-  "files_modified": ["<file — what changed>"],
-  "key_decisions": ["<decision>"],
-  "unresolved": ["<open issue>"]
-}}
 """
 
 
@@ -270,75 +257,6 @@ class ContextArchive:
 
 
 # -----------------------------------------------------------------------
-# Global State Memory
-# -----------------------------------------------------------------------
-
-class GlobalStateMemory:
-    """
-    Structured snapshot of cumulative session state.
-    Updated incrementally after global summarization.
-    Rendered into the system prompt every step.
-    """
-
-    def __init__(self):
-        self._state: Dict[str, Any] = {
-            "objective": "",
-            "files_created": [],
-            "files_modified": [],
-            "commands_run": [],
-            "open_issues": [],
-            "key_decisions": [],
-        }
-
-    def update_from_global_summary(self, summary_json: Dict) -> None:
-        """Merge a global summary's structured data into the global state."""
-        if not summary_json:
-            return
-
-        overview = summary_json.get("session_overview", "")
-        if overview:
-            self._state["objective"] = overview
-
-        for key in ("files_created", "files_modified", "commands_run"):
-            new_items = summary_json.get(key, [])
-            if isinstance(new_items, list):
-                existing = self._state.get(key, [])
-                for item in new_items:
-                    if item and item not in existing:
-                        existing.append(item)
-                self._state[key] = existing
-
-        unresolved = summary_json.get("unresolved", [])
-        if isinstance(unresolved, list):
-            for item in unresolved:
-                if item and item not in self._state["open_issues"]:
-                    self._state["open_issues"].append(item)
-
-        decisions = summary_json.get("key_decisions", [])
-        if isinstance(decisions, list):
-            for item in decisions:
-                if item and item not in self._state["key_decisions"]:
-                    self._state["key_decisions"].append(item)
-
-    def render(self) -> str:
-        """Render the global state as formatted JSON for the system prompt."""
-        rendered = {k: v for k, v in self._state.items() if v}
-        if not rendered:
-            return ""
-        return json.dumps(rendered, indent=2, ensure_ascii=False)
-
-    def to_dict(self) -> Dict:
-        return dict(self._state)
-
-    @classmethod
-    def from_dict(cls, data: Dict) -> "GlobalStateMemory":
-        instance = cls()
-        if data:
-            instance._state.update(data)
-        return instance
-
-
-# -----------------------------------------------------------------------
 # Memory Manager
 # -----------------------------------------------------------------------
 
@@ -351,13 +269,11 @@ class MemoryManager:
       - Context stress calculation (per-task breakdown)
       - ContextArchive management (archive/reveal storage)
       - Global summarization safety net (90% threshold)
-      - Global State Memory (structured facts in system prompt)
     """
 
     def __init__(self, config: MemoryConfig, provider: "LLMProvider"):
         self.config = config
         self.provider = provider
-        self.global_state = GlobalStateMemory()
         self.archive = ContextArchive()
 
     # ------------------------------------------------------------------
@@ -434,10 +350,6 @@ class MemoryManager:
                 max_tokens=int(self.config.global_summary_max_tokens * 4),
             )
 
-            summary_json = self._parse_json_response(summary_text)
-            if summary_json:
-                self.global_state.update_from_global_summary(summary_json)
-
             global_msg = {
                 "role": "user",
                 "content": f"{TAG_GLOBAL_SUMMARY}\n{summary_text}",
@@ -504,38 +416,16 @@ class MemoryManager:
     # Helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _parse_json_response(text: str) -> Optional[Dict]:
-        """Parse a JSON response, handling markdown fences."""
-        cleaned = text.strip()
-        if cleaned.startswith("```"):
-            raw_lines = cleaned.split("\n")
-            if len(raw_lines) >= 3:
-                cleaned = "\n".join(raw_lines[1:-1]).strip()
-        try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError:
-            logger.warning("Could not parse summarizer JSON: %s", cleaned[:200])
-            return None
-
-    def get_state_json(self) -> str:
-        """Return the global state memory rendered for the system prompt."""
-        return self.global_state.render()
-
     def serialize_state(self) -> Dict:
-        """Serialize full memory state for session persistence."""
+        """Serialize memory state for session persistence."""
         return {
-            "global_state": self.global_state.to_dict(),
             "archive": self.archive.serialize(),
         }
 
     def restore_state(self, data: Dict) -> None:
-        """Restore full memory state from persisted data."""
+        """Restore memory state from persisted data."""
         if not data:
             return
-        gs = data.get("global_state")
-        if gs:
-            self.global_state = GlobalStateMemory.from_dict(gs)
         arch = data.get("archive")
         if arch:
             self.archive = ContextArchive.deserialize(arch)

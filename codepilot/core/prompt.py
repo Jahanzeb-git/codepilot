@@ -70,7 +70,6 @@ class PromptManager:
         shell_info: str = "",
         step_info: str = "",
         context_stress: str = "",
-        global_state_memory: str = "",
     ) -> SystemPromptParts:
         full = self._template.render(
             agent_name=agent_name,
@@ -84,7 +83,6 @@ class PromptManager:
             shell_info=shell_info,
             step_info=step_info,
             context_stress=context_stress,
-            global_state_memory=global_state_memory,
         )
 
         # Split on the ENVIRONMENT section header.
