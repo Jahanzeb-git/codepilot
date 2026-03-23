@@ -162,7 +162,7 @@ class Runtime:
         # ------------------------------------------------------------------ #
         #  Task position counter                                               #
         # ------------------------------------------------------------------ #
-        self._task_counter = get_highest_task_position(self.messages) + 1
+        self._task_counter = get_highest_task_position(self.messages)
 
         # ------------------------------------------------------------------ #
         #  Per-step ephemeral state                                            #
@@ -205,6 +205,7 @@ class Runtime:
         """
         self._done  = False
         self._abort = False
+        self._shell_manager.ensure_default_shell()
 
         # Safety-net: global summarization if context is dangerously high
         self.messages = self._memory.process(self.messages)
@@ -315,9 +316,6 @@ class Runtime:
         # Note: do NOT cancel the cache timer here.
         # It should fire between tasks to upgrade TTL to 1h.
 
-        # Cleanup shell sessions
-        self._shell_manager.cleanup_all()
-
         if not self._done and not self._abort:
             if step >= self.config.runtime.max_steps:
                 self.hooks.emit(EventType.MAX_STEPS)
@@ -333,6 +331,8 @@ class Runtime:
         self._cancel_cache_timer()
         self.messages = []
         self.session.reset()
+        self._shell_manager.cleanup_all()
+        self._shell_manager.start_default_shell()
         self.hooks.emit(EventType.SESSION_RESET)
 
     def send_message(self, message: str):

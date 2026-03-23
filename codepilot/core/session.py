@@ -519,7 +519,13 @@ class DatabaseSession(BaseSession):
         sessions = []
         for row in rows:
             try:
-                msg_count = len(json.loads(row[2]))
+                parsed = json.loads(row[2])
+                if isinstance(parsed, dict) and isinstance(parsed.get("messages"), list):
+                    msg_count = len(parsed["messages"])
+                elif isinstance(parsed, list):
+                    msg_count = len(parsed)
+                else:
+                    msg_count = 0
             except (json.JSONDecodeError, TypeError):
                 msg_count = 0
             sessions.append({

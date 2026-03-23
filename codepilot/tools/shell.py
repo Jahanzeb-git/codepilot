@@ -34,6 +34,9 @@ class ShellSession:
         self._rc_pattern = re.compile(
             rf'{re.escape(self._marker)}_RC_(\d+)'
         )
+        self._cwd_pattern = re.compile(
+            rf'^{re.escape(self._marker)}_CWD_(.*)$', re.MULTILINE
+        )
 
         self.process = pexpect.spawn(
             '/bin/bash', ['--norc', '--noprofile'],
@@ -58,6 +61,7 @@ class ShellSession:
         self.status: str = "idle"
         self.return_code: Optional[int] = None
         self.last_used: float = time.time()
+        self.cwd: str = work_dir
 
     def run(self, command: str, timeout: int):
         """Execute a command. Returns (output, completed, return_code)."""
@@ -69,7 +73,11 @@ class ShellSession:
         self.last_used = time.time()
 
         # Append RC echo so we can detect completion + exit code
-        full_cmd = f'{command}; echo "{self._marker}_RC_$?"'
+        full_cmd = (
+            f'{command}; __cp_rc=$?; '
+            f'printf "{self._marker}_CWD_%s\\n" "$PWD"; '
+            f'echo "{self._marker}_RC_${{__cp_rc}}"'
+        )
         self.process.sendline(full_cmd)
 
         output, completed, rc = self._read_until(timeout)
@@ -155,15 +163,30 @@ class ShellSession:
         """Read until RC marker or timeout. Returns (output, completed, rc)."""
         try:
             self.process.expect(self._rc_pattern, timeout=timeout)
-            output = strip_ansi(self.process.before).strip('\r\n')
+            output = self._extract_cwd_marker(
+                strip_ansi(self.process.before).strip('\r\n')
+            )
             rc = int(self.process.match.group(1))
             return output, True, rc
         except pexpect.TIMEOUT:
-            output = strip_ansi(self.process.before).strip('\r\n')
+            output = self._extract_cwd_marker(
+                strip_ansi(self.process.before).strip('\r\n')
+            )
             return output, False, None
         except pexpect.EOF:
-            output = strip_ansi(self.process.before).strip('\r\n')
+            output = self._extract_cwd_marker(
+                strip_ansi(self.process.before).strip('\r\n')
+            )
             return output, True, -1
+
+    def _extract_cwd_marker(self, text: str) -> str:
+        """Update current shell cwd from marker lines and remove marker from output."""
+        matches = list(self._cwd_pattern.finditer(text))
+        if matches:
+            self.cwd = matches[-1].group(1).strip() or self.cwd
+            text = self._cwd_pattern.sub("", text)
+            text = text.strip("\r\n")
+        return text
 
 
 # ======================================================================
@@ -195,6 +218,16 @@ class ShellManager:
                 f"[shell] Warning: Could not start default shell: {e}"
             )
 
+    def ensure_default_shell(self):
+        """Guarantee the default 'main' session exists and is alive."""
+        main = self._sessions.get("main")
+        if main is None or not main.is_alive():
+            if main is not None:
+                self._sessions.pop("main", None)
+                if "main" in self._session_order:
+                    self._session_order.remove("main")
+            self.start_default_shell()
+
     def get_prompt_info(self) -> str:
         """Generate shell info for the system prompt."""
         if not self._sessions:
@@ -206,7 +239,7 @@ class ShellManager:
             if session and session.is_alive():
                 tag = " (most recent)" if i == 0 else ""
                 lines.append(
-                    f'  "{sid}" | PID: {session.pid} | {session.status}{tag}'
+                    f'  "{sid}" | PID: {session.pid} | {session.status} | cwd: {session.cwd}{tag}'
                 )
         return "\n".join(lines) if lines else "No shell sessions active."
 
@@ -577,7 +610,7 @@ class ShellManager:
         header = f"{tag} {label}" if label else tag
 
         rc_str = f" | return_code: {rc}" if rc is not None else ""
-        footer = f"[status: {status}{rc_str} | pid: {pid}]"
+        footer = f"[status: {status}{rc_str} | pid: {pid} | cwd: {self._sessions[session_id].cwd}]"
 
         if output.strip():
             return f"{header}\n{output}\n{footer}"

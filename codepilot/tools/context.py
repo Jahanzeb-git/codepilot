@@ -31,8 +31,9 @@ class ContextTools:
 
     def archive_context(
         self,
-        position: Union[int, Tuple[int, ...]],
-        summary: Union[str, List[str]],
+        position: Union[int, Tuple[int, ...], None] = None,
+        summary: Union[str, List[str], None] = None,
+        task: Union[int, Tuple[int, ...], None] = None,
     ) -> str:
         """Archive completed task context, replacing it with your summary.
 
@@ -42,12 +43,22 @@ class ContextTools:
         Args:
             position: Task position (int) or tuple of positions.
             summary:  Summary string or list of strings (one per position).
+            task:     Alias for 'position'. Use either position= or task=.
 
         Cannot archive the currently active task.
         """
         messages = self.runtime.messages
         memory   = self.runtime._memory
         provider = memory.config.provider_name
+
+        if position is not None and task is not None:
+            return "ERROR: Provide only one of 'position' or 'task', not both."
+        if position is None:
+            position = task
+        if position is None:
+            return "ERROR: Missing required argument: 'position' (or alias 'task')."
+        if summary is None:
+            return "ERROR: Missing required argument: 'summary'."
 
         # Normalise inputs
         positions = (position,) if isinstance(position, int) else tuple(position)

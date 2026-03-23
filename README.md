@@ -1,10 +1,10 @@
-# CodePilot — Developer Reference
+# "CodePilot-ai" Developer Reference
 
-**CodePilot** is a code-native agentic framework for Python. The LLM writes executable code to act — no JSON schemas, no function-calling APIs, no tool wrappers. This document covers every feature with working code examples.
+**CodePilot** is a code-native agentic framework for Python. The LLM writes executable code to act, no JSON schemas, no function-calling APIs, no tool wrappers. This document covers every feature with working code examples.
 
-**Version:** `0.8.0`
+**Version:** `0.8.4`
 
-> **Linux only.** Both the shell tools (`execute`, `read_output`, `send_input`, `send_signal`, `kill_shell`) and `semantic_search` require **Linux**. They rely on `pexpect` and `grepai` — deploy your agent in a Linux container.
+> **Linux only.** Both the shell tools (`execute`, `read_output`, `send_input`, `send_signal`, `kill_shell`) and `semantic_search` require **Linux**. They rely on `pexpect` and `grepai` â€” deploy your agent in a Linux container.
 >
 > **Docker tip:** Pre-install `grepai` and `ripgrep` in your image:
 > ```dockerfile
@@ -42,7 +42,7 @@ export DASHSCOPE_API_KEY="..."
 7. [Context memory management](#7-context-memory-management)
 8. [Resuming a session](#8-resuming-a-session)
 9. [Resetting a session](#9-resetting-a-session)
-10. [Hooks — full observability](#10-hooks)
+10. [Hooks â€” full observability](#10-hooks)
 11. [Permission gating](#11-permission-gating)
 12. [Mid-task message injection](#12-mid-task-message-injection)
 13. [Multi-operation steps](#13-multi-operation-steps)
@@ -72,11 +72,11 @@ Each agent step:
 
 ### The three block types
 
-**Control Block** (` ```codepilot `) — the only block the runtime executes. Regular ` ```python ` blocks are display-only markdown the agent uses freely in explanations.
+**Control Block** (` ```codepilot `) â€” the only block the runtime executes. Regular ` ```python ` blocks are display-only markdown the agent uses freely in explanations.
 
-**Payload Blocks** (` ```python `, ` ```js `, etc. after a codepilot block) — file content consumed by `write_file()` in order. Never executed.
+**Payload Blocks** (` ```python `, ` ```js `, etc. after a codepilot block) â€” file content consumed by `write_file()` in order. Never executed.
 
-**Completion Block** (` ```completion `) — natural text that streams directly to the user in real time. Its presence marks the task complete — the agentic loop terminates after this step. Can be combined with the codepilot block and payload blocks in a single agentic step.
+**Completion Block** (` ```completion `) â€” natural text that streams directly to the user in real time. Its presence marks the task complete â€” the agentic loop terminates after this step. Can be combined with the codepilot block and payload blocks in a single agentic step.
 
 ### Response shapes
 
@@ -85,17 +85,17 @@ Each agent step:
 Alright, let me read the file first to get the line numbers.
 
 ```codepilot
-# Reading before editing — exact line numbers required.
+# Reading before editing â€” exact line numbers required.
 read_file("routes/profile.py", start_line=35, end_line=65)
 ```
 ````
 
 **Single-step task (action + completion in one step):**
 ````
-Got it — updating the timeout value.
+Got it â€” updating the timeout value.
 
 ```codepilot
-# Simple single-line edit, no read needed — we know the line.
+# Simple single-line edit, no read needed â€” we know the line.
 write_file("config.py", start_line=12, end_line=12, mode="edit")
 ```
 
@@ -113,7 +113,7 @@ Done. Updated TIMEOUT to 30s in config.py on line 12.
 Sure! Here's how the config loader handles missing files:
 
 ```python
-# Display block — never executed
+# Display block â€” never executed
 def load(path: str) -> dict:
     if not os.path.exists(path):
         return {}   # returns empty dict as default
@@ -121,14 +121,14 @@ def load(path: str) -> dict:
         return json.load(f)
 ```
 
-The fallback is an empty dict, so callers always get a valid dict — no None checks needed.
+The fallback is an empty dict, so callers always get a valid dict â€” no None checks needed.
 ````
 
 ---
 
 ## 2. AgentFile
 
-Every Runtime is driven by a YAML config. Paths are resolved relative to the YAML file's location — not the caller's CWD.
+Every Runtime is driven by a YAML config. Paths are resolved relative to the YAML file's location â€” not the caller's CWD.
 
 ```yaml
 # agent.yaml
@@ -196,17 +196,17 @@ agent:
     - name: "semantic_search"
       enabled: true
       config:
-        # VoyageAI API key env var — REQUIRED for semantic search to work.
+        # VoyageAI API key env var â€” REQUIRED for semantic search to work.
         # Get a free key at https://www.voyageai.com/
         api_key_env: "VOYAGE_API_KEY"
 
-        # Embedding model — voyage-code-3 is purpose-built for code search
+        # Embedding model â€” voyage-code-3 is purpose-built for code search
         model: "voyage-code-3"
 
-        # VoyageAI uses an OpenAI-compatible API — this is the default endpoint
+        # VoyageAI uses an OpenAI-compatible API â€” this is the default endpoint
         base_url: "https://api.voyageai.com/v1"
 
-        # Provider name passed to grepai internals (leave as "openai" —
+        # Provider name passed to grepai internals (leave as "openai" â€”
         # it's the protocol name, not the vendor)
         provider: "openai"
 
@@ -240,7 +240,7 @@ summary = runtime.run("Create a FastAPI hello-world server in main.py")
 print(summary)  # the text the agent put in the completion block, or None
 ```
 
-`run()` is **blocking** — it returns when the agent emits a completion block, hits `max_steps`, or is aborted. The return value is the completion block text, or `None` if the loop ended for any other reason.
+`run()` is **blocking** â€” it returns when the agent emits a completion block, hits `max_steps`, or is aborted. The return value is the completion block text, or `None` if the loop ended for any other reason.
 
 ---
 
@@ -267,9 +267,9 @@ runtime.run("Refactor the database module to use async SQLAlchemy")
 
 The runtime streams in two windows per step:
 
-1. **Pre-fence text** — everything before the ` ```codepilot ` block. This is the agent's reasoning paragraph and any display ` ```python ` blocks used in explanations. Streams in real time as the LLM generates it.
+1. **Pre-fence text** â€” everything before the ` ```codepilot ` block. This is the agent's reasoning paragraph and any display ` ```python ` blocks used in explanations. Streams in real time as the LLM generates it.
 
-2. **Completion block** — the ` ```completion ` block content, when the task is done. Streams in real time directly to the user. The loop terminates after this.
+2. **Completion block** â€” the ` ```completion ` block content, when the task is done. Streams in real time directly to the user. The loop terminates after this.
 
 Everything between the two windows (the codepilot block, payload blocks) is buffered silently while tools execute.
 
@@ -277,7 +277,7 @@ For **chat/question responses** (no `codepilot` block at all), the **entire resp
 
 ### Non-streaming mode
 
-Without `stream=True`, the full response is emitted as a single `STREAM` event when inference completes. The `on_stream` hook still fires — you see the complete text at once rather than token-by-token.
+Without `stream=True`, the full response is emitted as a single `STREAM` event when inference completes. The `on_stream` hook still fires â€” you see the complete text at once rather than token-by-token.
 
 ```python
 runtime = Runtime("agent.yaml")   # stream=False by default
@@ -301,10 +301,10 @@ runtime = Runtime("agent.yaml")
 # Turn 1
 runtime.run("Create a FastAPI app with a /items GET endpoint")
 
-# Turn 2 — agent has full context of what it built in turn 1
+# Turn 2 â€” agent has full context of what it built in turn 1
 runtime.run("Now add a POST /items endpoint with Pydantic validation")
 
-# Turn 3 — agent knows the full codebase it has built
+# Turn 3 â€” agent knows the full codebase it has built
 runtime.run("Add pytest tests for both endpoints")
 ```
 
@@ -316,9 +316,9 @@ Session backends are chosen at construction time.
 
 | Backend | Storage | Survives restart | Best for |
 |---|---|---|---|
-| `"memory"` (default) | RAM only | ❌ | Scripts, one-off tasks |
-| `"file"` | `~/.codepilot/sessions/` | ✅ | CLI tools, local dev |
-| `"db"` | Any SQL database | ✅ | Web apps, containers, multi-user |
+| `"memory"` (default) | RAM only | âŒ | Scripts, one-off tasks |
+| `"file"` | `~/.codepilot/sessions/` | âœ… | CLI tools, local dev |
+| `"db"` | Any SQL database | âœ… | Web apps, containers, multi-user |
 
 ### In-memory (default)
 
@@ -360,7 +360,7 @@ Session file format:
 
 ### Database-backed
 
-Persists history to any SQLAlchemy-compatible database. The `codepilot_sessions` table is created automatically — no migration scripts needed. This is the correct backend for web apps deployed in containers.
+Persists history to any SQLAlchemy-compatible database. The `codepilot_sessions` table is created automatically â€” no migration scripts needed. This is the correct backend for web apps deployed in containers.
 
 ```bash
 # Install the db extras
@@ -369,7 +369,7 @@ pip install psycopg2-binary           # PostgreSQL driver only
 ```
 
 ```python
-# SQLite — simple, zero-config, great for local persistence
+# SQLite â€” simple, zero-config, great for local persistence
 runtime = Runtime(
     "agent.yaml",
     session="db",
@@ -377,7 +377,7 @@ runtime = Runtime(
     db_url="sqlite:///./codepilot.db",
 )
 
-# PostgreSQL — for containers, Cloud Run, multi-user apps
+# PostgreSQL â€” for containers, Cloud Run, multi-user apps
 import os
 runtime = Runtime(
     "agent.yaml",
@@ -391,11 +391,11 @@ runtime = Runtime(
 
 | Moment | What happens |
 |---|---|
-| `Runtime(...)` construction | One `SELECT` — loads prior messages for the session_id, or `[]` for new sessions |
-| Each `run()` call | All agentic steps run **fully in-memory** — zero DB I/O during inference |
-| `run()` completes | One atomic `UPSERT` — full messages list written to DB |
-| New `Runtime(...)` same `session_id` | One `SELECT` — session fully restored |
-| `runtime.reset()` | `DELETE` row — clean slate |
+| `Runtime(...)` construction | One `SELECT` â€” loads prior messages for the session_id, or `[]` for new sessions |
+| Each `run()` call | All agentic steps run **fully in-memory** â€” zero DB I/O during inference |
+| `run()` completes | One atomic `UPSERT` â€” full messages list written to DB |
+| New `Runtime(...)` same `session_id` | One `SELECT` â€” session fully restored |
+| `runtime.reset()` | `DELETE` row â€” clean slate |
 
 **Listing all sessions:**
 
@@ -411,73 +411,67 @@ for s in ds.list_sessions():
 
 ## 7. Context Memory Management
 
-For long-running sessions, CodePilot automatically manages the LLM's context window using a three-zone progressive compression system. It requires zero configuration — the defaults are tuned for typical coding sessions.
+CodePilot uses agent-driven context control with a global safety net.
 
 ### How it works
 
-At the start of every `run()` call, *before* the new task is appended:
+1. The agent can explicitly archive finished tasks using `archive_context(...)`. The original task messages are stored internally and replaced with `[ARCHIVED TASK N]` plus your summary.
+2. The agent can restore any archived task using `reveal_context(N)`.
+3. A global safety net runs at the start of each `run()`: if context exceeds `global_summary_threshold * max_context_tokens`, older history is collapsed into one `[GLOBAL SUMMARY]` message.
 
-1. **Task-level summarization** — if the most recently completed task exceeds `min_task_tokens`, a summarizer LLM call compresses it to a single `[TASK SUMMARY]` message (~150 tokens). The new task prompt is passed to the summarizer so retention is biased toward what matters next.
-2. **Global summarization** — if total context exceeds `global_summary_threshold` × `max_context_tokens`, the oldest half of messages is collapsed into a single `[GLOBAL SUMMARY]` message.
-3. **Active task** — always kept 100% raw, never touched.
-
-Small tasks (quick edits, short commands) stay raw permanently — the threshold prevents compressing tasks that don't need it.
+This gives precise control during normal operation, while still preventing overflow in very long sessions.
 
 ### Configuration
 
-Add a `memory:` block to your `agent.yaml`. All fields are optional — the defaults work well:
+Add a `memory:` block to `agent.yaml` (all optional):
 
 ```yaml
 agent:
-  name: "BackendEngineer"
-  model:
-    provider: "anthropic"
-    name: "claude-opus-4-5"
-    api_key_env: "ANTHROPIC_API_KEY"
-
   memory:
-    # Token estimator (chars / chars_per_token = tokens)
-    # Tune once by spot-checking against your tokenizer. ±15% error is fine.
-    chars_per_token: 3.8
-
-    # Your model's context window limit
+    # Context window size for stress tracking and safety-net triggering
     max_context_tokens: 120000
 
-    # Task-level summarization: only summarize tasks larger than this.
-    # Default 4000 means small edits (typically ~1400 tokens) are kept raw.
-    # Raise to skip all task-level summarization; lower to compress aggressively.
-    min_task_tokens: 4000
+    # Trigger global summary when usage crosses this fraction
+    global_summary_threshold: 0.9
 
-    # Target length for each task summary (in tokens)
-    task_summary_max_tokens: 200
-
-    # Global summarization triggers when total context exceeds this fraction
-    # of max_context_tokens. 0.7 = trigger at 84k tokens for a 120k model.
-    global_summary_threshold: 0.7
-
-    # Target length for the single global summary message
+    # Max tokens for generated [GLOBAL SUMMARY] content
     global_summary_max_tokens: 500
 ```
 
-### What the LLM sees in a long session
+### What the LLM sees in long sessions
 
 ```
-[GLOBAL SUMMARY]         ← oldest tasks, collapsed into one ~500-token overview
-[TASK SUMMARY]           ← task N, ~150 tokens
-[TASK SUMMARY]           ← task N+1, ~150 tokens (or raw if under threshold)
-[USER INPUT] + steps     ← active task, 100% raw
+[GLOBAL SUMMARY]            <- oldest history compressed by safety net
+[ARCHIVED TASK 3]           <- explicit archive summary created by agent
+[ARCHIVED TASK 4]           <- explicit archive summary created by agent
+[Task 5][USER INPUT] ...    <- active task, raw
 ```
 
-The system prompt always includes a **Global State Memory** block — a live structured JSON snapshot of what the agent has done (files created/modified, commands run, open issues) updated after every summarization:
+### Context tools
 
-```json
-{
-  "objective": "Building a FastAPI e-commerce backend",
-  "files_created": ["main.py", "models/user.py", "routes/users.py"],
-  "files_modified": ["routes/users.py (L31-52, POST handler)"],
-  "commands_run": ["pytest tests/ — 12 passed"],
-  "open_issues": ["Email verification not implemented"]
-}
+Use these from the control block:
+
+```python
+# Archive one task
+archive_context(task=3, summary="Implemented auth middleware and passing tests.")
+
+# Backward-compatible argument name
+archive_context(position=4, summary="Added user routes and validation.")
+
+# Archive multiple tasks in one call
+archive_context(
+    task=(1, 2),
+    summary=[
+        "Initialized FastAPI project layout.",
+        "Added SQLAlchemy models for users and sessions."
+    ]
+)
+
+# Reveal archived task content
+reveal_context(3)
+
+# List archived tasks with token savings
+list_archived_context()
 ```
 
 ---
@@ -490,11 +484,11 @@ Pass the same `session_id` to a new file-backed Runtime and the prior conversati
 # Process 1
 runtime = Runtime("agent.yaml", session="file", session_id="ecommerce-api")
 runtime.run("Create the products and orders FastAPI endpoints")
-# Process exits — session saved
+# Process exits â€” session saved
 
 # -------- later, new process --------
 
-# Process 2 — picks up exactly where process 1 left off
+# Process 2 â€” picks up exactly where process 1 left off
 runtime = Runtime("agent.yaml", session="file", session_id="ecommerce-api")
 runtime.run("Add database migrations using Alembic")
 ```
@@ -520,7 +514,7 @@ if meta:
     print(f"Last updated: {meta['updated_at']}")
     print(f"File path: {fs.path}")
 else:
-    print("No saved session — will start fresh")
+    print("No saved session â€” will start fresh")
 ```
 
 ---
@@ -535,7 +529,7 @@ runtime = Runtime("agent.yaml", session="file", session_id="ecommerce-api")
 # ... some runs ...
 
 runtime.reset()
-runtime.run("Start over — build a GraphQL API instead")
+runtime.run("Start over â€” build a GraphQL API instead")
 ```
 
 ---
@@ -564,7 +558,7 @@ runtime = Runtime("agent.yaml", stream=True)
 
 @on_stream(runtime)
 def handle_stream(text: str, **_):
-    """Fires for each text chunk — both pre-fence reasoning and completion block content."""
+    """Fires for each text chunk â€” both pre-fence reasoning and completion block content."""
     print(text, end="", flush=True)
 
 
@@ -575,25 +569,25 @@ def handle_tool_call(tool: str, args: dict, label: str = "", **_):
     Falls back to args dump if label is not set.
     """
     display = label if label else str(args)
-    print(f"\n⚙️  [{tool}] {display}")
+    print(f"\nâš™ï¸  [{tool}] {display}")
 
 
 @on_tool_result(runtime)
 def handle_tool_result(tool: str, result: str, **_):
     """Fires after every tool returns."""
-    print(f"   ↳ {result[:200]}")
+    print(f"   â†³ {result[:200]}")
 
 
 @on_ask_user(runtime)
 def handle_ask(question: str, **_):
     """Fires when the agent calls ask_user()."""
-    print(f"\n❓ {question}")
+    print(f"\nâ“ {question}")
 
 
 @on_finish(runtime)
 def handle_finish(summary: str, **_):
     """Fires when the task completes (completion block detected)."""
-    print(f"\n✅ {summary}\n")
+    print(f"\nâœ… {summary}\n")
 
 
 @on_user_message_queued(runtime)
@@ -633,11 +627,11 @@ runtime.hooks.register(EventType.FINISH,  lambda summary, **_: save_to_db(summar
 | `PERMISSION_REQUEST` | `tool`, `description` | Tool with `require_permission: true` fires |
 | `SECURITY_ERROR` | `error` | AST validation rejects the control block |
 | `RUNTIME_ERROR` | `error` | `exec()` throws an exception |
-| `FINISH` | `summary` | Task complete — completion block detected |
-| `MAX_STEPS` | — | Loop exits because `max_steps` was reached |
+| `FINISH` | `summary` | Task complete â€” completion block detected |
+| `MAX_STEPS` | â€” | Loop exits because `max_steps` was reached |
 | `USER_MESSAGE_QUEUED` | `message` | `send_message()` called |
 | `USER_MESSAGE_INJECTED` | `message` | Queued message enters LLM context |
-| `SESSION_RESET` | — | `reset()` called |
+| `SESSION_RESET` | â€” | `reset()` called |
 
 ---
 
@@ -654,11 +648,11 @@ runtime = Runtime("agent.yaml")
 @on_permission_request(runtime)
 def gate(tool: str, description: str, **_) -> bool:
     """
-    tool        — "write_file" | "execute"
-    description — human-readable description of the specific operation
+    tool        â€” "write_file" | "execute"
+    description â€” human-readable description of the specific operation
     Return True to approve, False to deny.
     """
-    print(f"\n⚠️  [{tool}] {description}")
+    print(f"\nâš ï¸  [{tool}] {description}")
     return input("Approve? [y/N]: ").strip().lower() in ("y", "yes")
 
 
@@ -684,8 +678,8 @@ def auto_gate(tool: str, description: str, **_) -> bool:
 `runtime.run()` is blocking and runs on the calling thread. From any other thread, call `runtime.send_message()` to inject a message into the running agent.
 
 1. Queued immediately (non-blocking, thread-safe)
-2. Tagged `[USER MESSAGE]` — distinct from `[USER INPUT]` (the original task)
-3. Injected into the LLM context at the **next step boundary** — never mid-step
+2. Tagged `[USER MESSAGE]` â€” distinct from `[USER INPUT]` (the original task)
+3. Injected into the LLM context at the **next step boundary** â€” never mid-step
 
 ```python
 import threading
@@ -733,7 +727,7 @@ Up to **5 `write_file()` calls** with `mode='w'` or `mode='a'` per step. Each ca
 Alright, both files are independent so I'll write them together.
 
 ```codepilot
-# Two new files — order of write_file() matches order of payload blocks below.
+# Two new files â€” order of write_file() matches order of payload blocks below.
 write_file("config.py")
 write_file("utils.py")
 ```
@@ -760,7 +754,7 @@ Use `mode='multi_edit'` with `edits=[(start1, end1), (start2, end2)]` to fix mul
 
 ````
 ```codepilot
-# Fix L42-48 (error handling) and L55 (regex) in one step — no drift
+# Fix L42-48 (error handling) and L55 (regex) in one step â€” no drift
 write_file("routes/profile.py", mode="multi_edit", edits=[(42, 48), (55, 55)])
 ```
 
@@ -775,7 +769,7 @@ write_file("routes/profile.py", mode="multi_edit", edits=[(42, 48), (55, 55)])
 
 ### Multiple file reads
 
-Any number of `read_file()` calls per step — no limit.
+Any number of `read_file()` calls per step â€” no limit.
 
 ```python
 # LLM control block:
@@ -788,30 +782,30 @@ read_file("tests/test_config.py")
 
 ## 13. Shell Tools
 
-The agent has a **persistent, non-blocking shell session system** powered by pexpect. Commands never hang the agent — output is captured up to a timeout and returned immediately.
+The agent has a **persistent, non-blocking shell session system** powered by pexpect. Commands never hang the agent â€” output is captured up to a timeout and returned immediately.
 
 > **Linux/macOS only.** pexpect requires POSIX. Deploy in a Linux container.
 
-A default shell session (`"main"`) starts automatically when the Runtime is created. Its PID and status are shown in the agent's system prompt every step.
+A default shell session (`"main"`) starts automatically when the Runtime is created and persists across `run()` calls on the same Runtime instance. Its PID, status, and current working directory are shown in the system prompt every step.
 
-### execute — run a command
+### execute â€” run a command
 
 Runs a command, waits up to `timeout` seconds, returns whatever output is available.
 
 ```python
 # LLM control block:
 
-# status: completed → command finished within timeout (includes return_code)
+# status: completed â†’ command finished within timeout (includes return_code)
 execute("main", "pytest tests/ -v", 30)
 
-# status: running → timeout hit, process still alive
+# status: running â†’ timeout hit, process still alive
 execute("main", "pip install -r requirements.txt", 10)
 
 # Spin up a server on its own shell, in one step
 execute("server", "uvicorn app.main:app --host 0.0.0.0 --port 8000", 4, new_shell=True)
 ```
 
-### read_output — wait for more output
+### read_output â€” wait for more output
 
 Called after `execute` returned `status: running`. Waits up to `timeout` seconds for new output.
 
@@ -823,7 +817,7 @@ Called after `execute` returned `status: running`. Waits up to `timeout` seconds
 read_output("main", 30)   # wait up to 30 more seconds
 ```
 
-### send_input — interact with prompts
+### send_input â€” interact with prompts
 
 Sends text to an interactive command waiting for user input.
 
@@ -833,10 +827,10 @@ send_input("main", "yes\n", 5)    # confirm a CLI prompt
 send_input("main", "admin\n", 5)  # enter a username
 ```
 
-### send_signal — interrupt or stop
+### send_signal â€” interrupt or stop
 
 ```python
-# Interrupt foreground process (Ctrl+C) — shell survives
+# Interrupt foreground process (Ctrl+C) â€” shell survives
 send_signal("server", "SIGINT")
 
 # Terminate or kill the shell process entirely
@@ -844,7 +838,7 @@ send_signal("server", "SIGTERM")
 send_signal("server", "SIGKILL")
 ```
 
-### kill_shell — destroy a session
+### kill_shell â€” destroy a session
 
 ```python
 kill_shell("server")   # terminates the process, removes the session
@@ -853,16 +847,16 @@ kill_shell("server")   # terminates the process, removes the session
 ### Full example: server + test
 
 ```python
-# Step 1 — LLM control block:
+# Step 1 â€” LLM control block:
 # Start server on its own shell, verify startup logs within 4s
 execute("server", "uvicorn app.main:app --port 8000", 4, new_shell=True)
 
-# Step 2 — LLM control block (after seeing server startup logs):
+# Step 2 â€” LLM control block (after seeing server startup logs):
 # Run tests against the live server from main shell
 execute("main", "pytest tests/test_api.py -v", 30)
 
-# Step 3 — LLM control block (after tests pass):
-# Shut server down cleanly — then use a completion block to finish
+# Step 3 â€” LLM control block (after tests pass):
+# Shut server down cleanly â€” then use a completion block to finish
 send_signal("server", "SIGINT")
 ```
 
@@ -874,26 +868,26 @@ When `read_output()` returns in full-mode (the command is already done, no new d
 
 ## 14. Completion Block
 
-The ` ```completion ` block is how the agent signals a task is done. Its content is natural text that **streams directly to the user in real time** — token by token just like the pre-fence reasoning. When the runtime detects it, the agentic loop terminates after the current step.
+The ` ```completion ` block is how the agent signals a task is done. Its content is natural text that **streams directly to the user in real time** â€” token by token just like the pre-fence reasoning. When the runtime detects it, the agentic loop terminates after the current step.
 
 ### Why it exists
 
-- **No wasted step** — `done()` required a dedicated agentic step just to call it. The completion block can be combined with the action step, saving a full LLM inference call on simple tasks.
-- **Real-time streaming** — the completion text reaches the user as the LLM generates it, not after.
-- **Natural** — the agent just writes its closing message as plain text inside the fence, rather than constructing a Python string argument.
+- **No wasted step** â€” `done()` required a dedicated agentic step just to call it. The completion block can be combined with the action step, saving a full LLM inference call on simple tasks.
+- **Real-time streaming** â€” the completion text reaches the user as the LLM generates it, not after.
+- **Natural** â€” the agent just writes its closing message as plain text inside the fence, rather than constructing a Python string argument.
 
 ### Separate final step (multi-step tasks)
 
 After tests pass and all work is verified:
 
 ````
-All green — both fixes are solid.
+All green â€” both fixes are solid.
 
 ```completion
 Fixed the 500 on profile email update: two bugs squashed.
-(1) `routes/profile.py:L42` — bare DB write had no error handling; wrapped in try/except,
+(1) `routes/profile.py:L42` â€” bare DB write had no error handling; wrapped in try/except,
 now returns a proper 400 on failure.
-(2) `utils/validators.py:L18` — email regex was rejecting `+` aliases; pattern updated.
+(2) `utils/validators.py:L18` â€” email regex was rejecting `+` aliases; pattern updated.
 All tests pass. You're good to go.
 ```
 ````
@@ -914,7 +908,7 @@ TIMEOUT = 30
 ```
 
 ```completion
-Done — updated TIMEOUT from 10 to 30 seconds in config.py:L12.
+Done â€” updated TIMEOUT from 10 to 30 seconds in config.py:L12.
 ```
 ````
 
@@ -925,7 +919,7 @@ The completion block fires the `FINISH` hook with its text as `summary`:
 ```python
 @on_finish(runtime)
 def handle_finish(summary: str, **_):
-    print(f"\n✅ {summary}\n")
+    print(f"\nâœ… {summary}\n")
     save_to_database(summary)   # or send a notification, etc.
 
 summary = runtime.run("Fix the login bug")
@@ -943,22 +937,22 @@ The runtime automatically detects when **you** modify files in the workspace bet
 ```
 [ENVIRONMENT CHANGE] 2026-02-21 16:30:12
 
-📝 Modified: main.py
+ðŸ“ Modified: main.py
   Changed lines: 1-4, 47
-📄 Created: .env (3 lines)
-🗑️ Deleted: old_config.py
+ðŸ“„ Created: .env (3 lines)
+ðŸ—‘ï¸ Deleted: old_config.py
 ```
 
-The agent is then instructed to re-read affected files before editing — because its cached line numbers may be wrong.
+The agent is then instructed to re-read affected files before editing â€” because its cached line numbers may be wrong.
 
 **How it works:**
 
-- Tracking is **opt-in by file** — only files the agent has touched (read or written) are watched
-- Detection is **snapshot-based** — no background daemon, no file watchers, zero overhead between steps
+- Tracking is **opt-in by file** â€” only files the agent has touched (read or written) are watched
+- Detection is **snapshot-based** â€” no background daemon, no file watchers, zero overhead between steps
 - Snapshots are taken at the end of each step and compared at the start of the next
 - Diff limits: 30 changed lines reported per file, 100 total across all files
 
-No configuration is required — this is always on.
+No configuration is required â€” this is always on.
 
 ---
 
@@ -976,34 +970,34 @@ def show(text: str, **_):
 
 @on_finish(runtime)
 def done(summary: str, **_):
-    print(f"\n✅ {summary}")
+    print(f"\nâœ… {summary}")
 
 
-# Agent answers with natural markdown — no code executed, streams fully
+# Agent answers with natural markdown â€” no code executed, streams fully
 runtime.run("How does the config loader handle missing files?")
 
-# Agent takes action — executes code, ends with completion block
+# Agent takes action â€” executes code, ends with completion block
 runtime.run("Add a fallback default value to the config loader")
 ```
 
-The agent freely uses ` ```python ` blocks to display code examples in its explanations — they are **never** executed. Only ` ```codepilot ` blocks execute.
+The agent freely uses ` ```python ` blocks to display code examples in its explanations â€” they are **never** executed. Only ` ```codepilot ` blocks execute.
 
 ### Step awareness
 
 The agent's system prompt is refreshed every step with the current timestamp, OS, working directory, and a live step counter with progressive urgency:
 
 ```
-# Steps 1-9 of 30 — neutral
+# Steps 1-9 of 30 â€” neutral
 Agentic step 3 / 30
 
-# Steps 10-22 of 30 — mild signal
-Agentic step 12 / 30 — 40% agentic steps consumed!
+# Steps 10-22 of 30 â€” mild signal
+Agentic step 12 / 30 â€” 40% agentic steps consumed!
 
-# Steps 23-26 of 30 — approaching
-Agentic step 24 / 30 — 80% agentic steps consumed. Approaching step limit!
+# Steps 23-26 of 30 â€” approaching
+Agentic step 24 / 30 â€” 80% agentic steps consumed. Approaching step limit!
 
-# Steps 27-30 of 30 — urgent
-Agentic step 28 / 30 — 93% agentic steps consumed! Hard Limit Near!
+# Steps 27-30 of 30 â€” urgent
+Agentic step 28 / 30 â€” 93% agentic steps consumed! Hard Limit Near!
 ```
 
 This allows the agent to reason about time, deadlines, and to self-regulate efficiency as it approaches the configured `max_steps` limit.
@@ -1054,7 +1048,7 @@ runtime.run("Research the latest SQLAlchemy 2.0 async API and implement a connec
 def safe_execute(session_id: str, command: str, timeout: int = 10, new_shell: bool = False):
     """
     Run a shell command. Restricted to read-only operations in this environment.
-    Never import subprocess or os directly — always use this tool.
+    Never import subprocess or os directly â€” always use this tool.
     """
     blocked = ["rm", "del", "format", ">", "sudo", "pip install"]
     if any(cmd in command for cmd in blocked):
@@ -1081,7 +1075,7 @@ agent_thread = threading.Thread(
 )
 agent_thread.start()
 
-# From anywhere — stops after the current step completes (never mid-step)
+# From anywhere â€” stops after the current step completes (never mid-step)
 runtime.abort()
 agent_thread.join()
 ```
@@ -1106,15 +1100,15 @@ def show_stream(text: str, **_):
 
 @on_finish(runtime)
 def show_done(summary: str, **_):
-    print(f"\n✅ {summary}\n")
+    print(f"\nâœ… {summary}\n")
 
 
 @on_ask_user(runtime)
 def show_question(question: str, **_):
-    print(f"\n❓ {question}")
+    print(f"\nâ“ {question}")
 
 
-print("CodePilot CLI — type 'reset' to clear history, 'quit' to exit.\n")
+print("CodePilot CLI â€” type 'reset' to clear history, 'quit' to exit.\n")
 
 while True:
     try:
@@ -1175,7 +1169,7 @@ def streaming(text: str, **_):
 
 @on_finish(runtime)
 def done(summary: str, **_):
-    print(f"\n✅ {summary}\n")
+    print(f"\nâœ… {summary}\n")
 
 
 while True:
@@ -1232,7 +1226,7 @@ def _push(event: dict):
 runtime.hooks.register(EventType.STREAM,
     lambda text, **_: _push({"type": "stream", "text": text}))
 
-# Tool activity — label gives a clean human-readable status string
+# Tool activity â€” label gives a clean human-readable status string
 runtime.hooks.register(EventType.TOOL_CALL,
     lambda tool, args, label="", **_: _push({
         "type": "tool_call", "tool": tool,
@@ -1251,7 +1245,7 @@ runtime.hooks.register(EventType.RUNTIME_ERROR,
 
 @app.post("/run")
 def start_task(task: str):
-    """Start a new task. Non-blocking — agent runs in background thread."""
+    """Start a new task. Non-blocking â€” agent runs in background thread."""
     threading.Thread(target=runtime.run, args=(task,), daemon=True).start()
     return {"status": "started"}
 
@@ -1312,24 +1306,24 @@ runtime.abort()
 runtime.register_tool(name: str, func: callable, replace: bool = False)
     # Add custom tool. Docstring injected into system prompt automatically.
 
-runtime.messages           # List[Dict] — full conversation history
-runtime.session            # BaseSession — current session backend instance
-runtime.hooks              # HookSystem — register/emit events manually
-runtime.registry           # ToolRegistry — inspect registered tools
+runtime.messages           # List[Dict] â€” full conversation history
+runtime.session            # BaseSession â€” current session backend instance
+runtime.hooks              # HookSystem â€” register/emit events manually
+runtime.registry           # ToolRegistry â€” inspect registered tools
 ```
 
 ### Hook decorators
 
 ```python
 from codepilot import (
-    on_stream,                  # STREAM — pre-fence reasoning text or completion block content
-    on_tool_call,               # TOOL_CALL — before any tool executes
-    on_tool_result,             # TOOL_RESULT — after any tool returns
-    on_ask_user,                # ASK_USER — agent called ask_user()
-    on_finish,                  # FINISH — task complete (completion block detected)
-    on_permission_request,      # PERMISSION_REQUEST — awaiting approval
-    on_user_message_queued,     # USER_MESSAGE_QUEUED — send_message() called
-    on_user_message_injected,   # USER_MESSAGE_INJECTED — message in context
+    on_stream,                  # STREAM â€” pre-fence reasoning text or completion block content
+    on_tool_call,               # TOOL_CALL â€” before any tool executes
+    on_tool_result,             # TOOL_RESULT â€” after any tool returns
+    on_ask_user,                # ASK_USER â€” agent called ask_user()
+    on_finish,                  # FINISH â€” task complete (completion block detected)
+    on_permission_request,      # PERMISSION_REQUEST â€” awaiting approval
+    on_user_message_queued,     # USER_MESSAGE_QUEUED â€” send_message() called
+    on_user_message_injected,   # USER_MESSAGE_INJECTED â€” message in context
 )
 ```
 
@@ -1345,7 +1339,7 @@ from codepilot import (
 | `'insert'` | Insert after `after_line` (`0` = top of file) | 1 per file per step |
 | `'multi_edit'` | `edits=[(s1,e1), (s2,e2)]`. Runtime applies bottom-to-top. | 1 per file per step |
 
-Content always comes from the next payload block — never pass it as a string argument.
+Content always comes from the next payload block â€” never pass it as a string argument.
 
 #### `read_file(path, start_line=1, end_line=None)`
 
@@ -1357,12 +1351,14 @@ Runs a command on a persistent shell session. Returns captured output up to `tim
 
 | Parameter | Description |
 |---|---|
-| `session_id` | Shell session to use. `"main"` always exists. |
+| `session_id` | Shell session to use. `"main"` exists by default (recreated after `reset()`). |
 | `command` | Shell command string. |
 | `timeout` | Seconds to wait. Output captured on timeout. |
 | `new_shell` | `True` = create and use a new shell in one step. |
 
 Result includes `status: completed` (done, has `return_code`) or `status: running` (timed out, process alive).
+
+Command results also include the shell `cwd`, so the agent can track directory changes across steps and runs.
 
 #### `read_output(session_id, timeout=5)`
 
@@ -1384,17 +1380,29 @@ Terminate and remove a shell session entirely.
 
 Pauses execution and prompts the user for input. Fires the `ASK_USER` hook.
 
+#### `archive_context(position=None, summary=None, task=None)`
+
+Archive completed task context with your summary. `task` is an alias for `position`. Pass only one of them.
+
+#### `reveal_context(position)`
+
+Restore a previously archived task's full original context.
+
+#### `list_archived_context()`
+
+List archived tasks with summary previews and estimated token savings.
+
 #### `find(pattern, scope='codebase', target=None, include=None, max_results=50)`
 
-Text / regex search across a file, multiple files, or the entire workspace. Results are returned as `file:line:matched_line` — one match per line.
+Text / regex search across a file, multiple files, or the entire workspace. Results are returned as `file:line:matched_line` â€” one match per line.
 
-Uses **ripgrep** (`rg`) when available — fast and honours `.gitignore` automatically (ignores `node_modules`, build artifacts, lock files). Falls back to a pure-Python implementation when `rg` is not installed.
+Uses **ripgrep** (`rg`) when available â€” fast and honours `.gitignore` automatically (ignores `node_modules`, build artifacts, lock files). Falls back to a pure-Python implementation when `rg` is not installed.
 
 | Parameter | Description |
 |---|---|
 | `pattern` | Regex pattern. Escape special chars: `r'validate_email\('` |
 | `scope` | `'file'` / `'files'` / `'codebase'` |
-| `target` | File path (str) or list of paths — required for `scope='file'/'files'` |
+| `target` | File path (str) or list of paths â€” required for `scope='file'/'files'` |
 | `include` | Glob filter for `scope='codebase'`. e.g. `'*.py'`, `'tests/**'` |
 | `max_results` | Cap on returned matches (default 50) |
 
@@ -1406,7 +1414,7 @@ find(pattern=r'class \w+Handler', scope='codebase', include='*.py')
 find(pattern='import torch', scope='codebase', include='tests/**')
 ```
 
-**Install ripgrep** for best performance (optional — Python fallback is always available):
+**Install ripgrep** for best performance (optional â€” Python fallback is always available):
 ```bash
 apt-get install ripgrep      # Debian/Ubuntu
 brew install ripgrep          # macOS
@@ -1414,7 +1422,7 @@ brew install ripgrep          # macOS
 
 #### `semantic_search(query, mode='search', depth=2, top_k=5)`
 
-Semantically searches the codebase using the `voyage-code-3` embedding model via [grepai](https://github.com/yoanbernabeu/grepai). Finds code by concept — not text match. Use when you don't know which file or function to look at. Use `find()` when you know the exact symbol or string.
+Semantically searches the codebase using the `voyage-code-3` embedding model via [grepai](https://github.com/yoanbernabeu/grepai). Finds code by concept â€” not text match. Use when you don't know which file or function to look at. Use `find()` when you know the exact symbol or string.
 
 **Requires** `VOYAGE_API_KEY` set in environment and `api_key_env: "VOYAGE_API_KEY"` in the AgentFile config.
 
@@ -1425,7 +1433,7 @@ Semantically searches the codebase using the `voyage-code-3` embedding model via
 | `'search'` | Find files/functions matching a natural language concept |
 | `'trace_callers'` | Find every place that calls a given function/method |
 | `'trace_callees'` | Find everything a function calls internally |
-| `'trace_graph'` | Full dependency tree up to `depth` levels — use before modifying code with wide blast radius |
+| `'trace_graph'` | Full dependency tree up to `depth` levels â€” use before modifying code with wide blast radius |
 
 **Environment setup:**
 
@@ -1434,9 +1442,9 @@ export VOYAGE_API_KEY="pa-..."
 ```
 
 **How the API key flows:**
-grepai internally reads `OPENAI_API_KEY`. The runtime automatically aliases your `VOYAGE_API_KEY` → `OPENAI_API_KEY` at subprocess launch — you never need to rename your env var.
+grepai internally reads `OPENAI_API_KEY`. The runtime automatically aliases your `VOYAGE_API_KEY` â†’ `OPENAI_API_KEY` at subprocess launch â€” you never need to rename your env var.
 
-**grepai index location:** `~/.codepilot/grepai/<hash>/` — entirely outside your project. No `.grepai/` directory is created in your codebase.
+**grepai index location:** `~/.codepilot/grepai/<hash>/` â€” entirely outside your project. No `.grepai/` directory is created in your codebase.
 
 ### `FileSession`
 
@@ -1477,4 +1485,6 @@ create_session(
 
 ---
 
-*CodePilot v0.5.0 — code-native agents, zero JSON, full context.*
+*CodePilot v0.5.0 â€” code-native agents, zero JSON, full context.*
+
+
