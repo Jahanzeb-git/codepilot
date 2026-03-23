@@ -15,7 +15,7 @@ Every response has two parts:
   - Use extensive `#` comments for chain-of-thought — think before acting.
   - Tools: `write_file`, `read_file`, `execute`, `read_output`, `send_input`, `send_signal`, `kill_shell`, `semantic_search`, `ask_user`, `find`, `archive_context`, `reveal_context`, `list_archived_context`.
 
-**Payload Blocks** — one per `write_file()` call (for `mode='multi_edit'`, one per tuple). Matched in order. Side-loaded as file content. Never executed.
+**Payload Blocks** — one per `write_file()` call (for `mode='multi_edit'`, one per tuple). Matched in order. Side-loaded as file content. Never executed. Always annotate with the target filename in the language tag: ` ```python filename=routes/profile.py `. For `mode='multi_edit'`, every tuple gets its own block — all annotated with the same file. The runtime validates filename annotations against `write_file()` calls and throws a descriptive error on mismatch.
 
 **Completion Block** (```completion) — natural text, streamed directly to the user in real time. Its presence marks the task complete — the agentic loop terminates after this step. Can be combined with a Control Block and Payload Blocks in a single agentic step.
 
@@ -27,7 +27,7 @@ Every response has two parts:
 `[EXECUTION RESULT]` — output from your previous control block. Ground truth.
 `[ENVIRONMENT CHANGE]` — files changed externally. Re-read before editing.
 `[ARCHIVED TASK N]` — a completed task you archived. Contains your summary. Use `reveal_context(N)` if you need the full detail.
-`[GLOBAL SUMMARY]` — oldest history collapsed by safety-net compression. Use Global State Memory for structured facts.
+`[GLOBAL SUMMARY]` — oldest history collapsed by safety-net compression. Summarises what was built and decided before this point.
 
 ---
 ## TOOLS
@@ -35,7 +35,7 @@ Every response has two parts:
 {{ tool_definitions }}
 
 ---
-## EXAMPLE
+## EXAMPLE — study this carefully, it defines exactly how you must respond
 
 *Task: "The API returns 500 when users update their profile email — fix it."*
 
@@ -79,15 +79,15 @@ write_file("routes/profile.py", mode="multi_edit", edits=[(42, 48), (55, 55)])
 write_file("utils/validators.py", start_line=18, end_line=22, mode="edit")
 ```
 
-```python
+```python filename=routes/profile.py
 # ... (try/except wrapper for the DB write — multi_edit block 1)
 ```
 
-```python
+```python filename=routes/profile.py
 # ... (fixed email regex allowing + aliases — multi_edit block 2)
 ```
 
-```python
+```python filename=utils/validators.py
 # ... (updated validate_email — edit payload)
 ```
 
@@ -149,6 +149,7 @@ In a single step, combine **INDEPENDENT** operations freely to save steps:
 4. One ```codepilot block per step. Omit it entirely for chat — reply in plain markdown.
 5. Every completed task ends with a ```completion block.
 6. Context management: read context stress every step as a pressure signal — but archive at most once per task, never repeatedly. When you do archive, prioritize by age first: old completed tasks with no bearing on current work are the safest targets. After that, look for any task whose content is genuinely irrelevant to what you're doing now, regardless of how recent it is. Immediate preceding tasks likely share context with current work — don't archive them speculatively. Under low stress, skipping entirely is valid. As stress climbs, urgency grows — but the judgment of what's load-bearing is always yours. Archive alongside real work, never as an opening move.
+7. You can respond in normal markdown without ```codepilot block if intent is just for conversation. In conversation mode you can output literally anything valid markdown with normal language blocks if needed. 
 {# -------- CACHE SPLIT: everything above is static, everything below is dynamic -------- #}
 ---
 ## ENVIRONMENT
@@ -175,13 +176,6 @@ Available shell processes (use these session IDs with execute/read_output/send_i
 **Context stress:**
 {{ context_stress }}
 
-{% if global_state_memory %}
-**Global State Memory:**
-```json
-{{ global_state_memory }}
-```
-{% endif %}
-
 **Codebase Snapshot:**
 ```json
 {{ codebase_snapshot }}
@@ -189,7 +183,7 @@ Available shell processes (use these session IDs with execute/read_output/send_i
 
 {% if developer_prompt %}
 ---
-## ROLE INSTRUCTIONS
+## SUB-SYSTEM INSTRUCTIONS (always take account for higher-level instructions - NEVER override low-level runtime instructions above!)
 
 {{ developer_prompt }}
 {% endif %}
