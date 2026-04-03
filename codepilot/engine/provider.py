@@ -3,6 +3,78 @@ from typing import List, Dict, Optional, Iterator, Union
 import os
 
 from ..core.prompt import SystemPromptParts
+import re
+
+
+def _insert_cache_breakpoints(messages: List[Dict], ttl: Optional[Union[str, int]] = None) -> List[Dict]:
+    """
+    Inserts cache_control breakpoints on up to three key assistant messages
+    (plus the System prompt which is handled separately, totalling 4 allowed breakpoints).
+    
+    1. The assistant message ending the PREVIOUS task (anchors completed history).
+    2. The assistant message anchoring chunks of 5 steps in the CURRENT task.
+    3. The most recent assistant message (for background TTL refresh).
+    """
+    last_asst_idx = None
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "assistant":
+            last_asst_idx = i
+            break
+
+    if last_asst_idx is None:
+        return messages
+
+    current_task_start_idx = 0
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            content = str(messages[i].get("content", ""))
+            if re.match(r"^(?:<task_\d+>|\[Task \d+\])", content.strip()):
+                current_task_start_idx = i
+                break
+
+    prev_task_asst_idx = None
+    for i in range(current_task_start_idx - 1, -1, -1):
+        if messages[i].get("role") == "assistant":
+            prev_task_asst_idx = i
+            break
+
+    active_asst_indices = []
+    for i in range(current_task_start_idx, len(messages)):
+        if messages[i].get("role") == "assistant":
+            active_asst_indices.append(i)
+
+    chunk_asst_idx = None
+    if len(active_asst_indices) >= 5:
+        chunk_idx = (len(active_asst_indices) // 5) * 5 - 1
+        if chunk_idx >= 0:
+            chunk_asst_idx = active_asst_indices[chunk_idx]
+
+    indices_to_cache = {last_asst_idx}
+    if prev_task_asst_idx is not None:
+        indices_to_cache.add(prev_task_asst_idx)
+    if chunk_asst_idx is not None:
+        indices_to_cache.add(chunk_asst_idx)
+
+    result = list(messages)
+    for idx in indices_to_cache:
+        msg = result[idx]
+        content = msg.get("content", "")
+        cache_ctrl = {"type": "ephemeral"}
+        if ttl is not None:
+            cache_ctrl["ttl"] = ttl
+
+        result[idx] = {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "text",
+                    "text": content if isinstance(content, str) else content,
+                    "cache_control": cache_ctrl,
+                }
+            ],
+        }
+
+    return result
 
 
 class LLMProvider(ABC):
@@ -181,47 +253,7 @@ class AnthropicProvider(LLMProvider):
 
     @classmethod
     def _add_rolling_breakpoint(cls, messages: List[Dict]) -> List[Dict]:
-        """
-        Return a shallow copy of *messages* with cache_control on the last
-        assistant message.
-
-        The last assistant message's content is converted to a content-block
-        list format so Anthropic can attach cache_control to it.  All other
-        messages are returned untouched.
-        """
-        # Find the index of the last assistant message.
-        last_asst_idx = None
-        for i in range(len(messages) - 1, -1, -1):
-            if messages[i].get("role") == "assistant":
-                last_asst_idx = i
-                break
-
-        if last_asst_idx is None:
-            return messages  # No assistant message yet — nothing to cache.
-
-        result = list(messages)  # shallow copy of the list
-
-        asst_msg = result[last_asst_idx]
-        content = asst_msg.get("content", "")
-
-        # Build the content-block with cache_control.
-        cache_ctrl = {"type": "ephemeral"}
-        if cls._CONV_CACHE_TTL is not None:
-            cache_ctrl["ttl"] = cls._CONV_CACHE_TTL
-
-        cached_msg = {
-            "role": "assistant",
-            "content": [
-                {
-                    "type": "text",
-                    "text": content if isinstance(content, str) else content,
-                    "cache_control": cache_ctrl,
-                }
-            ],
-        }
-
-        result[last_asst_idx] = cached_msg
-        return result
+        return _insert_cache_breakpoints(messages, ttl=cls._CONV_CACHE_TTL)
 
     # ------------------------------------------------------------------ #
     #  TTL refresh call — upgrade last breakpoint to 1h                    #
@@ -235,31 +267,16 @@ class AnthropicProvider(LLMProvider):
         Called by the runtime's background timer when the agent goes idle.
         The response is discarded — context is NOT modified.
         """
-        # Find the last assistant message.
-        last_asst_idx = None
-        for i in range(len(messages) - 1, -1, -1):
-            if messages[i].get("role") == "assistant":
-                last_asst_idx = i
+        refreshed = _insert_cache_breakpoints(messages, ttl="1h")
+        
+        has_cache = False
+        for msg in refreshed:
+            if msg.get("role") == "assistant" and isinstance(msg.get("content"), list):
+                has_cache = True
                 break
-
-        if last_asst_idx is None:
+                
+        if not has_cache:
             return  # Nothing to refresh.
-
-        # Build messages with 1h TTL breakpoint on last assistant.
-        refreshed = list(messages)
-        asst_msg = refreshed[last_asst_idx]
-        content = asst_msg.get("content", "")
-
-        refreshed[last_asst_idx] = {
-            "role": "assistant",
-            "content": [
-                {
-                    "type": "text",
-                    "text": content if isinstance(content, str) else content,
-                    "cache_control": {"type": "ephemeral", "ttl": "1h"},
-                }
-            ],
-        }
 
         # We need a final user message after the breakpoint for the API call.
         # If the last message is already user, we're fine.
@@ -406,35 +423,7 @@ class AlibabaProvider(LLMProvider):
 
     @classmethod
     def _add_rolling_breakpoint(cls, messages: List[Dict]) -> List[Dict]:
-        """
-        Return a shallow copy of *messages* with cache_control on the last
-        assistant message. DashScope expects exactly this Anthropic-style 
-        cache block in the messages list, but with a fixed 300s TTL.
-        """
-        last_asst_idx = None
-        for i in range(len(messages) - 1, -1, -1):
-            if messages[i].get("role") == "assistant":
-                last_asst_idx = i
-                break
-
-        if last_asst_idx is None:
-            return messages
-
-        result = list(messages)
-        asst_msg = result[last_asst_idx]
-        content = asst_msg.get("content", "")
-
-        result[last_asst_idx] = {
-            "role": "assistant",
-            "content": [
-                {
-                    "type": "text",
-                    "text": content if isinstance(content, str) else content,
-                    "cache_control": {"type": "ephemeral", "ttl": 300},
-                }
-            ],
-        }
-        return result
+        return _insert_cache_breakpoints(messages, ttl=300)
 
     def chat(
         self,

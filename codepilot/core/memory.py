@@ -227,8 +227,8 @@ class ContextArchive:
         self._store[position] = list(messages)
 
     def reveal(self, position: int) -> List[Dict]:
-        """Remove and return the original messages for a task."""
-        return self._store.pop(position)
+        """Return a copy of the original messages for a task without removing them from archive."""
+        return list(self._store[position])
 
     def is_archived(self, position: int) -> bool:
         return position in self._store

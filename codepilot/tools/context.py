@@ -128,48 +128,34 @@ class ContextTools:
         )
 
     def reveal_context(self, position: int) -> str:
-        """Restore a previously archived task's full context.
+        """Read a previously archived task's full context as text.
 
-        Replaces the archived summary with original messages exactly
-        where they were. Use when you need exact details from an
-        earlier task.
+        Returns the original detailed messages as a string so you can
+        read them exactly as they occurred, without forcefully injecting
+        them back into the historical timeline (which would break context caching).
 
         Args:
             position: Task position (int) to reveal.
         """
-        messages = self.runtime.messages
-        memory   = self.runtime._memory
-        provider = memory.config.provider_name
+        memory = self.runtime._memory
 
         if not memory.archive.is_archived(position):
             return f"ERROR: Task {position} is not archived. Nothing to reveal."
 
-        # Find the [ARCHIVED TASK N] placeholder
-        tmap = find_task_map(messages)
-        if position not in tmap:
-            return f"ERROR: Archived placeholder for Task {position} not found in context."
-
-        start, end, is_archived = tmap[position]
-        if not is_archived:
-            return f"ERROR: Task {position} is not archived in context."
-
-        # Retrieve originals
+        # Retrieve a copy of the originals
         original_msgs = memory.archive.reveal(position)
-        expanded_tokens = count_messages_tokens(original_msgs, provider)
-
-        # Replace placeholder with originals
-        messages[start:end] = original_msgs
-
-        # Report result
-        new_total = count_messages_tokens(messages, provider)
-        max_tok = memory.config.max_context_tokens
-        new_pct = round(new_total / max_tok * 100) if max_tok else 0
-
-        return (
-            f"Revealed Task {position}. "
-            f"Context expanded by ~{expanded_tokens:,} tokens. "
-            f"({new_total:,} / {max_tok:,} — {new_pct}%)"
-        )
+        
+        # Build a readable text output
+        lines = [f"=== DETAILED HISTORY FOR TASK {position} ==="]
+        for msg in original_msgs:
+            role = str(msg.get("role", "")).upper()
+            content = str(msg.get("content", ""))
+            
+            lines.append(f"\n[{role}]")
+            lines.append(content)
+            
+        lines.append(f"\n=== END OF TASK {position} HISTORY ===")
+        return "\n".join(lines)
 
     def list_archived_context(self) -> str:
         """List all archived tasks with summaries and token savings.

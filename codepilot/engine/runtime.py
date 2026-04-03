@@ -271,15 +271,22 @@ class Runtime:
                 self._append_execution_result(f"PROVIDER ERROR: {error_msg}")
                 continue
 
-            # LLM output → assistant role
-            self.messages.append({"role": _ROLE_ASSISTANT, "content": response_text})
+            # 4. Parse response first so we can extract payload blocks
+            control_block, payload_blocks, completion_block = BlockParser.split(response_text)
+
+            # 4.5 Strip payload block contents from memory to save massive tokens
+            memory_text = response_text
+            if payload_blocks:
+                for pb in payload_blocks:
+                    placeholder = "# [Content successfully written to file on disk. Use read_file() to view line numbers. Note: This literal comment is a placeholder it's confirms the content exactly wrote as you write.]"
+                    memory_text = memory_text.replace(pb.content, placeholder)
+
+            # LLM output → assistant role (using compressed text)
+            self.messages.append({"role": _ROLE_ASSISTANT, "content": memory_text})
 
             # Schedule cache TTL refresh (Anthropic only)
             self._last_system_prompt = system_prompt
             self._schedule_cache_timer()
-
-            # 4. Parse response
-            control_block, payload_blocks, completion_block = BlockParser.split(response_text)
 
             if control_block is None:
                 # No ```codepilot block → conversational reply (may include
