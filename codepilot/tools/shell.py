@@ -14,7 +14,7 @@ from typing import Optional, Dict, List, TYPE_CHECKING
 
 import pexpect
 
-from ..core.ansi import strip_ansi
+from ..core.vt import VirtualScreen, DEFAULT_COLS, DEFAULT_ROWS
 from ..engine.hooks import EventType
 
 if TYPE_CHECKING:
@@ -45,6 +45,14 @@ class ShellSession:
         )
         self.pid = self.process.pid
 
+        # Set PTY window size to match the virtual screen.
+        # A wider terminal suppresses most line-wrapping that would fragment
+        # structured output (long file paths, JSON, compiler errors, etc.).
+        self.process.setwinsize(DEFAULT_ROWS, DEFAULT_COLS)
+
+        # Virtual terminal emulator — one per session, reset before each command.
+        self._screen: VirtualScreen = VirtualScreen(cols=DEFAULT_COLS, rows=DEFAULT_ROWS)
+
         # Clean environment: suppress prompt and echo
         self.process.sendline('export PS1="" PS2=""')
         self.process.sendline('stty -echo 2>/dev/null || true')
@@ -72,6 +80,9 @@ class ShellSession:
         self.return_code = None
         self.last_used = time.time()
 
+        # Reset the virtual screen so previous command output doesn't bleed in
+        self._screen.reset()
+
         # Append RC echo so we can detect completion + exit code
         full_cmd = (
             f'{command}; __cp_rc=$?; '
@@ -80,7 +91,7 @@ class ShellSession:
         )
         self.process.sendline(full_cmd)
 
-        output, completed, rc = self._read_until(timeout)
+        output, completed, rc = self._read_until(timeout, delta=False)
         self.command_output_buffer = output
         if completed:
             self.status = "completed"
@@ -96,17 +107,19 @@ class ShellSession:
             # Brief check for any straggling data
             try:
                 leftover = self.process.read_nonblocking(size=65536, timeout=0.5)
-                leftover = strip_ansi(leftover).strip()
                 if leftover:
-                    self.command_output_buffer += leftover
-                    return leftover, True, self.return_code
+                    self._screen.feed(leftover)
+                    new_text = self._extract_cwd_marker(self._screen.delta_snapshot())
+                    if new_text:
+                        self.command_output_buffer += "\n" + new_text
+                        return new_text, True, self.return_code
             except (pexpect.TIMEOUT, pexpect.EOF):
                 pass
-            # No new data — signal full-mode
+            # No new data — signal full-mode (caller will do context collapse + full re-read)
             return "", True, self.return_code
 
-        # Command still running — wait for more
-        delta, completed, rc = self._read_until(timeout)
+        # Command still running — read delta of new bytes
+        delta, completed, rc = self._read_until(timeout, delta=True)
         if delta:
             self.command_output_buffer += delta
         if completed:
@@ -119,7 +132,8 @@ class ShellSession:
         self.last_used = time.time()
         self.process.sendline(text)
 
-        delta, completed, rc = self._read_until(timeout)
+        # Use delta so the agent sees only what appeared after the input
+        delta, completed, rc = self._read_until(timeout, delta=True)
         if delta:
             self.command_output_buffer += delta
         if completed:
@@ -135,7 +149,8 @@ class ShellSession:
             # Wait briefly for command to exit
             try:
                 self.process.expect(self._rc_pattern, timeout=3)
-                output = strip_ansi(self.process.before).strip()
+                self._screen.feed(self.process.before)
+                output = self._extract_cwd_marker(self._screen.delta_snapshot())
                 if output:
                     self.command_output_buffer += output
                 self.status = "completed"
@@ -159,24 +174,32 @@ class ShellSession:
         if self.process.isalive():
             self.process.close(force=True)
 
-    def _read_until(self, timeout: int):
-        """Read until RC marker or timeout. Returns (output, completed, rc)."""
+    def _read_until(self, timeout: int, delta: bool = False):
+        """
+        Read PTY output until the RC marker is found or timeout expires.
+
+        All raw bytes are fed into the virtual screen emulator.
+        Returns (output, completed, rc) where *output* is the clean rendered
+        text from the virtual screen — either a full snapshot or a delta
+        (new content only) depending on the *delta* flag.
+        """
+        def _render() -> str:
+            text = self._screen.delta_snapshot() if delta else self._screen.snapshot()
+            return self._extract_cwd_marker(text)
+
         try:
             self.process.expect(self._rc_pattern, timeout=timeout)
-            output = self._extract_cwd_marker(
-                strip_ansi(self.process.before).strip('\r\n')
-            )
+            self._screen.feed(self.process.before)
+            output = _render()
             rc = int(self.process.match.group(1))
             return output, True, rc
         except pexpect.TIMEOUT:
-            output = self._extract_cwd_marker(
-                strip_ansi(self.process.before).strip('\r\n')
-            )
+            self._screen.feed(self.process.before)
+            output = _render()
             return output, False, None
         except pexpect.EOF:
-            output = self._extract_cwd_marker(
-                strip_ansi(self.process.before).strip('\r\n')
-            )
+            self._screen.feed(self.process.before)
+            output = _render()
             return output, True, -1
 
     def _extract_cwd_marker(self, text: str) -> str:
