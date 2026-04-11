@@ -1,3 +1,4 @@
+import asyncio
 import os
 import queue
 import re
@@ -41,7 +42,7 @@ TAG_ENV_CHANGE       = "[ENVIRONMENT CHANGE]"
 _CACHE_REFRESH_DELAY = 4.5 * 60  # 270 seconds
 
 
-class Runtime:
+class AsyncRuntime:
     """
     The CodePilot agentic loop with multi-turn, session persistence, and
     optional streaming support.
@@ -195,7 +196,7 @@ class Runtime:
     #  Public API                                                             #
     # ====================================================================== #
 
-    def run(self, task: str) -> Optional[str]:
+    async def run(self, task: str) -> Optional[str]:
         """
         Run a task within the current conversation context.
 
@@ -208,7 +209,7 @@ class Runtime:
         self._shell_manager.ensure_default_shell()
 
         # Safety-net: global summarization if context is dangerously high
-        self.messages = self._memory.process(self.messages)
+        self.messages = await self._memory.process(self.messages)
 
         # Assign a stable task position and append the new task
         self._task_counter += 1
@@ -253,11 +254,11 @@ class Runtime:
             # 3. LLM inference (streaming or blocking)
             try:
                 if self._stream:
-                    response_text = self._stream_inference(
+                    response_text = await self._stream_inference(
                         system_prompt, messages=rendered_msgs
                     )
                 else:
-                    response_text = self.provider.chat(
+                    response_text = await self.provider.chat(
                         messages=rendered_msgs,
                         system=system_prompt,
                         temperature=self.config.model.temperature,
@@ -296,7 +297,7 @@ class Runtime:
             # 5. Execute
             self._payload_queue    = list(payload_blocks)
             self._execution_buffer = []
-            self._execute(control_block.content)
+            await self._execute(control_block.content)
 
             # 6. Assemble execution result and feed back as next user turn
             execution_result = "\n\n".join(self._execution_buffer).strip()
@@ -464,9 +465,9 @@ class Runtime:
     # ------------------------------------------------------------------ #
 
     def _cancel_cache_timer(self) -> None:
-        """Cancel any pending cache refresh timer."""
+        """Cancel any pending cache refresh timer (threading.Timer or asyncio.Task)."""
         if self._cache_timer is not None:
-            self._cache_timer.cancel()
+            self._cache_timer.cancel()  # works for both Timer and Task
             self._cache_timer = None
 
     def _schedule_cache_timer(self) -> None:
@@ -484,10 +485,10 @@ class Runtime:
 
         self._cancel_cache_timer()
 
-        def _refresh():
-            """Background thread: fire refresh_cache_ttl on the provider."""
+        async def _refresh_task():
+            await asyncio.sleep(_CACHE_REFRESH_DELAY)
             try:
-                self.provider.refresh_cache_ttl(
+                await self.provider.refresh_cache_ttl(
                     messages=self._render_messages_for_llm(),
                     system=self._last_system_prompt,
                 )
@@ -496,9 +497,7 @@ class Runtime:
             finally:
                 self._cache_timer = None
 
-        self._cache_timer = threading.Timer(_CACHE_REFRESH_DELAY, _refresh)
-        self._cache_timer.daemon = True  # Don't block process exit.
-        self._cache_timer.start()
+        self._cache_timer = asyncio.create_task(_refresh_task())
 
     # ------------------------------------------------------------------ #
     #  XML task wrappers for LLM visibility                                #
@@ -558,7 +557,7 @@ class Runtime:
     _COMPLETION_FENCE = "```completion"
     _HOLDBACK         = max(len(_CONTROL_FENCE), len(_COMPLETION_FENCE))  # 13 chars
 
-    def _stream_inference(
+    async def _stream_inference(
         self, system_prompt: Union[str, SystemPromptParts], messages: List[Dict] = None
     ) -> str:
         """
@@ -580,7 +579,7 @@ class Runtime:
         compl_content_start: int  = 0  # absolute offset where completion block content begins
         state:               str  = "streaming"
 
-        for chunk in self.provider.chat_stream(
+        async for chunk in self.provider.chat_stream(
             messages=msgs,
             system=system_prompt,
             temperature=self.config.model.temperature,
@@ -692,7 +691,12 @@ class Runtime:
         sandbox.update(self.registry.as_sandbox_dict())
         return sandbox
 
-    def _execute(self, code: str):
+    async def _execute(self, code: str):
+        """Async wrapper — runs the CPU-bound + pexpect-bound execution in a thread."""
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._execute_sync, code)
+
+    def _execute_sync(self, code: str):
         validator = ASTValidator(self.config.runtime.allowed_imports)
         try:
             validator.validate(code)
@@ -722,3 +726,57 @@ class Runtime:
             "role": _ROLE_USER,
             "content": f"{TAG_EXECUTION_RESULT}\n{result}",
         })
+
+
+# ============================================================================ #
+#  Sync wrapper — for CLI users / scripts that don't run an event loop          #
+# ============================================================================ #
+
+class Runtime:
+    """
+    Thin synchronous wrapper over AsyncRuntime.
+
+    Suitable for CLI usage and scripts. Calls asyncio.run() internally so the
+    caller doesn't need to manage an event loop.
+
+    For web apps / FastAPI, use AsyncRuntime directly with ``await``.
+    """
+
+    def __init__(self, agent_file: str, **kwargs):
+        self._async = AsyncRuntime(agent_file, **kwargs)
+
+    # ── public API mirrors AsyncRuntime ──────────────────────────────────────
+
+    def run(self, task: str) -> Optional[str]:
+        """Run a task synchronously. Blocks the calling thread until complete."""
+        return asyncio.run(self._async.run(task))
+
+    def reset(self):
+        """Wipe the entire conversation history and start fresh."""
+        self._async.reset()
+
+    def abort(self):
+        """Stop the loop cleanly after the current step completes."""
+        self._async.abort()
+
+    def send_message(self, message: str):
+        """Inject a user message into the running loop from any thread."""
+        self._async.send_message(message)
+
+    def register_tool(self, name: str, func, replace: bool = False):
+        """Register a custom tool into the agent's sandbox."""
+        self._async.register_tool(name, func, replace)
+
+    # ── expose underlying state for advanced users ────────────────────────────
+
+    @property
+    def messages(self):
+        return self._async.messages
+
+    @property
+    def hooks(self):
+        return self._async.hooks
+
+    @property
+    def config(self):
+        return self._async.config

@@ -32,11 +32,11 @@ Observable hooks
     runtime.run("Refactor the database module.")
 """
 
-__version__ = "0.8.4"
+__version__ = "0.8.7"
 __author__  = "CodePilot"
 
 # Core entry point
-from .engine.runtime import Runtime
+from .engine.runtime import Runtime, AsyncRuntime
 
 # AgentFile loader (useful for inspecting config without running)
 from .core.agent_file import AgentConfig, AgentFile
@@ -61,6 +61,7 @@ from .engine.hooks import (
 
 __all__ = [
     "Runtime",
+    "AsyncRuntime",
     "AgentConfig",
     "AgentFile",
     "InMemorySession",

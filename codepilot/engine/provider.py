@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Dict, Optional, Iterator, Union
+from typing import List, Dict, Optional, Iterator, AsyncIterator, Union
 import os
 
 from ..core.prompt import SystemPromptParts
@@ -79,7 +79,7 @@ def _insert_cache_breakpoints(messages: List[Dict], ttl: Optional[Union[str, int
 
 class LLMProvider(ABC):
     @abstractmethod
-    def chat(
+    async def chat(
         self,
         messages: List[Dict[str, str]],
         system: Union[str, SystemPromptParts, None] = None,
@@ -88,20 +88,20 @@ class LLMProvider(ABC):
     ) -> str:
         ...
 
-    def chat_stream(
+    async def chat_stream(
         self,
         messages: List[Dict[str, str]],
         system: Union[str, SystemPromptParts, None] = None,
         temperature: float = 0.0,
         max_tokens: int = 4096,
-    ) -> Iterator[str]:
+    ) -> AsyncIterator[str]:
         """
         Stream LLM response token by token.
 
         Default fallback: calls chat() and yields the complete response as a
         single chunk.  Override in subclasses for true token-level streaming.
         """
-        yield self.chat(
+        yield await self.chat(
             messages=messages, system=system,
             temperature=temperature, max_tokens=max_tokens,
         )
@@ -125,13 +125,13 @@ class OpenAIProvider(LLMProvider):
 
     def __init__(self, api_key: str, model: str):
         try:
-            from openai import OpenAI
+            from openai import AsyncOpenAI
         except ImportError:
             raise ImportError("Install the openai package: pip install openai")
-        self.client = OpenAI(api_key=api_key)
+        self.client = AsyncOpenAI(api_key=api_key)
         self.model  = model
 
-    def chat(
+    async def chat(
         self,
         messages: List[Dict[str, str]],
         system: Union[str, SystemPromptParts, None] = None,
@@ -144,7 +144,7 @@ class OpenAIProvider(LLMProvider):
             msgs.append({"role": "system", "content": sys_text})
         msgs.extend(messages)
 
-        response = self.client.chat.completions.create(
+        response = await self.client.chat.completions.create(
             model=self.model,
             messages=msgs,
             temperature=temperature,
@@ -152,27 +152,27 @@ class OpenAIProvider(LLMProvider):
         )
         return response.choices[0].message.content
 
-    def chat_stream(
+    async def chat_stream(
         self,
         messages: List[Dict[str, str]],
         system: Union[str, SystemPromptParts, None] = None,
         temperature: float = 0.0,
         max_tokens: int = 4096,
-    ) -> Iterator[str]:
+    ) -> AsyncIterator[str]:
         msgs = []
         sys_text = self._system_str(system)
         if sys_text:
             msgs.append({"role": "system", "content": sys_text})
         msgs.extend(messages)
 
-        stream = self.client.chat.completions.create(
+        stream = await self.client.chat.completions.create(
             model=self.model,
             messages=msgs,
             temperature=temperature,
             max_tokens=max_tokens,
             stream=True,
         )
-        for chunk in stream:
+        async for chunk in stream:
             if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
 
@@ -201,10 +201,10 @@ class AnthropicProvider(LLMProvider):
 
     def __init__(self, api_key: str, model: str, thinking_enabled: bool = False, thinking_budget: int = 8000):
         try:
-            from anthropic import Anthropic
+            from anthropic import AsyncAnthropic
         except ImportError:
             raise ImportError("Install the anthropic package: pip install anthropic")
-        self.client           = Anthropic(api_key=api_key)
+        self.client           = AsyncAnthropic(api_key=api_key)
         self.model            = model
         self.thinking_enabled = thinking_enabled
         self.thinking_budget  = thinking_budget
@@ -259,7 +259,7 @@ class AnthropicProvider(LLMProvider):
     #  TTL refresh call — upgrade last breakpoint to 1h                    #
     # ------------------------------------------------------------------ #
 
-    def refresh_cache_ttl(self, messages: List[Dict], system=None) -> None:
+    async def refresh_cache_ttl(self, messages: List[Dict], system=None) -> None:
         """
         Fire a minimal inference call to upgrade the conversational cache
         breakpoint TTL to 1 hour.
@@ -296,7 +296,7 @@ class AnthropicProvider(LLMProvider):
             kwargs["system"] = system_blocks
 
         try:
-            self.client.messages.create(**kwargs)
+            await self.client.messages.create(**kwargs)
         except Exception:
             pass  # Refresh is best-effort — failure just means cache expires.
 
@@ -304,7 +304,7 @@ class AnthropicProvider(LLMProvider):
     #  Main chat / stream                                                  #
     # ------------------------------------------------------------------ #
 
-    def chat(
+    async def chat(
         self,
         messages: List[Dict[str, str]],
         system: Union[str, SystemPromptParts, None] = None,
@@ -330,7 +330,7 @@ class AnthropicProvider(LLMProvider):
         if system_blocks:
             kwargs["system"] = system_blocks
 
-        response = self.client.messages.create(**kwargs)
+        response = await self.client.messages.create(**kwargs)
 
         # Reconstruct the full response string, including thinking tags so they:
         #   (a) stream to the user via _emit_prefence_text in non-stream mode, and
@@ -345,13 +345,13 @@ class AnthropicProvider(LLMProvider):
                 parts.append(block.text)
         return "\n".join(parts)
 
-    def chat_stream(
+    async def chat_stream(
         self,
         messages: List[Dict[str, str]],
         system: Union[str, SystemPromptParts, None] = None,
         temperature: float = 0.0,
         max_tokens: int = 4096,
-    ) -> Iterator[str]:
+    ) -> AsyncIterator[str]:
         kwargs = dict(
             model=self.model,
             messages=self._add_rolling_breakpoint(messages),
@@ -381,8 +381,8 @@ class AnthropicProvider(LLMProvider):
                 ContentBlockStopEvent,
             )
             in_thinking = False
-            with self.client.messages.stream(**kwargs) as stream:
-                for event in stream:
+            async with self.client.messages.stream(**kwargs) as stream:
+                async for event in stream:
                     if isinstance(event, ContentBlockStartEvent):
                         if event.content_block.type == "thinking":
                             in_thinking = True
@@ -398,8 +398,8 @@ class AnthropicProvider(LLMProvider):
                         yield "\n</thinking>\n"
                         in_thinking = False
         else:
-            with self.client.messages.stream(**kwargs) as stream:
-                for text in stream.text_stream:
+            async with self.client.messages.stream(**kwargs) as stream:
+                async for text in stream.text_stream:
                     yield text
 
 
@@ -412,10 +412,10 @@ class AlibabaProvider(LLMProvider):
 
     def __init__(self, api_key: str, model: str):
         try:
-            from openai import OpenAI
+            from openai import AsyncOpenAI
         except ImportError:
             raise ImportError("Install the openai package: pip install openai")
-        self.client = OpenAI(
+        self.client = AsyncOpenAI(
             api_key=api_key,
             base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
         )
@@ -425,7 +425,7 @@ class AlibabaProvider(LLMProvider):
     def _add_rolling_breakpoint(cls, messages: List[Dict]) -> List[Dict]:
         return _insert_cache_breakpoints(messages, ttl=300)
 
-    def chat(
+    async def chat(
         self,
         messages: List[Dict[str, str]],
         system: Union[str, SystemPromptParts, None] = None,
@@ -438,7 +438,7 @@ class AlibabaProvider(LLMProvider):
             msgs.append({"role": "system", "content": sys_text})
         msgs.extend(self._add_rolling_breakpoint(messages))
 
-        response = self.client.chat.completions.create(
+        response = await self.client.chat.completions.create(
             model=self.model,
             messages=msgs,
             temperature=temperature,
@@ -446,27 +446,27 @@ class AlibabaProvider(LLMProvider):
         )
         return response.choices[0].message.content
 
-    def chat_stream(
+    async def chat_stream(
         self,
         messages: List[Dict[str, str]],
         system: Union[str, SystemPromptParts, None] = None,
         temperature: float = 0.0,
         max_tokens: int = 4096,
-    ) -> Iterator[str]:
+    ) -> AsyncIterator[str]:
         msgs = []
         sys_text = self._system_str(system)
         if sys_text:
             msgs.append({"role": "system", "content": sys_text})
         msgs.extend(self._add_rolling_breakpoint(messages))
 
-        stream = self.client.chat.completions.create(
+        stream = await self.client.chat.completions.create(
             model=self.model,
             messages=msgs,
             temperature=temperature,
             max_tokens=max_tokens,
             stream=True,
         )
-        for chunk in stream:
+        async for chunk in stream:
             if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
 

@@ -280,7 +280,7 @@ class MemoryManager:
     # Safety-net global summarization
     # ------------------------------------------------------------------
 
-    def process(self, messages: List[Dict]) -> List[Dict]:
+    async def process(self, messages: List[Dict]) -> List[Dict]:
         """
         Safety-net only. Called at the start of run().
 
@@ -294,11 +294,11 @@ class MemoryManager:
                 "Global safety net triggered: %d tokens > %d threshold",
                 total, self.config.global_summary_threshold_tokens,
             )
-            messages = self._global_summarize(messages)
+            messages = await self._global_summarize(messages)
 
         return messages
 
-    def _global_summarize(self, messages: List[Dict]) -> List[Dict]:
+    async def _global_summarize(self, messages: List[Dict]) -> List[Dict]:
         """
         Collapse the older half of context into a [GLOBAL SUMMARY].
 
@@ -344,7 +344,7 @@ class MemoryManager:
         prompt = _GLOBAL_SUMMARY_PROMPT.format(summaries=summaries_text)
 
         try:
-            summary_text = self.provider.chat(
+            summary_text = await self.provider.chat(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,
                 max_tokens=int(self.config.global_summary_max_tokens * 4),
