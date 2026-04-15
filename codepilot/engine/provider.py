@@ -1,3 +1,22 @@
+"""
+File: provider.py
+Author: Jahanzeb Ahmed <jahanzebahmed.mail@gmail.com>
+Created: 2026-04-16
+
+Description:
+LLM provider abstraction layer for the CodePilot agentic runtime.
+
+Architectural Notes:
+Implements a unified async interface (LLMProvider) for OpenAI, Anthropic,
+and Alibaba/Qwen providers. Handles explicit prompt caching (cache_control
+breakpoints) for Anthropic and Alibaba, and extended thinking for Claude.
+Rolling cache breakpoints are injected on the last assistant message to
+maximise token reuse across agentic steps without redundant re-processing.
+
+Copyright (c) 2026 Jahanzeb Ahmed.
+Licensed under the MIT License.
+"""
+
 from abc import ABC, abstractmethod
 from typing import List, Dict, Optional, Iterator, AsyncIterator, Union
 import os

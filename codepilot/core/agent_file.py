@@ -1,3 +1,22 @@
+"""
+File: agent_file.py
+Author: Jahanzeb Ahmed <jahanzebahmed.mail@gmail.com>
+Created: 2026-04-16
+
+Description:
+AgentFile YAML schema definition and loader for the CodePilot runtime.
+
+Architectural Notes:
+Uses Pydantic v2 models to define and validate the full agent configuration
+schema (model, tools, runtime, memory). AgentConfig.load() resolves all
+relative paths (work_dir, system_prompt) against the YAML file's directory,
+not the caller's CWD, making agent files portable. Supports both a flat YAML
+structure and the nested 'agent:' convention for backward compatibility.
+
+Copyright (c) 2026 Jahanzeb Ahmed.
+Licensed under the MIT License.
+"""
+
 from typing import List, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 import yaml

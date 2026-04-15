@@ -1,26 +1,21 @@
 """
-codepilot.core.memory
-~~~~~~~~~~~~~~~~~~~~~
+File: memory.py
+Author: Jahanzeb Ahmed <jahanzebahmed.mail@gmail.com>
+Created: 2026-04-16
 
-Agent-driven context management for long-running agentic sessions.
+Description:
+Agent-driven context memory management for long-running agentic sessions.
 
-The agent manages its own context window using three internal tools:
+Architectural Notes:
+Implements a three-tier context control strategy: (1) agent-driven archiving
+via archive_context/reveal_context tools, (2) a per-step context stress signal
+injected into the system prompt so the agent knows when to act, and (3) a
+global summarization safety net that fires at 90% utilisation as a last resort.
+Token counting uses tiktoken (cl100k_base) with provider-specific fudge factors.
+The ContextArchive stores original messages for reversible archiving.
 
-    archive_context(position, summary)
-        — compress a completed task's messages into an agent-provided
-          summary. Original messages are stored for later reveal.
-
-    reveal_context(position)
-        — restore an archived task's full messages in-place.
-
-    list_archived_context()
-        — review what has been archived (summaries + token savings).
-
-A token stress signal is injected into the system prompt every step,
-giving the agent the information it needs to make context decisions.
-
-Global summarization remains as a safety net at 90% context utilisation
-— it fires only when the agent hasn't kept things under control.
+Copyright (c) 2026 Jahanzeb Ahmed.
+Licensed under the MIT License.
 """
 
 from __future__ import annotations

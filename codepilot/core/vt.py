@@ -1,36 +1,24 @@
 """
-codepilot/core/vt.py
+File: vt.py
+Author: Jahanzeb Ahmed <jahanzebahmed.mail@gmail.com>
+Created: 2026-04-16
 
-Virtual VT100 / VT102 headless terminal emulator for CodePilot shell sessions.
+Description:
+Virtual VT100/VT102 headless terminal emulator for CodePilot shell sessions.
 
+Architectural Notes:
 Replaces regex-based ANSI stripping with a proper state-machine emulator that
 maintains a 2-D character grid identical to what a human sees in a real
-terminal.  The LLM therefore receives only the *final rendered state* of the
-screen, not the raw escape-laden byte stream.
+terminal. The LLM receives only the final rendered state of the screen, not
+the raw escape-laden byte stream. Supports scrollback buffer, alternate screen
+(vim/top/htop), delta snapshots for efficient polling, and thread safety via
+RLock. Default geometry is 220x50 to suppress most line-wrapping that would
+fragment structured output for smaller TTYs.
 
-Key features
-────────────
-• Scrollback buffer   — lines that scroll off the top are kept (up to
-                        MAX_SCROLLBACK) and included in every snapshot.
-• Alternate screen    — apps like vim / top / htop switch buffers; the
-                        emulator tracks main and alt independently and
-                        restores the main screen when the app exits.
-• Delta snapshots     — delta_snapshot() returns only new scrollback lines
-                        + current visible screen, enabling cheap polling of
-                        still-running commands without duplicating output.
-• Thread safety       — a reentrant lock guards all state mutation so the
-                        emulator is safe to feed from a reader thread while
-                        the main thread takes snapshots.
-• Large PTY geometry  — default 220 × 50 suppresses most line-wrapping that
-                        would break structured output for smaller ttys.
+CSI, ESC, OSC, DCS/PM/APC, and C1 8-bit escape sequences are handled.
 
-Supported escape sequences
-──────────────────────────
-CSI final bytes:  A B C D E F G H J K L M P S T X @ d f m r s u
-ESC sequences:    7 8 c M E  and charset / keypad variants
-OSC:              ignored (terminal title, hyperlinks, …)
-DCS / PM / APC:   ignored until String Terminator
-C1 8-bit:         9B (CSI), 9D (OSC), 90 (DCS) recognised
+Copyright (c) 2026 Jahanzeb Ahmed.
+Licensed under the MIT License.
 """
 
 from __future__ import annotations

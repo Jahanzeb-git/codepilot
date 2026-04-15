@@ -1,3 +1,22 @@
+"""
+File: registry.py
+Author: Jahanzeb Ahmed <jahanzebahmed.mail@gmail.com>
+Created: 2026-04-16
+
+Description:
+Central tool registry for the CodePilot agentic runtime.
+
+Architectural Notes:
+Acts as the single source of truth for all tools available to the agent's
+exec() sandbox. Registered tools are plain Python callables (bound methods).
+The registry auto-generates human-readable tool definitions from each
+callable's signature and docstring, which are injected into the system
+prompt every step so the agent always has an accurate, up-to-date reference.
+
+Copyright (c) 2026 Jahanzeb Ahmed.
+Licensed under the MIT License.
+"""
+
 import inspect
 from typing import Callable, Dict, Optional
 

@@ -1,3 +1,21 @@
+"""
+File: runtime.py
+Author: Jahanzeb Ahmed <jahanzebahmed.mail@gmail.com>
+Created: 2026-04-16
+
+Description: 
+This module handles the core agentic execution runtime, including loop 
+state management, sandbox initialization, and LLM provider integration.
+
+Architectural Notes:
+- The runtime uses Python's `exec()` to build a stateless sandbox.
+- Security isolation relies on the host Docker container.
+- File system path guards are dynamically injected at runtime.
+
+Copyright (c) 2026 Jahanzeb Ahmed.
+Licensed under the MIT License.
+"""
+
 import asyncio
 import os
 import queue
@@ -192,16 +210,59 @@ class AsyncRuntime:
         self._cache_timer: Optional[threading.Timer] = None
         self._last_system_prompt: Optional[SystemPromptParts] = None
 
+        self._install_path_guards()
+
     # ====================================================================== #
     #  Public API                                                             #
     # ====================================================================== #
+
+    def _install_path_guards(self):
+        import shutil
+        if getattr(shutil, "_cp_guards_installed", False):
+            return
+            
+        work_dir = os.path.abspath(self.config.runtime.work_dir)
+        orig_rmtree = shutil.rmtree
+        orig_remove = os.remove
+        orig_unlink = os.unlink
+        orig_rmdir = os.rmdir
+
+        def check_path(path):
+            abs_path = os.path.abspath(path)
+            if not abs_path.startswith(work_dir) and abs_path != work_dir:
+                raise PermissionError(
+                    f"Access denied: '{path}' is outside workspace '{work_dir}'. "
+                    "Host mounted directories cannot be modified."
+                )
+
+        def g_rmtree(path, *args, **kwargs):
+            check_path(path)
+            return orig_rmtree(path, *args, **kwargs)
+
+        def g_remove(path, *args, **kwargs):
+            check_path(path)
+            return orig_remove(path, *args, **kwargs)
+            
+        def g_unlink(path, *args, **kwargs):
+            check_path(path)
+            return orig_unlink(path, *args, **kwargs)
+
+        def g_rmdir(path, *args, **kwargs):
+            check_path(path)
+            return orig_rmdir(path, *args, **kwargs)
+
+        shutil.rmtree = g_rmtree
+        os.remove = g_remove
+        os.unlink = g_unlink
+        os.rmdir = g_rmdir
+        shutil._cp_guards_installed = True
 
     async def run(self, task: str) -> Optional[str]:
         """
         Run a task within the current conversation context.
 
         Returns:
-            The summary string passed to done(), or None if the loop ended
+            The summary string from the completion block, or None if the loop ended
             for any other reason (max_steps, abort).
         """
         self._done  = False
@@ -328,7 +389,7 @@ class AsyncRuntime:
             if step >= self.config.runtime.max_steps:
                 self.hooks.emit(EventType.MAX_STEPS)
             else:
-                # Stream was naturally closed due to a conversational reply rather than a done() block.
+                # Stream was naturally closed due to a conversational reply rather than a completion block.
                 # Emit a FINISH event so the UI gracefully restores its state.
                 self.hooks.emit(EventType.FINISH, summary="Agent replied. Standing by for next task.")
 
@@ -669,24 +730,12 @@ class AsyncRuntime:
     # ------------------------------------------------------------------ #
 
     def _build_sandbox(self, captured_print=None) -> Dict[str, Any]:
+        import builtins
+        b_dict = {k: getattr(builtins, k) for k in dir(builtins)}
+        b_dict["print"] = captured_print if captured_print is not None else print
         sandbox = {
-            "__builtins__": {
-                "print": captured_print if captured_print is not None else print,
-                "__import__": __import__,
-                "len": len, "range": range,
-                "str": str, "int": int, "float": float, "bool": bool,
-                "list": list, "dict": dict, "set": set, "tuple": tuple,
-                "enumerate": enumerate, "zip": zip, "map": map,
-                "filter": filter, "sorted": sorted, "reversed": reversed,
-                "sum": sum, "min": min, "max": max, "abs": abs, "round": round,
-                "isinstance": isinstance, "issubclass": issubclass,
-                "type": type, "repr": repr,
-                "True": True, "False": False, "None": None,
-                "Exception": Exception, "ValueError": ValueError,
-                "TypeError": TypeError, "RuntimeError": RuntimeError,
-                "KeyError": KeyError, "IndexError": IndexError,
-                "StopIteration": StopIteration,
-            },
+            "__builtins__": b_dict,
+            "WORK_DIR": self.config.runtime.work_dir,
         }
         sandbox.update(self.registry.as_sandbox_dict())
         return sandbox

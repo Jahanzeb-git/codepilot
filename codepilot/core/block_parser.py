@@ -1,3 +1,23 @@
+"""
+File: block_parser.py
+Author: Jahanzeb Ahmed <jahanzebahmed.mail@gmail.com>
+Created: 2026-04-16
+
+Description:
+LLM response parser for the CodePilot Code-as-Interface paradigm.
+
+Architectural Notes:
+Parses fenced Markdown blocks from LLM responses and classifies them into
+three categories: the ```codepilot control block (executed Python), ```python
+filename=... payload blocks (side-loaded by write_file), and the ```completion
+block (signals task completion to the runtime loop). Cross-validates payload
+block filename= annotations against write_file() calls in the control block
+using a paren-balanced scanner that handles nested structure correctly.
+
+Copyright (c) 2026 Jahanzeb Ahmed.
+Licensed under the MIT License.
+"""
+
 import re
 from typing import List, Optional, Tuple
 from dataclasses import dataclass, field

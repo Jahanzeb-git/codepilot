@@ -1,3 +1,20 @@
+"""
+File: hooks.py
+Author: Jahanzeb Ahmed <jahanzebahmed.mail@gmail.com>
+Created: 2026-04-16
+
+Description: 
+Observable event bus for the CodePilot runtime.
+
+Architectural Notes:
+Implements an event-driven architecture allowing external systems (like web servers 
+or UI clients) to stream agent responses and monitor tool executions in real-time 
+without tightly coupling to the core LLM execution loop.
+
+Copyright (c) 2026 Jahanzeb Ahmed.
+Licensed under the MIT License.
+"""
+
 from typing import Callable, List, Dict, Any, Optional
 from enum import Enum
 
@@ -12,7 +29,7 @@ class EventType(Enum):
     PERMISSION_REQUEST    = "permission_request"     # Tool requires user permission
     SECURITY_ERROR        = "security_error"         # AST validation rejected the code
     RUNTIME_ERROR         = "runtime_error"          # Execution error occurred
-    FINISH                = "finish"                 # Agent called done() — task complete
+    FINISH                = "finish"                 # Task complete (completion block detected)
     MAX_STEPS             = "max_steps"              # Loop ended due to step limit
     USER_MESSAGE_QUEUED   = "user_message_queued"    # send_message() was called
     USER_MESSAGE_INJECTED = "user_message_injected"  # Message inserted into context

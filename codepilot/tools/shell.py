@@ -1,8 +1,19 @@
 """
+File: shell.py
+Author: Jahanzeb Ahmed <jahanzebahmed.mail@gmail.com>
+Created: 2026-04-16
+
+Description: 
 Pexpect-based shell session management for the CodePilot agentic runtime.
 
+Architectural Notes:
 Provides 5 tools: execute, read_output, send_input, send_signal, kill_shell.
 Requires POSIX (Linux/macOS). Not supported on Windows.
+Utilizes persistent bash processes via pexpect with a virtual terminal emulator 
+to capture and render real-time interactive terminal state.
+
+Copyright (c) 2026 Jahanzeb Ahmed.
+Licensed under the MIT License.
 """
 
 import os

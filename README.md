@@ -4,7 +4,7 @@
 
 ### The Code-Native Agentic Framework for Python
 
-**v0.8.7** • [MIT License](LICENSE) • [PyPI](https://pypi.org/project/codepilot-ai/)
+**v0.8.8** • [MIT License](LICENSE) • [PyPI](https://pypi.org/project/codepilot-ai/)
 
 ```bash
 pip install codepilot-ai
@@ -1497,6 +1497,6 @@ create_session(
 
 ---
 
-*CodePilot-ai v0.8.7*
+*CodePilot-ai v0.8.8*
 
 

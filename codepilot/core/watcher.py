@@ -1,13 +1,20 @@
 """
-codepilot.core.watcher
-~~~~~~~~~~~~~~~~~~~~~~
+File: watcher.py
+Author: Jahanzeb Ahmed <jahanzebahmed.mail@gmail.com>
+Created: 2026-04-16
 
-Snapshot-based workspace change detector.
+Description:
+Snapshot-based workspace change detector for the CodePilot runtime.
 
+Architectural Notes:
 Tracks only files the agent has explicitly interacted with (read or written).
 Before each inference step the runtime calls check() to detect external
-modifications.  Changed files are reported with line-number ranges so the
-agent knows which parts of its mental model are stale.
+modifications caused by the human operator or other tools. Changed files
+are reported with precise line-number ranges (via difflib) so the agent
+knows exactly which parts of its mental model are stale and need re-reading.
+
+Copyright (c) 2026 Jahanzeb Ahmed.
+Licensed under the MIT License.
 """
 
 import os

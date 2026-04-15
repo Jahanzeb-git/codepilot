@@ -1,8 +1,20 @@
 """
-Semantic code search via grepai for the CodePilot agentic runtime.
+File: semantic.py
+Author: Jahanzeb Ahmed <jahanzebahmed.mail@gmail.com>
+Created: 2026-04-16
 
-Provides 1 tool: semantic_search (search, trace_callers, trace_callees, trace_graph).
-Requires Linux. grepai is auto-installed if missing.
+Description:
+Semantic code search tools for the CodePilot agentic runtime.
+
+Architectural Notes:
+Provides the semantic_search tool backed by the grepai engine and the
+voyage-code-3 embedding model. Supports search, trace_callers, trace_callees,
+and trace_graph modes, enabling the agent to navigate large codebases by
+concept rather than exact text match. grepai is auto-installed on first use
+and its index lives in ~/.codepilot/grepai/ — never inside the user's project.
+
+Copyright (c) 2026 Jahanzeb Ahmed.
+Licensed under the MIT License.
 """
 
 import subprocess

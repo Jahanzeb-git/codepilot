@@ -1,8 +1,20 @@
 """
-codepilot.tools.context
-~~~~~~~~~~~~~~~~~~~~~~~
+File: context.py
+Author: Jahanzeb Ahmed <jahanzebahmed.mail@gmail.com>
+Created: 2026-04-16
 
-Agent-driven context management tools: archive, reveal, list.
+Description:
+Agent-driven context management tools for the CodePilot runtime.
+
+Architectural Notes:
+Exposes three tools to the agent sandbox: archive_context, reveal_context,
+and list_archived_context. These allow the agent to actively manage its own
+context window during long-running tasks by replacing completed task messages
+with summaries, while preserving the originals in a ContextArchive for
+later retrieval without disrupting the LLM's cache state.
+
+Copyright (c) 2026 Jahanzeb Ahmed.
+Licensed under the MIT License.
 """
 
 from __future__ import annotations

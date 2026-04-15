@@ -1,3 +1,22 @@
+"""
+File: interaction.py
+Author: Jahanzeb Ahmed <jahanzebahmed.mail@gmail.com>
+Created: 2026-04-16
+
+Description:
+Human-in-the-loop interaction tools for the CodePilot agentic runtime.
+
+Architectural Notes:
+Provides the ask_user tool, which allows the agent to pause execution and
+request clarification from the human operator. Answers are routed through
+the HookSystem's ASK_USER event, enabling web apps to supply answers
+programmatically (e.g., via WebSocket) without blocking the event loop.
+Falls back to a blocking stdin prompt in CLI environments.
+
+Copyright (c) 2026 Jahanzeb Ahmed.
+Licensed under the MIT License.
+"""
+
 from typing import TYPE_CHECKING
 
 from ..engine.hooks import EventType

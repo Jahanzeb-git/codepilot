@@ -1,3 +1,23 @@
+"""
+File: filesystem.py
+Author: Jahanzeb Ahmed <jahanzebahmed.mail@gmail.com>
+Created: 2026-04-16
+
+Description:
+Filesystem read/write tools for the CodePilot agentic runtime.
+
+Architectural Notes:
+Provides write_file and read_file tools to the agent's sandbox. write_file
+uses a Payload Block side-loading mechanism — file content is never passed
+as a string argument but instead consumed from the next queued payload block
+in the runtime, solving the LLM string-escaping problem entirely.
+Supports create, append, edit, and multi_edit modes with optional permission
+gating via the HookSystem.
+
+Copyright (c) 2026 Jahanzeb Ahmed.
+Licensed under the MIT License.
+"""
+
 import os
 from typing import Optional, TYPE_CHECKING
 

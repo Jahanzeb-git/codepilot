@@ -1,3 +1,23 @@
+"""
+File: context.py
+Author: Jahanzeb Ahmed <jahanzebahmed.mail@gmail.com>
+Created: 2026-04-16
+
+Description:
+Workspace file tree snapshot generator for the CodePilot runtime.
+
+Architectural Notes:
+Generates a JSON snapshot of the workspace directory tree including line
+counts for every file. This snapshot is injected into the system prompt
+every step so the agent always has an accurate, up-to-date map of what
+files exist and their approximate size without needing to call ls or find.
+Common noise directories (node_modules, __pycache__, .git, etc.) are
+excluded automatically to keep the snapshot concise and relevant.
+
+Copyright (c) 2026 Jahanzeb Ahmed.
+Licensed under the MIT License.
+"""
+
 import os
 import json
 from typing import Dict, Any, List

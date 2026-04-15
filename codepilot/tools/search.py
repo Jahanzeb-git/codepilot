@@ -1,13 +1,20 @@
 """
-Text / regex search via ripgrep (rg) for the CodePilot agentic runtime.
+File: search.py
+Author: Jahanzeb Ahmed <jahanzebahmed.mail@gmail.com>
+Created: 2026-04-16
 
-Provides 1 tool: find()
-  - scope='file'     — search within a single file
-  - scope='files'    — search within a list of files
-  - scope='codebase' — search the entire workspace (honours .gitignore)
+Description:
+Text and regex search tools for the CodePilot agentic runtime.
 
-Falls back to a pure-Python implementation when rg is not installed,
-with a built-in exclusion list for common noise directories.
+Architectural Notes:
+Provides the find() tool with three scopes: file, files, and codebase.
+Prefers ripgrep (rg) for performance, with a pure-Python fallback when rg
+is not installed on the container. The codebase scope walks the workspace
+tree while respecting .gitignore and excluding common noise directories
+(node_modules, __pycache__, etc.) to keep results clean and relevant.
+
+Copyright (c) 2026 Jahanzeb Ahmed.
+Licensed under the MIT License.
 """
 
 import fnmatch

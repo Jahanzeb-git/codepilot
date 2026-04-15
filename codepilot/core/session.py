@@ -1,49 +1,22 @@
 """
-codepilot.core.session
-~~~~~~~~~~~~~~~~~~~~~~
+File: session.py
+Author: Jahanzeb Ahmed <jahanzebahmed.mail@gmail.com>
+Created: 2026-04-16
 
+Description:
 Persistence layer for multi-turn agentic conversations.
 
-Three backends are supported:
+Architectural Notes:
+Implements three pluggable session backends under a common BaseSession ABC:
+InMemorySession (ephemeral, zero config), FileSession (JSON on disk at
+~/.codepilot/sessions/), and DatabaseSession (any SQLAlchemy-compatible DB).
+The DatabaseSession auto-creates its table on first use — no migrations needed.
+FileSession uses atomic temp-file rename writes to prevent corruption on crash.
+All backends also persist extra state (memory archive, task counters) alongside
+the message history.
 
-    InMemorySession  — keeps the message history in a Python list for the
-                       lifetime of the process.  Zero configuration, zero I/O.
-                       Works perfectly for scripts, one-off tasks, or any
-                       use-case where history doesn't need to survive a restart.
-
-    FileSession      — serialises the message history to a JSON file on disk
-                       so the context survives process restarts.  The file is
-                       written to ~/.codepilot/sessions/ which is always
-                       user-writable without elevated permissions.
-                       Best for: CLI tools, local dev agents.
-
-    DatabaseSession  — persists the message history to any SQLAlchemy-
-                       compatible database (SQLite, PostgreSQL, MySQL, etc.).
-                       The required table is created automatically on first use
-                       — no migrations or schema setup needed.
-                       Best for: web apps, multi-user deployments, containers.
-
-Usage (via Runtime — the preferred interface):
-
-    # in-memory (default)
-    runtime = Runtime("agent.yaml")
-
-    # file-backed, auto-named from agent name
-    runtime = Runtime("agent.yaml", session="file")
-
-    # file-backed, explicit session id (resumes if file exists)
-    runtime = Runtime("agent.yaml", session="file", session_id="project-x")
-
-    # database-backed (SQLite)
-    runtime = Runtime("agent.yaml", session="db", session_id="user-42",
-                      db_url="sqlite:///./codepilot.db")
-
-    # database-backed (PostgreSQL)
-    runtime = Runtime("agent.yaml", session="db", session_id="user-42",
-                      db_url="postgresql://user:pass@localhost/myapp")
-
-    # wipe history and start fresh
-    runtime.reset()
+Copyright (c) 2026 Jahanzeb Ahmed.
+Licensed under the MIT License.
 """
 
 from __future__ import annotations

@@ -1,3 +1,23 @@
+"""
+File: prompt.py
+Author: Jahanzeb Ahmed <jahanzebahmed.mail@gmail.com>
+Created: 2026-04-16
+
+Description:
+System prompt renderer and cache-split manager for the CodePilot runtime.
+
+Architectural Notes:
+Renders the Jinja2 system_prompt.j2 template and splits it into two halves
+at a sentinel marker (--- ## ENVIRONMENT). The static half (rules, tools,
+example) is identical across all agentic steps and is passed to providers
+with a cache_control breakpoint for maximum token reuse. The dynamic half
+(environment, codebase snapshot, step info) changes every step and is never
+cached. This design reduces inference cost significantly in long sessions.
+
+Copyright (c) 2026 Jahanzeb Ahmed.
+Licensed under the MIT License.
+"""
+
 import os
 import platform
 from pathlib import Path

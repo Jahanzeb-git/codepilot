@@ -1,21 +1,24 @@
+"""
+File: ast_validator.py
+Author: Jahanzeb Ahmed <jahanzebahmed.mail@gmail.com>
+Created: 2026-04-16
+
+Description: 
+CodePilot Abstract Syntax Tree (AST) Validator.
+Acts as the first line of defense for the agentic execution runtime.
+
+Architectural Notes:
+Originally designed to strictly block dangerous imports and system calls, this 
+module now facilitates an open-sandbox architecture. We allow complete Python freedom 
+(all imports and OS calls) under the assumption that CodePilot runs inside a Docker 
+container, treating the container shell as the true security boundary.
+
+Copyright (c) 2026 Jahanzeb Ahmed.
+Licensed under the MIT License.
+"""
+
 import ast
 from typing import List, Set
-
-
-# Builtins the control block is always allowed to use.
-_SAFE_BUILTINS: Set[str] = {
-    "print", "len", "range", "str", "int", "float", "bool",
-    "list", "dict", "set", "tuple", "enumerate", "zip", "map",
-    "filter", "sorted", "reversed", "sum", "min", "max", "abs",
-    "round", "isinstance", "issubclass", "type", "repr", "hash",
-    "id", "callable", "getattr", "hasattr", "vars", "dir",
-    "Exception", "ValueError", "TypeError", "KeyError",
-    "IndexError", "RuntimeError", "StopIteration",
-    "True", "False", "None",
-}
-
-# Modules that are always importable regardless of allowed_imports config.
-_ALWAYS_ALLOWED: Set[str] = {"tools"}
 
 
 class SecurityViolation(Exception):
@@ -26,14 +29,14 @@ class ASTValidator(ast.NodeVisitor):
     """
     Validates a Python control block before exec().
 
-    Checks:
-      - Only whitelisted modules may be imported.
-      - Direct calls to os.system / subprocess are blocked as a belt-and-suspenders
-        guard (the sandbox globals don't expose them either, but belt-and-suspenders).
+    In containerized environments, we allow all imports and arbitrary Python logic.
+    We only check for basic syntax validity. Destructive host file operations
+    are guarded dynamically at runtime using path constraints.
     """
 
-    def __init__(self, allowed_imports: List[str]):
-        self.allowed: Set[str] = _ALWAYS_ALLOWED | set(allowed_imports)
+    def __init__(self, allowed_imports: List[str] = None):
+        # We ignore allowed_imports now as the container is the security boundary
+        pass
 
     def validate(self, code: str) -> ast.Module:
         try:
@@ -42,54 +45,3 @@ class ASTValidator(ast.NodeVisitor):
             raise SecurityViolation(f"Syntax error in control block: {exc}") from exc
         self.visit(tree)
         return tree
-
-    # ------------------------------------------------------------------
-    # Visitors
-    # ------------------------------------------------------------------
-
-    def visit_Import(self, node: ast.Import):
-        for alias in node.names:
-            base = alias.name.split(".")[0]
-            if base not in self.allowed:
-                raise SecurityViolation(
-                    f"Import of '{alias.name}' is not permitted. "
-                    f"Add it to runtime.allowed_imports in your AgentFile."
-                )
-        self.generic_visit(node)
-
-    def visit_ImportFrom(self, node: ast.ImportFrom):
-        if node.module:
-            base = node.module.split(".")[0]
-            if base not in self.allowed:
-                raise SecurityViolation(
-                    f"Import from '{node.module}' is not permitted. "
-                    f"Add it to runtime.allowed_imports in your AgentFile."
-                )
-        self.generic_visit(node)
-
-    def visit_Call(self, node: ast.Call):
-        # Block direct access to dangerous builtins by name
-        if isinstance(node.func, ast.Attribute):
-            attr_chain = self._attr_chain(node.func)
-            blocked = {"os.system", "os.popen", "subprocess.run",
-                       "subprocess.Popen", "subprocess.call",
-                       "subprocess.check_output"}
-            if attr_chain in blocked:
-                raise SecurityViolation(
-                    f"Direct call to '{attr_chain}' is blocked. Use execute() shell tool instead."
-                )
-        self.generic_visit(node)
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _attr_chain(node: ast.Attribute) -> str:
-        parts = []
-        while isinstance(node, ast.Attribute):
-            parts.append(node.attr)
-            node = node.value
-        if isinstance(node, ast.Name):
-            parts.append(node.id)
-        return ".".join(reversed(parts))
