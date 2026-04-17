@@ -1,27 +1,37 @@
 <div align="center">
 
-# CodePilot AI
+<img src="assets/codepilot.png" alt="CodePilot logo" width="720" />
 
-### The Code-Native Agentic Framework for Python
+### Embeddable Autonomous Agent Framework for Software Engineering
 
-**v0.8.8** • [MIT License](LICENSE) • [PyPI](https://pypi.org/project/codepilot-ai/)
+[![PyPI version](https://img.shields.io/pypi/v/codepilot-ai)](https://pypi.org/project/codepilot-ai/)
+[![Python](https://img.shields.io/pypi/pyversions/codepilot-ai)](https://pypi.org/project/codepilot-ai/)
+[![License](https://img.shields.io/badge/license-MIT-black)](LICENSE)
+[![GitHub](https://img.shields.io/badge/GitHub-codepilot-black?logo=github)](https://github.com/Jahanzeb-git/codepilot)
+
+**Embeddable Autonomous Agent (EAA)** • **Code-as-Interface Runtime** • **Python Library** • **MIT Licensed**
 
 ```bash
 pip install codepilot-ai
 ```
 </div>
 
-Beyond SDKs & Function Calling
-**CodePilot** is the first open-source, MIT-licensed framework that empowers LLMs to act by writing and executing native Python code.
-Eliminate the constraints of rigid JSON schemas, proprietary SDKs, and wrapper-heavy APIs. CodePilot provides complete architectural freedom, allowing you to embed autonomous agents directly into DevOps pipelines, web backends, CLI tools, and low-level system workflows.
+**CodePilot** is an **Embeddable Autonomous Agent (EAA)** framework for software engineering tasks.
+It is distributed as a Python library so you can embed an autonomous agent directly into your own systems: DevOps pipelines, web backends, internal tools, CLI workflows, and other software components.
 
-**Version:** `0.8.7`
+Instead of forcing the model through brittle JSON schemas or generic function-calling wrappers, CodePilot uses a **code-as-interface** runtime: the model streams natural language to the user, writes executable Python in a `codepilot` block, side-loads file payloads when needed, and explicitly terminates with a `completion` block.
+
+**What CodePilot is not:** not a chatbot UI, not a generic "AI agent" wrapper, and not another hosted coding assistant. It is a library-first runtime for embedding autonomous software agents into your own application stack.
+
+**Version:** `0.8.8`
 
 > **Note:** Deployment on Linux works best and is recommended. Cross platform support is experimental and may not work as expected due to underlying dependencies depends on POSIX-compliance.
 
 ---
 
-## Installation
+## Getting Started
+
+Install the library:
 
 ```bash
 pip install codepilot-ai
@@ -35,6 +45,62 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 export OPENAI_API_KEY="sk-..."
 export DASHSCOPE_API_KEY="..."
 ```
+
+Create an `agent.yaml`:
+
+```yaml
+agent:
+  name: "CodePilot"
+  role: "Autonomous software engineering agent."
+
+  model:
+    provider: "anthropic"
+    name: "claude-sonnet-4-5"
+    api_key_env: "ANTHROPIC_API_KEY"
+
+  runtime:
+    work_dir: "./workspace"
+    max_steps: 20
+
+  tools:
+    - name: "read_file"
+      enabled: true
+    - name: "write_file"
+      enabled: true
+    - name: "execute"
+      enabled: true
+    - name: "read_output"
+      enabled: true
+```
+
+Run it synchronously:
+
+```python
+from codepilot import Runtime
+
+runtime = Runtime("agent.yaml")
+summary = runtime.run("Fix the nginx config")
+print(summary)
+```
+
+Run it asynchronously:
+
+```python
+import asyncio
+
+from codepilot import AsyncRuntime
+
+runtime = AsyncRuntime("agent.yaml")
+
+async def main():
+    summary = await runtime.run("Fix the nginx config")
+    print(summary)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+If you want the full config surface and runtime behavior details, keep reading.
 
 ---
 
@@ -249,6 +315,8 @@ print(summary)  # the text the agent put in the completion block, or None
 ```
 **Async Usage**
 ```python
+import asyncio
+
 from codepilot import AsyncRuntime
 
 runtime = AsyncRuntime("agent.yaml")
@@ -1498,5 +1566,3 @@ create_session(
 ---
 
 *CodePilot-ai v0.8.8*
-
-

@@ -7,34 +7,24 @@ Description:
 System prompt renderer and cache-split manager for the CodePilot runtime.
 
 Architectural Notes:
-Renders the Jinja2 system_prompt.j2 template and splits it into two halves
-at a sentinel marker (--- ## ENVIRONMENT). The static half (rules, tools,
-example) is identical across all agentic steps and is passed to providers
-with a cache_control breakpoint for maximum token reuse. The dynamic half
-(environment, codebase snapshot, step info) changes every step and is never
-cached. This design reduces inference cost significantly in long sessions.
+Renders two separate Jinja2 templates — static_instructions.j2 and
+dynamic_instructions.j2 — and returns them as a SystemPromptParts object.
+
+The static half (rules, tools, example) is identical across all agentic
+steps and is passed to providers with a cache_control breakpoint for maximum
+token reuse. The dynamic half (environment, codebase snapshot, step info)
+changes every step and is never cached. This design reduces inference cost
+significantly in long sessions.
 
 Copyright (c) 2026 Jahanzeb Ahmed.
 Licensed under the MIT License.
 """
 
-import os
 import platform
 from pathlib import Path
 from datetime import datetime
 from typing import NamedTuple
 from jinja2 import Environment, FileSystemLoader, select_autoescape
-
-
-# -----------------------------------------------------------------------
-#  System prompt split for provider-level caching
-# -----------------------------------------------------------------------
-
-# Sentinel that MUST appear in the rendered template exactly once.
-# Everything before it is static (cacheable); everything after is dynamic.
-_CACHE_SPLIT_MARKER = (
-    "---\n## ENVIRONMENT"
-)
 
 
 class SystemPromptParts(NamedTuple):
@@ -56,28 +46,31 @@ class SystemPromptParts(NamedTuple):
 
 class PromptManager:
     """
-    Renders the internal system prompt template (system_prompt.j2) and merges
-    in the developer-supplied custom instructions.
+    Loads and renders separate static and dynamic system prompt templates.
 
-    The developer's system_prompt from the AgentFile is APPENDED as a clearly
-    delineated section — it can never override the core runtime behavioural
-    instructions that make code-as-interface work.
+    static_instructions.j2  — cacheable, never changes between steps.
+    dynamic_instructions.j2 — rendered fresh every step with current env state.
+
+    The developer's system_prompt from the AgentFile is injected into the
+    dynamic half as a clearly delineated section — it can never override the
+    core runtime behavioural instructions in the static half.
     """
 
-    def __init__(self, template_path: str = None):
-        if template_path is None:
-            template_path = Path(__file__).parent / ".." / "prompts" / "system_prompt.j2"
+    def __init__(self, prompts_dir: str = None):
+        if prompts_dir is None:
+            prompts_dir = Path(__file__).parent / ".." / "prompts"
 
-        template_path = Path(template_path).resolve()
-        template_dir  = template_path.parent
-        template_file = template_path.name
+        prompts_dir = Path(prompts_dir).resolve()
 
         engine = Environment(
-            loader=FileSystemLoader(template_dir),
+            loader=FileSystemLoader(prompts_dir),
             autoescape=select_autoescape(),
-            keep_trailing_newline=True
+            keep_trailing_newline=True,
         )
-        self._template = engine.get_template(template_file)
+
+        # Load both templates once at construction time
+        self._static_tmpl  = engine.get_template("static_instructions.j2")
+        self._dynamic_tmpl = engine.get_template("dynamic_instructions.j2")
 
     def render(
         self,
@@ -91,29 +84,23 @@ class PromptManager:
         step_info: str = "",
         context_stress: str = "",
     ) -> SystemPromptParts:
-        full = self._template.render(
+        # Static half — only uses identity + tool definitions (never changes)
+        static = self._static_tmpl.render(
             agent_name=agent_name,
             agent_role=agent_role or "a skilled software engineering assistant",
-            developer_prompt=developer_prompt,
             tool_definitions=tool_definitions,
-            work_dir=work_dir, 
+        )
+
+        # Dynamic half — rendered fresh every step with current environment state
+        dynamic = self._dynamic_tmpl.render(
+            work_dir=work_dir,
             os_info=f"{platform.system()} {platform.release()}",
             current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             codebase_snapshot=codebase_snapshot,
             shell_info=shell_info,
             step_info=step_info,
             context_stress=context_stress,
+            developer_prompt=developer_prompt,
         )
 
-        # Split on the ENVIRONMENT section header.
-        # The marker lives in the dynamic half so that the static part ends
-        # with a clean trailing newline after the RULES section.
-        idx = full.find(_CACHE_SPLIT_MARKER) 
-        if idx == -1:
-            # Marker missing (custom template?) — treat everything as static.
-            return SystemPromptParts(static=full, dynamic="")
-
-        return SystemPromptParts(
-            static=full[:idx],
-            dynamic=full[idx:],
-        )
+        return SystemPromptParts(static=static, dynamic=dynamic)

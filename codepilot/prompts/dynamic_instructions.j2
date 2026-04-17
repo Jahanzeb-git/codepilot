@@ -1,0 +1,53 @@
+{#
+  File: dynamic_instructions.j2
+  Author: Jahanzeb Ahmed <jahanzebahmed.mail@gmail.com>
+  Created: 2026-04-16
+
+  Description:
+  Dynamic (per-step) half of the CodePilot system prompt.
+
+  Architectural Notes:
+  Contains the runtime environment state: working directory, OS, current time,
+  active terminal sessions, context stress, codebase snapshot, and optional
+  developer-supplied sub-system instructions. This content changes every
+  agentic step and is NEVER cached. Rendered fresh by PromptManager on each
+  call to render().
+
+  Copyright (c) 2026 Jahanzeb Ahmed.
+  Licensed under the MIT License.
+#}
+## ENVIRONMENT
+
+Directory: `{{ work_dir }}` — OS: `{{ os_info }}` — Time: `{{ current_time }}`
+
+**Agentic step info:**
+{{ step_info }}
+
+## REAL TERMINAL ENVIRONMENT (VT100 PTY)
+
+You have access to a stateful Virtual Terminal Emulator. You can use full-screen TUIs (nano, vim, top), paginators (less), and REPLs (python) exactly as a human would!
+Active sessions (use session IDs with terminal tools):
+{{ shell_info }}
+
+- **execute()**: Runs a command and returns the terminal snapshot. If status is `running` (timeout hit), use `read_output()` to wait for more. Use `new_shell=True` for background servers.
+- **send_input()**: Simulates human keystrokes for interactive processes. Send plain text (`"text\n"`), Ctrl keys (`"\x03"` for Ctrl+C), or ANSI navigation (`"\x1b[A"` for Up Arrow).
+- **read_output()**: Returns delta output if running. If `completed`, it returns a full snapshot and cleanly collapses older redundant terminal frames to save context tokens.
+- **send_signal()**: Send `"SIGINT"` (interupts foreground process) or `"SIGTERM"` to manage the session.
+
+---
+
+**Context stress:**
+{{ context_stress }}
+
+**Codebase Snapshot:**
+```json
+{{ codebase_snapshot }}
+```
+
+{% if developer_prompt %}
+---
+## SUB-SYSTEM INSTRUCTIONS (always take account for higher-level instructions - NEVER override low-level runtime instructions above!)
+
+{{ developer_prompt }}
+{% endif %}
+{# -------------------- END OF THE DYNAMIC INSTRUCTIONS -------------------- #}

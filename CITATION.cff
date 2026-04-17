@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+title: "CodePilot AI"
+message: "If you use CodePilot in research, software, or technical writing, please cite it using this metadata."
+type: software
+authors:
+  - family-names: "Ahmed"
+    given-names: "Jahanzeb"
+    email: "jahanzebahmed.mail@gmail.com"
+repository-code: "https://github.com/Jahanzeb-git/codepilot"
+url: "https://github.com/Jahanzeb-git/codepilot"
+license: "MIT"
+version: "0.8.8"

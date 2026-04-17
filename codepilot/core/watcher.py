@@ -46,10 +46,12 @@ class WorkspaceWatcher:
 
     def __init__(
         self,
+        work_dir: str = ".",
         max_diff_lines_per_file: int = 30,
         max_total_diff_lines: int = 100,
     ):
         self._tracked: Dict[str, _FileState] = {}
+        self._work_dir = os.path.abspath(work_dir)
         self._max_per_file = max_diff_lines_per_file
         self._max_total = max_total_diff_lines
 
@@ -83,17 +85,18 @@ class WorkspaceWatcher:
             if old_state.content_hash == current.content_hash:
                 continue
 
-            basename = os.path.basename(abs_path)
+            # Modified — compute changed line ranges
+            rel_path = os.path.relpath(abs_path, self._work_dir)
 
             # Deleted
             if old_state.exists and not current.exists:
-                notifications.append(f"🗑️ Deleted: {basename}")
+                notifications.append(f"🗑️ Deleted: {rel_path}")
                 continue
 
             # Created (was not there at snapshot time, now it is)
             if not old_state.exists and current.exists:
                 notifications.append(
-                    f"📄 Created: {basename} ({current.line_count} lines)"
+                    f"📄 Created: {rel_path} ({current.line_count} lines)"
                 )
                 continue
 
@@ -120,7 +123,7 @@ class WorkspaceWatcher:
 
             total_lines += lines_reported
             notifications.append(
-                f"📝 Modified: {basename}\n"
+                f"📝 Modified: {rel_path}\n"
                 f"  Changed lines: {', '.join(range_strs)}"
             )
 

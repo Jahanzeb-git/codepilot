@@ -2,107 +2,117 @@
 
 Thanks for contributing to CodePilot.
 
-## Architecture Overview
+CodePilot is an embeddable autonomous agent runtime for software engineering tasks. Contributions are welcome across runtime behavior, developer experience, documentation, examples, tests, and ecosystem tooling.
 
-Understanding the key layers helps you contribute effectively:
+## Before You Start
 
-- **`engine/runtime.py`** — `AsyncRuntime` (native async agentic loop) + `Runtime` (thin sync wrapper). The loop: build system prompt → LLM inference → parse `codepilot` block → `exec()` in sandboxed environment → feed result back as `[EXECUTION RESULT]`.
-- **`engine/provider.py`** — Async LLM providers (`AsyncOpenAIProvider`, `AsyncAnthropicProvider`, `AlibabaProvider`). All `chat()` and `chat_stream()` methods are `async`.
-- **`core/vt.py`** — VT100/VT102 virtual terminal emulator. Converts raw PTY byte streams (ANSI escape codes, carriage returns, etc.) into a clean 2D character grid. The LLM sees only the final rendered snapshot.
-- **`core/memory.py`** — Context management. Token counting, per-task breakdown for the stress signal, agent-driven `archive_context` / `reveal_context`, and a global summarization safety net.
-- **`core/session.py`** — Session backends: `InMemorySession`, `FileSession`, `DatabaseSession`.
-- **`tools/shell.py`** — `ShellManager` wraps `pexpect` to manage persistent PTY shell sessions. Feeds output to `VirtualScreen`.
-- **`tools/filesystem.py`** — `write_file`, `read_file` with multi-edit and insert modes.
-- **`prompts/system_prompt.j2`** — Jinja2 system prompt template. Static portion is Anthropic prompt-cached with a 1h TTL; dynamic portion (shell state, context stress, codebase snapshot) changes every step.
+- Open an issue first for large features, API changes, or architectural changes.
+- Keep changes focused. Small pull requests are easier to review and merge.
+- If behavior changes, update documentation in the same pull request.
+- If the change is user-facing, include a short explanation of the motivation and impact.
+
+## Repository Overview
+
+These are the main areas of the codebase:
+
+- `codepilot/engine/runtime.py` - `Runtime` and `AsyncRuntime`, including the main agent loop
+- `codepilot/engine/provider.py` - provider integrations and model calls
+- `codepilot/core/block_parser.py` - parsing `codepilot`, payload, and `completion` blocks
+- `codepilot/core/prompt.py` - prompt rendering and dynamic/static instruction assembly
+- `codepilot/core/memory.py` - context stress, archive/reveal flows, and summarization support
+- `codepilot/core/vt.py` - VT100/VT102 virtual screen rendering
+- `codepilot/tools/shell.py` - stateful shell session management via PTY and `pexpect`
+- `codepilot/tools/filesystem.py` - file read, write, and edit operations
+- `codepilot/tools/semantic.py` - semantic code search integration
+- `codepilot/prompts/static_instructions.j2` - cacheable system behavior contract
+- `codepilot/prompts/dynamic_instructions.j2` - per-step runtime state prompt
 
 ## Local Setup
 
-1. Clone the repository.
-2. Create and activate a virtual environment.
-3. Install dependencies.
+Create a virtual environment and install the package in editable mode:
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
+source .venv/bin/activate
 pip install -U pip
 pip install -e .
-pip install -e .[db]       # optional: SQLAlchemy database session backend
 ```
 
-## Project Conventions
+Optional extras:
 
-1. **All provider and runtime I/O is async.** Keep `async/await` through the stack. Do not introduce synchronous HTTP calls.
-2. Keep runtime behavior deterministic and backward-compatible unless a breaking change is intentional.
-3. Prefer small, focused commits with clear messages.
-4. Update docs in the same PR when behavior changes.
-5. Keep the public API ergonomic (`Runtime`, `AsyncRuntime`, hooks, tools, session backends).
-6. PTY interaction (pexpect) runs in `asyncio.run_in_executor` — keep individual reads short and bounded.
+```bash
+pip install -e .[db]
+```
 
-## Validation Before PR
+## Development Guidelines
 
-Run at minimum:
+- Prefer backward-compatible changes unless a breaking change is explicitly intended.
+- Keep the public API ergonomic and stable.
+- Preserve deterministic runtime behavior where possible.
+- Keep provider and runtime I/O asynchronous through the stack.
+- Avoid introducing unnecessary complexity into prompt contracts or parser logic.
+- Do not mix unrelated refactors into a focused contribution.
+
+## Documentation Expectations
+
+Update documentation when behavior changes:
+
+- `README.md` for user-facing behavior, positioning, or examples
+- docstrings in touched modules when public behavior changes
+- prompt comments or inline comments when runtime rules are clarified
+
+## Validation
+
+At minimum, run:
 
 ```bash
 python -m compileall codepilot
+python -c "from codepilot import Runtime, AsyncRuntime; print('OK')"
 ```
 
-Confirm both classes import cleanly:
+If tests exist for your area, run them and include the command in the pull request description.
 
-```bash
-python3 -c "from codepilot import Runtime, AsyncRuntime; print('OK')"
-```
+## Pull Request Process
 
-If you add tests, run them and include the command and output in your PR description.
+1. Create a branch for your change.
+2. Make the smallest coherent change that solves the problem.
+3. Run validation locally.
+4. Update docs if behavior changed.
+5. Open a pull request with a clear description of what changed, why it changed, and how you validated it.
 
-## Documentation Requirements
+## Commit Guidance
 
-When changing behavior, update:
+Clear commit messages help maintainability. Prefer messages like:
 
-1. `README.md` for user-facing behavior and examples.
-2. Docstrings in touched modules.
-3. Any examples affected by the change.
+- `docs: clarify runtime completion behavior`
+- `fix: preserve payload block ordering in parser`
+- `feat: add hook for shell session lifecycle`
 
-## Release Process (PyPI)
+## Reporting Bugs
 
-`publish.yml` is triggered by pushing a Git tag matching `v*`.
+When opening a bug report, include:
 
-### 1) Bump version
+- CodePilot version
+- Python version
+- operating system
+- provider and model, if relevant
+- minimal reproduction steps
+- expected behavior
+- actual behavior
+- logs, stack traces, or screenshots if available
 
-Update all version surfaces together:
+## Security
 
-1. `pyproject.toml` → `[project].version`
-2. `codepilot/__init__.py` → `__version__`
-3. `README.md` → top version badge/line
+If you believe you found a security issue, do not open a public issue first. Follow the reporting guidance in [SECURITY.md](SECURITY.md).
 
-### 2) Commit and push
+## Release Process
 
-```bash
-git add pyproject.toml codepilot/__init__.py README.md
-git commit -m "release: v0.8.7"
-git push origin main
-```
+PyPI publishing is handled by `.github/workflows/publish.yml`.
 
-### 3) Tag and push tag
+When cutting a release, update version references together:
 
-```bash
-git tag v0.8.7
-git push origin v0.8.7
-```
+- `pyproject.toml`
+- `codepilot/__init__.py`
+- `README.md`
 
-### 4) Verify release
-
-1. Check GitHub Actions `Publish to PyPI` workflow succeeds.
-2. Confirm package/version on PyPI.
-3. Sanity-install:
-
-```bash
-pip install -U codepilot-ai==0.8.7
-```
-
-## Pull Request Checklist
-
-1. Behavior change is clear and justified.
-2. Backward compatibility considered (sync `Runtime` wrapper still works).
-3. README/examples updated.
-4. Version changes included if this is a release PR.
-5. Local validation (`compileall` + import check) completed.
+Then create and push a Git tag matching `v*`.

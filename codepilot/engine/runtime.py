@@ -143,7 +143,7 @@ class AsyncRuntime:
         # ------------------------------------------------------------------ #
         #  Workspace file change detection                                     #
         # ------------------------------------------------------------------ #
-        self._watcher = WorkspaceWatcher()
+        self._watcher = WorkspaceWatcher(work_dir=self.config.runtime.work_dir)
 
         # ------------------------------------------------------------------ #
         #  Session / persistence                                               #
