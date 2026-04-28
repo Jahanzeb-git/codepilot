@@ -10,10 +10,9 @@ readme = "README.md"
 authors = [
     {name = "Jahanzeb Ahmed", email = "jahanzebahmed.mail@gmail.com"}
 ]
-license = {text = "MIT"}
+license = "MIT"
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows :: Windows 10",
@@ -45,6 +44,9 @@ Repository = "https://github.com/Jahanzeb-git/codepilot"
 
 [tool.setuptools]
 include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["codepilot*"]
 
 [tool.setuptools.package-data]
 "*" = ["*.j2", "*.md"]
