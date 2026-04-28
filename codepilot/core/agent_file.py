@@ -56,13 +56,6 @@ class RuntimeConfig(BaseModel):
     work_dir: str = Field(default=".", description="Absolute or relative path to the workspace root")
     unsafe_mode: bool = Field(default=False, description="Allow file writes outside work_dir")
     max_steps: int = Field(default=20, gt=0)
-    allowed_imports: List[str] = Field(
-        default_factory=lambda: [
-            "re", "json", "math", "datetime", "random",
-            "itertools", "collections", "typing", "pathlib",
-        ],
-        description="Python stdlib modules the control block is permitted to import",
-    )
 
 
 class MemoryConfigModel(BaseModel):

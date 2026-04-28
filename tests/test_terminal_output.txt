@@ -1,0 +1,273 @@
+jahanzeb-ahmed@thinkpad-e14-gen-4:~$
+ python3 test_terminal.py
+[terminal:main:cmd1] $ python3 -c 'name=input("What is your name? "); print(f"Hello, {name}")'
+What is your name?
+[status: running | pid: 25128 | cwd: /home/jahanzeb-ahmed/codepilot]
+
+
+[terminal:main:cmd1] (after input: "Jahanzeb Ahmed\n")
+What is your name? Jahanzeb Ahmed
+Hello, Jahanzeb Ahmed
+[status: completed | return_code: 0 | pid: 25128 | cwd: /home/jahanzeb-ahmed/codepilot]
+
+
+[terminal:main:cmd1] (complete output)
+What is your name? Jahanzeb Ahmed
+Hello, Jahanzeb Ahmed
+[status: completed | return_code: 0 | pid: 25128 | cwd: /home/jahanzeb-ahmed/codepilot]
+
+
+[terminal:main:cmd2] $ cd ~ && cat example.rs
+fn process(x: i32) -> i32 {
+    x * 2
+}
+
+fn main() {
+    let data: Vec<i32> = (0..10_000_000).collect();
+
+    let result: Vec<i32> = data.iter()
+        .map(|&x| process(x))
+        .collect();
+
+    println!("{:?}", &result[0..10]);
+}
+[status: completed | return_code: 0 | pid: 25128 | cwd: /home/jahanzeb-ahmed]
+
+
+[terminal:main:cmd2] (complete output)
+fn process(x: i32) -> i32 {
+    x * 2
+}
+
+fn main() {
+    let data: Vec<i32> = (0..10_000_000).collect();
+
+    let result: Vec<i32> = data.iter()
+        .map(|&x| process(x))
+        .collect();
+
+    println!("{:?}", &result[0..10]);
+}
+[status: completed | return_code: 0 | pid: 25128 | cwd: /home/jahanzeb-ahmed]
+
+
+[terminal:main:cmd3] $ sudo apt update
+[sudo] password for jahanzeb-ahmed:
+[status: running | pid: 25128 | cwd: /home/jahanzeb-ahmed]
+
+
+[terminal:main:cmd3] (after input: "ubuntu@2002\n")
+[sudo] password for jahanzeb-ahmed:
+Hit:1 https://packages.microsoft.com/repos/code stable InRelease
+Hit:2 http://archive.ubuntu.com/ubuntu focal InRelease
+Hit:3 http://security.ubuntu.com/ubuntu noble-security InRelease
+Get:4 https://download.docker.com/linux/ubuntu noble InRelease [48.5 kB]
+Hit:5 http://archive.ubuntu.com/ubuntu focal-updates InRelease
+Hit:6 https://dl.google.com/linux/chrome/deb stable InRelease
+Hit:7 http://archive.ubuntu.com/ubuntu noble InRelease
+Hit:8 http://archive.ubuntu.com/ubuntu noble-updates InRelease
+Hit:9 https://dl.google.com/linux/chrome-stable/deb stable InRelease
+Get:10 https://download.docker.com/linux/ubuntu noble/stable amd64 Packages [51.6 kB]
+Hit:11 http://archive.ubuntu.com/ubuntu noble-backports InRelease
+Hit:12 http://lenovo.archive.canonical.com focal InRelease
+Get:13 https://esm.ubuntu.com/apps/ubuntu noble-apps-security InRelease [8,371 B]
+Get:14 https://esm.ubuntu.com/apps/ubuntu noble-apps-updates InRelease [8,220 B]
+Get:15 https://esm.ubuntu.com/infra/ubuntu noble-infra-security InRelease [8,235 B]
+Get:16 https://esm.ubuntu.com/infra/ubuntu noble-infra-updates InRelease [8,213 B]
+Hit:17 https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev antigravity-debian InRelease
+Fetched 133 kB in 7s (19.1 kB/s)
+Reading package lists... Done
+Building dependency tree... Done
+Reading state information... Done
+7 packages can be upgraded. Run 'apt list --upgradable' to see them.
+[status: completed | return_code: 0 | pid: 25128 | cwd: /home/jahanzeb-ahmed]
+
+
+[terminal:main:cmd4] $ cd ~/omniroot-agent && docker compose up
+WARN[0000] /home/jahanzeb-ahmed/omniroot-agent/docker-compose.yml: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion
+Attaching to omniroot-agent
+omniroot-agent  | === Starting OmniRoot Agent ===
+omniroot-agent  | → Environment setup:
+omniroot-agent  |   USER: omniroot
+omniroot-agent  |   HOME: /home/omniroot
+omniroot-agent  |   WORKSPACE_DIR: /app/workspace
+omniroot-agent  | → Starting Flask backend...
+omniroot-agent  |   ✓ Flask backend started on http://0.0.0.0:5001 (PID: 9)
+omniroot-agent  | → Starting Frontend static server...
+omniroot-agent  |   ✓ Frontend static server started on http://0.0.0.0:5173 (PID: 10)
+omniroot-agent  | → Starting code-server...
+omniroot-agent  |   ✓ Code-server started on http://0.0.0.0:8080 (PID: 11)
+⠙[2026-04-28T16:53:57.597Z] info  code-server 4.100.3 409c64e0df4d53530e59c16acc2b5d5766f717b0
+omniroot-agent  | [2026-04-28T16:53:57.598Z] info  Using user-data-dir /home/omniroot/.local/share/code-server
+omniroot-agent  | [2026-04-28T16:53:57.608Z] info  Using config file /home/omniroot/.config/code-server/config.yaml
+omniroot-agent  | [2026-04-28T16:53:57.608Z] info  HTTP server listening on http://0.0.0.0:8080/
+omniroot-agent  | [2026-04-28T16:53:57.608Z] info    - Authentication is disabled
+omniroot-agent  | [2026-04-28T16:53:57.608Z] info    - Not serving HTTPS
+omniroot-agent  | [2026-04-28T16:53:57.608Z] info  Session server listening on /home/omniroot/.local/share/code-server/code-server-ipc.sock
+ ERROR  Cannot copy server address to clipboard: Couldn't find the `xsel` binary and fallback didn't work. On Debian/Ubuntu you can install xsel with: sudo apt install xsel.
+omniroot-agent  |
+omniroot-agent  |    ┌────────────────────────────────────────┐
+omniroot-agent  |    │                                        │
+omniroot-agent  |    │   Serving!                             │
+omniroot-agent  |    │                                        │
+omniroot-agent  |    │   - Local:    http://localhost:5173    │
+omniroot-agent  |    │   - Network:  http://172.18.0.2:5173   │
+omniroot-agent  |    │                                        │
+omniroot-agent  |    └────────────────────────────────────────┘
+omniroot-agent  |
+omniroot-agent  | 2026-04-28 16:53:58,872 - INFO - Initialized SQLite database with sessions, workflows, steps, memory, and settings tables
+omniroot-agent  | 2026-04-28 16:53:58,978 - INFO - File watcher observer started
+omniroot-agent  | 2026-04-28 16:53:58,986 - INFO - Created PromptTemplate for ReAct agent with dynamic OS and kernel version
+omniroot-agent  | 2026-04-28 16:53:58,987 - INFO - Created PromptTemplate for ConversationSummaryMemory
+omniroot-agent  | 2026-04-28 16:53:58,987 - INFO - Created tools: ReadFile, WriteFile, ShellTool, EmailTool
+omniroot-agent  | 2026-04-28 16:53:58,989 - INFO - Workspace directory is ready at: /app/workspace
+omniroot-agent  | 2026-04-28 16:53:58,989 - INFO - Updated settings with OS: Linux, Kernel: 6.17.0-22-generic
+omniroot-agent  | 2026-04-28 16:53:58,989 - INFO - Attempting to start code-server with workspace_path: /app/workspace
+omniroot-agent  | code-server started on http://0.0.0.0:8080 in /app/workspace
+omniroot-agent  | 2026-04-28 16:53:58,989 - INFO - code server successfully started.
+omniroot-agent  |  * Serving Flask app 'app'
+omniroot-agent  |  * Debug mode: off
+omniroot-agent  | 2026-04-28 16:53:58,991 - INFO - WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+omniroot-agent  |  * Running on all addresses (0.0.0.0)
+omniroot-agent  |  * Running on http://127.0.0.1:5001
+omniroot-agent  |  * Running on http://172.18.0.2:5001
+omniroot-agent  | 2026-04-28 16:53:58,991 - INFO - Press CTRL+C to quit
+omniroot-agent  | ✓ All services are running properly
+omniroot-agent  | === OmniRoot Agent Started Successfully ===
+omniroot-agent  | Services:
+omniroot-agent  |   • Flask Backend: http://localhost:5001
+omniroot-agent  |   • Frontend: http://localhost:5173
+omniroot-agent  |   • Code-server: http://localhost:8080
+omniroot-agent  |   • User: omniroot
+omniroot-agent  |   • Working Directory: /app/workspace
+omniroot-agent  | ================================
+
+
+w Enable Watch   d Detach
+[status: running | pid: 25128 | cwd: /home/jahanzeb-ahmed/omniroot-agent]
+
+
+[terminal:main:cmd4] (after input: "")
+WARN[0000] /home/jahanzeb-ahmed/omniroot-agent/docker-compose.yml: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion
+Attaching to omniroot-agent
+omniroot-agent  | === Starting OmniRoot Agent ===
+omniroot-agent  | → Environment setup:
+omniroot-agent  |   USER: omniroot
+omniroot-agent  |   HOME: /home/omniroot
+omniroot-agent  |   WORKSPACE_DIR: /app/workspace
+omniroot-agent  | → Starting Flask backend...
+omniroot-agent  |   ✓ Flask backend started on http://0.0.0.0:5001 (PID: 9)
+omniroot-agent  | → Starting Frontend static server...
+omniroot-agent  |   ✓ Frontend static server started on http://0.0.0.0:5173 (PID: 10)
+omniroot-agent  | → Starting code-server...
+omniroot-agent  |   ✓ Code-server started on http://0.0.0.0:8080 (PID: 11)
+⠙[2026-04-28T16:53:57.597Z] info  code-server 4.100.3 409c64e0df4d53530e59c16acc2b5d5766f717b0
+omniroot-agent  | [2026-04-28T16:53:57.598Z] info  Using user-data-dir /home/omniroot/.local/share/code-server
+omniroot-agent  | [2026-04-28T16:53:57.608Z] info  Using config file /home/omniroot/.config/code-server/config.yaml
+omniroot-agent  | [2026-04-28T16:53:57.608Z] info  HTTP server listening on http://0.0.0.0:8080/
+omniroot-agent  | [2026-04-28T16:53:57.608Z] info    - Authentication is disabled
+omniroot-agent  | [2026-04-28T16:53:57.608Z] info    - Not serving HTTPS
+omniroot-agent  | [2026-04-28T16:53:57.608Z] info  Session server listening on /home/omniroot/.local/share/code-server/code-server-ipc.sock
+ ERROR  Cannot copy server address to clipboard: Couldn't find the `xsel` binary and fallback didn't work. On Debian/Ubuntu you can install xsel with: sudo apt install xsel.
+omniroot-agent  |
+omniroot-agent  |    ┌────────────────────────────────────────┐
+omniroot-agent  |    │                                        │
+omniroot-agent  |    │   Serving!                             │
+omniroot-agent  |    │                                        │
+omniroot-agent  |    │   - Local:    http://localhost:5173    │
+omniroot-agent  |    │   - Network:  http://172.18.0.2:5173   │
+omniroot-agent  |    │                                        │
+omniroot-agent  |    └────────────────────────────────────────┘
+omniroot-agent  |
+omniroot-agent  | 2026-04-28 16:53:58,872 - INFO - Initialized SQLite database with sessions, workflows, steps, memory, and settings tables
+omniroot-agent  | 2026-04-28 16:53:58,978 - INFO - File watcher observer started
+omniroot-agent  | 2026-04-28 16:53:58,986 - INFO - Created PromptTemplate for ReAct agent with dynamic OS and kernel version
+omniroot-agent  | 2026-04-28 16:53:58,987 - INFO - Created PromptTemplate for ConversationSummaryMemory
+omniroot-agent  | 2026-04-28 16:53:58,987 - INFO - Created tools: ReadFile, WriteFile, ShellTool, EmailTool
+omniroot-agent  | 2026-04-28 16:53:58,989 - INFO - Workspace directory is ready at: /app/workspace
+omniroot-agent  | 2026-04-28 16:53:58,989 - INFO - Updated settings with OS: Linux, Kernel: 6.17.0-22-generic
+omniroot-agent  | 2026-04-28 16:53:58,989 - INFO - Attempting to start code-server with workspace_path: /app/workspace
+omniroot-agent  | code-server started on http://0.0.0.0:8080 in /app/workspace
+omniroot-agent  | 2026-04-28 16:53:58,989 - INFO - code server successfully started.
+omniroot-agent  |  * Serving Flask app 'app'
+omniroot-agent  |  * Debug mode: off
+omniroot-agent  | 2026-04-28 16:53:58,991 - INFO - WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+omniroot-agent  |  * Running on all addresses (0.0.0.0)
+omniroot-agent  |  * Running on http://127.0.0.1:5001
+omniroot-agent  |  * Running on http://172.18.0.2:5001
+omniroot-agent  | 2026-04-28 16:53:58,991 - INFO - Press CTRL+C to quit
+omniroot-agent  | ✓ All services are running properly
+omniroot-agent  | === OmniRoot Agent Started Successfully ===
+omniroot-agent  | Services:
+omniroot-agent  |   • Flask Backend: http://localhost:5001
+omniroot-agent  |   • Frontend: http://localhost:5173
+omniroot-agent  |   • Code-server: http://localhost:8080
+omniroot-agent  |   • User: omniroot
+omniroot-agent  |   • Working Directory: /app/workspace
+omniroot-agent  | ================================
+Gracefully Stopping... press Ctrl+C again to force
+Container omniroot-agent Stopping
+Container omniroot-agent Stopped
+omniroot-agent exited with code 137
+[status: completed | return_code: 0 | pid: 25128 | cwd: /home/jahanzeb-ahmed/omniroot-agent]
+
+
+[terminal:main:cmd5] $ ls /nonexistent/path
+ls: cannot access '/nonexistent/path': No such file or directory
+[status: completed | return_code: 2 | pid: 25128 | cwd: /home/jahanzeb-ahmed/omniroot-agent]
+
+
+[terminal:main:cmd6] $ nonexist_command
+bash: nonexist_command: command not found
+[status: completed | return_code: 127 | pid: 25128 | cwd: /home/jahanzeb-ahmed/omniroot-agent]
+
+
+[terminal:main:cmd7] $ python3 -c 'import sys; sys.exit(42)'
+[status: completed | return_code: 42 | pid: 25128 | cwd: /home/jahanzeb-ahmed/omniroot-agent]
+
+
+[terminal:main:cmd8] $ python3
+Python 3.12.3 (main, Mar 23 2026, 19:04:32) [GCC 13.3.0] on linux
+Type "help", "copyright", "credits" or "license" for more information.
+>>>
+[status: running | pid: 25128 | cwd: /home/jahanzeb-ahmed/omniroot-agent]
+
+
+[terminal:main:cmd8] (after input: "x = 42\n")
+Python 3.12.3 (main, Mar 23 2026, 19:04:32) [GCC 13.3.0] on linux
+Type "help", "copyright", "credits" or "license" for more information.
+>>> x = 42
+>>>
+[status: running | pid: 25128 | cwd: /home/jahanzeb-ahmed/omniroot-agent]
+
+
+[terminal:main:cmd8] (after input: "print(x * 2)\n")
+Python 3.12.3 (main, Mar 23 2026, 19:04:32) [GCC 13.3.0] on linux
+Type "help", "copyright", "credits" or "license" for more information.
+>>> x = 42
+>>> print(x * 2)
+84
+>>>
+[status: running | pid: 25128 | cwd: /home/jahanzeb-ahmed/omniroot-agent]
+
+
+[terminal:main:cmd8] (after input: "")
+Python 3.12.3 (main, Mar 23 2026, 19:04:32) [GCC 13.3.0] on linux
+Type "help", "copyright", "credits" or "license" for more information.
+>>> x = 42
+>>> print(x * 2)
+84
+>>>
+[status: completed | return_code: 0 | pid: 25128 | cwd: /home/jahanzeb-ahmed/omniroot-agent]
+
+
+[terminal:session_b:cmd1] $ export MYVAR='hello world' && echo $MYVAR
+hello world
+[status: completed | return_code: 0 | pid: 26322 | cwd: /home/jahanzeb-ahmed/codepilot]
+
+
+[terminal:main:cmd9] $ echo $MYVAR
+[status: completed | return_code: 0 | pid: 25128 | cwd: /home/jahanzeb-ahmed/omniroot-agent]
+
+
+jahanzeb-ahmed@thinkpad-e14-gen-4:~$

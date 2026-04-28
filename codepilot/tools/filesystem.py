@@ -19,6 +19,7 @@ Licensed under the MIT License.
 """
 
 import os
+from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
 from ..core.block_parser import CodeBlock
@@ -42,15 +43,15 @@ class FilesystemTools:
         return input(f"\n[Permission] {description}\nApprove? [y/N]: ").strip().lower() in ("y", "yes")
 
     def _safe_path(self, path: str) -> str:
-        work_dir = os.path.abspath(self.runtime.config.runtime.work_dir)
-        abs_path = os.path.abspath(os.path.join(work_dir, path))
+        work_dir = Path(self.runtime.config.runtime.work_dir).resolve()
+        abs_path = (work_dir / path).resolve()
         if not self.runtime.config.runtime.unsafe_mode:
-            if not abs_path.startswith(work_dir + os.sep) and abs_path != work_dir:
+            if not abs_path.is_relative_to(work_dir):
                 raise PermissionError(
                     f"'{path}' is outside workspace '{work_dir}'. "
                     "Enable unsafe_mode in AgentFile to allow this."
                 )
-        return abs_path
+        return str(abs_path)
 
     def write_file(
         self,
@@ -184,15 +185,14 @@ class FilesystemTools:
         try:
             new_content = payloads[0].content if payloads else ""
             abs_path    = self._safe_path(path)
-            parent      = os.path.dirname(abs_path)
-            if parent:
-                os.makedirs(parent, exist_ok=True)
+            parent      = Path(abs_path).parent
+            parent.mkdir(parents=True, exist_ok=True)
 
             # -------------------------------------------------------------- #
             #  mode='multi_edit'                                               #
             # -------------------------------------------------------------- #
             if mode == "multi_edit":
-                if not os.path.isfile(abs_path):
+                if not Path(abs_path).is_file():
                     raise FileNotFoundError(f"Cannot edit '{path}': file does not exist.")
 
                 with open(abs_path, "r", encoding="utf-8") as f:
@@ -256,6 +256,13 @@ class FilesystemTools:
             #  mode='a'                                                        #
             # -------------------------------------------------------------- #
             elif mode == "a":
+                if new_content:
+                    if Path(abs_path).is_file() and Path(abs_path).stat().st_size > 0:
+                        with open(abs_path, "rb") as f:
+                            f.seek(-1, os.SEEK_END)
+                            if f.read(1) != b"\n":
+                                new_content = "\n" + new_content
+
                 with open(abs_path, "a", encoding="utf-8") as f:
                     f.write(new_content)
                 appended_lines = new_content.count("\n") + (
@@ -275,7 +282,7 @@ class FilesystemTools:
             elif mode == "edit":
                 if start_line is None or end_line is None:
                     raise ValueError("mode='edit' requires both start_line and end_line.")
-                if not os.path.isfile(abs_path):
+                if not Path(abs_path).is_file():
                     raise FileNotFoundError(f"Cannot edit '{path}': file does not exist.")
 
                 with open(abs_path, "r", encoding="utf-8") as f:
@@ -307,7 +314,7 @@ class FilesystemTools:
             elif mode == "insert":
                 if after_line is None:
                     raise ValueError("mode='insert' requires the after_line parameter.")
-                if not os.path.isfile(abs_path):
+                if not Path(abs_path).is_file():
                     raise FileNotFoundError(f"Cannot insert into '{path}': file does not exist.")
 
                 with open(abs_path, "r", encoding="utf-8") as f:
@@ -363,7 +370,7 @@ class FilesystemTools:
             args={"path": path, "start_line": start_line, "end_line": end_line, "ui_status": ui_status},
         )
         abs_path = self._safe_path(path)
-        if not os.path.isfile(abs_path):
+        if not Path(abs_path).is_file():
             raise FileNotFoundError(f"read_file: '{path}' not found.")
 
         with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
@@ -372,11 +379,23 @@ class FilesystemTools:
         total = len(all_lines)
         s     = max(0, start_line - 1)
         e     = end_line if end_line is not None else total
+        e     = min(e, total)
 
         numbered = [f"{i + s + 1:5} | {line.rstrip()}" for i, line in enumerate(all_lines[s:e])]
-        result   = (
-            f"[read_file] '{path}' (lines {s + 1}–{min(e, total)} of {total})\n"
-            + "\n".join(numbered)
+        content  = "\n".join(numbered)
+
+        # Footer logic: help the LLM understand if it reached the end or needs to read more.
+        footer = ""
+        if e >= total:
+            footer = "\n[END OF FILE]"
+        else:
+            remaining = total - e
+            footer = f"\n[TRUNCATED: {remaining} lines remaining]"
+
+        result = (
+            f"[read_file] '{path}' (lines {s + 1}–{e} of {total})\n"
+            + content
+            + footer
         )
 
         self.runtime._append_execution(result)
@@ -386,4 +405,4 @@ class FilesystemTools:
         if hasattr(self.runtime, '_watcher'):
             self.runtime._watcher.register(abs_path)
 
-        return "\n".join(numbered)
+        return content + footer

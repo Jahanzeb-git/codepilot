@@ -78,9 +78,11 @@ class SemanticTools:
         return subprocess.run(cmd, **kwargs)
 
     def _install_grepai_if_missing(self) -> str:
-        """Install grepai via the official Linux shell script if not on PATH."""
+        """Install grepai using the appropriate method for the current OS."""
         if shutil.which("grepai"):
             return "grepai"
+
+        import platform as _plat
 
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="semantic_search",
@@ -88,12 +90,25 @@ class SemanticTools:
             label="Installing grepai...",
         )
 
+        system = _plat.system()
         try:
-            subprocess.run(
-                ["sh", "-c",
-                 "curl -sSL https://raw.githubusercontent.com/yoanbernabeu/grepai/main/install.sh | sh"],
-                check=True,
-            )
+            if system == "Windows":
+                subprocess.run(
+                    ["powershell", "-Command",
+                     "irm https://raw.githubusercontent.com/yoanbernabeu/grepai/main/install.ps1 | iex"],
+                    check=True,
+                )
+            elif system == "Darwin":
+                subprocess.run(
+                    ["sh", "-c", "brew install yoanbernabeu/tap/grepai"],
+                    check=True,
+                )
+            else:
+                subprocess.run(
+                    ["sh", "-c",
+                     "curl -sSL https://raw.githubusercontent.com/yoanbernabeu/grepai/main/install.sh | sh"],
+                    check=True,
+                )
         except Exception as e:
             self.runtime._append_execution(
                 f"[semantic_search] Failed to install grepai: {e}"
@@ -221,6 +236,7 @@ class SemanticTools:
 
         Use `top_k` to limit results (default 5).
         Skip this tool when you already know the exact file's content of focus.
+        This is the primary tool for context-efficient codebase navigation.
         """
         self._ensure_setup()
 

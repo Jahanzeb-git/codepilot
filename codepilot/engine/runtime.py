@@ -5,12 +5,17 @@ Created: 2026-04-16
 
 Description: 
 This module handles the core agentic execution runtime, including loop 
-state management, sandbox initialization, and LLM provider integration.
+state management, and LLM provider integration.
 
 Architectural Notes:
-- The runtime uses Python's `exec()` to build a stateless sandbox.
-- Security isolation relies on the host Docker container.
-- File system path guards are dynamically injected at runtime.
+- The runtime uses Python's `exec()` to give the agent full, unrestricted
+  Python as its control interface (code-as-interface pattern).
+- The LLM is the trust boundary. No runtime-level import restrictions or
+  filesystem monkey-patching are applied.
+- Sandboxing is an external deployment concern: run the process inside
+  bwrap (bare-metal) or a Docker container (cloud/CI) as appropriate.
+- File write/read tools enforce work_dir boundaries unless unsafe_mode
+  is enabled in the AgentFile.
 
 Copyright (c) 2026 Jahanzeb Ahmed.
 Licensed under the MIT License.
@@ -27,7 +32,6 @@ from typing import Dict, List, Optional, Any, Union
 from ..core.prompt import SystemPromptParts
 
 from ..core.agent_file import AgentConfig
-from ..core.ast_validator import ASTValidator, SecurityViolation
 from ..core.block_parser import BlockParser, CodeBlock
 from ..core.context import ContextManager
 from ..core.memory import (
@@ -44,7 +48,7 @@ from ..tools.filesystem import FilesystemTools
 from ..tools.interaction import InteractionTools
 from ..tools.registry import ToolRegistry
 from ..tools.search import SearchTools
-from ..tools.shell import ShellManager
+from ..tools.terminal import TerminalManager
 from ..tools.semantic import SemanticTools
 
 
@@ -128,7 +132,7 @@ class AsyncRuntime:
         self.prompt_manager  = PromptManager()
 
         self._fs_tools          = FilesystemTools(self)
-        self._shell_manager     = ShellManager(self)
+        self._terminal_manager  = TerminalManager(self)
         self._interaction_tools = InteractionTools(self)
         self._semantic_tools    = SemanticTools(self)
         self._search_tools      = SearchTools(self)
@@ -137,8 +141,8 @@ class AsyncRuntime:
         self.registry = ToolRegistry()
         self._register_enabled_tools()
 
-        # Start default shell session (POSIX only)
-        self._shell_manager.start_default_shell()
+        # Start default terminal session (cross-platform)
+        self._terminal_manager.start_default_terminal()
 
         # ------------------------------------------------------------------ #
         #  Workspace file change detection                                     #
@@ -210,52 +214,11 @@ class AsyncRuntime:
         self._cache_timer: Optional[threading.Timer] = None
         self._last_system_prompt: Optional[SystemPromptParts] = None
 
-        self._install_path_guards()
+
 
     # ====================================================================== #
     #  Public API                                                             #
     # ====================================================================== #
-
-    def _install_path_guards(self):
-        import shutil
-        if getattr(shutil, "_cp_guards_installed", False):
-            return
-            
-        work_dir = os.path.abspath(self.config.runtime.work_dir)
-        orig_rmtree = shutil.rmtree
-        orig_remove = os.remove
-        orig_unlink = os.unlink
-        orig_rmdir = os.rmdir
-
-        def check_path(path):
-            abs_path = os.path.abspath(path)
-            if not abs_path.startswith(work_dir) and abs_path != work_dir:
-                raise PermissionError(
-                    f"Access denied: '{path}' is outside workspace '{work_dir}'. "
-                    "Host mounted directories cannot be modified."
-                )
-
-        def g_rmtree(path, *args, **kwargs):
-            check_path(path)
-            return orig_rmtree(path, *args, **kwargs)
-
-        def g_remove(path, *args, **kwargs):
-            check_path(path)
-            return orig_remove(path, *args, **kwargs)
-            
-        def g_unlink(path, *args, **kwargs):
-            check_path(path)
-            return orig_unlink(path, *args, **kwargs)
-
-        def g_rmdir(path, *args, **kwargs):
-            check_path(path)
-            return orig_rmdir(path, *args, **kwargs)
-
-        shutil.rmtree = g_rmtree
-        os.remove = g_remove
-        os.unlink = g_unlink
-        os.rmdir = g_rmdir
-        shutil._cp_guards_installed = True
 
     async def run(self, task: str) -> Optional[str]:
         """
@@ -267,7 +230,7 @@ class AsyncRuntime:
         """
         self._done  = False
         self._abort = False
-        self._shell_manager.ensure_default_shell()
+        self._terminal_manager.ensure_default_terminal()
 
         # Safety-net: global summarization if context is dangerously high
         self.messages = await self._memory.process(self.messages)
@@ -366,10 +329,15 @@ class AsyncRuntime:
                 execution_result = "[Control block executed with no output.]"
             self._append_execution_result(execution_result)
 
-            # 7. Completion block → task is done, loop terminates
+            # 7. Completion block → task is done, loop terminates.
+            #    Emit completion text NOW (after tools ran) so the user's stream
+            #    reflects reality — "File written" appears after the file exists.
             if completion_block is not None:
+                compl_text = completion_block.content.strip()
+                if compl_text:
+                    self.hooks.emit(EventType.STREAM, text=compl_text)
                 self._done         = True
-                self._done_summary = completion_block.content.strip()
+                self._done_summary = compl_text
                 self.hooks.emit(EventType.FINISH, summary=self._done_summary)
                 break
 
@@ -400,8 +368,8 @@ class AsyncRuntime:
         self._cancel_cache_timer()
         self.messages = []
         self.session.reset()
-        self._shell_manager.cleanup_all()
-        self._shell_manager.start_default_shell()
+        self._terminal_manager.cleanup_all()
+        self._terminal_manager.start_default_terminal()
         self.hooks.emit(EventType.SESSION_RESET)
 
     def send_message(self, message: str):
@@ -474,19 +442,18 @@ class AsyncRuntime:
             {tc.name for tc in self.config.tools if tc.enabled}
             if self.config.tools
             else {"write_file", "read_file", "execute", "read_output",
-                  "send_input", "send_signal", "kill_shell",
+                  "send_input", "terminate_terminal",
                   "ask_user", "semantic_search", "find"}
         )
-        if "write_file"      in enabled: self.registry.register("write_file",      self._fs_tools.write_file)
-        if "read_file"       in enabled: self.registry.register("read_file",       self._fs_tools.read_file)
-        if "execute"         in enabled: self.registry.register("execute",         self._shell_manager.execute)
-        if "read_output"     in enabled: self.registry.register("read_output",     self._shell_manager.read_output)
-        if "send_input"      in enabled: self.registry.register("send_input",      self._shell_manager.send_input)
-        if "send_signal"     in enabled: self.registry.register("send_signal",     self._shell_manager.send_signal)
-        if "kill_shell"      in enabled: self.registry.register("kill_shell",      self._shell_manager.kill_shell)
-        if "ask_user"        in enabled: self.registry.register("ask_user",        self._interaction_tools.ask_user)
-        if "semantic_search" in enabled: self.registry.register("semantic_search", self._semantic_tools.semantic_search)
-        if "find"            in enabled: self.registry.register("find",            self._search_tools.find)
+        if "write_file"          in enabled: self.registry.register("write_file",          self._fs_tools.write_file)
+        if "read_file"           in enabled: self.registry.register("read_file",           self._fs_tools.read_file)
+        if "execute"             in enabled: self.registry.register("execute",             self._terminal_manager.execute)
+        if "read_output"         in enabled: self.registry.register("read_output",         self._terminal_manager.read_output)
+        if "send_input"          in enabled: self.registry.register("send_input",          self._terminal_manager.send_input)
+        if "terminate_terminal"  in enabled: self.registry.register("terminate_terminal",  self._terminal_manager.terminate_terminal)
+        if "ask_user"            in enabled: self.registry.register("ask_user",            self._interaction_tools.ask_user)
+        if "semantic_search"     in enabled: self.registry.register("semantic_search",     self._semantic_tools.semantic_search)
+        if "find"                in enabled: self.registry.register("find",                self._search_tools.find)
 
         # Context management tools (always enabled)
         self.registry.register("archive_context",       self._context_tools.archive_context)
@@ -501,7 +468,7 @@ class AsyncRuntime:
             tool_definitions=self.registry.get_definitions(),
             work_dir=self.config.runtime.work_dir,
             codebase_snapshot=self.context_manager.get_formatted_snapshot(),
-            shell_info=self._shell_manager.get_prompt_info(),
+            shell_info=self._terminal_manager.get_prompt_info(),
             step_info=self._build_step_info(step, max_steps),
             context_stress=self._memory.build_context_stress(self.messages),
         )
@@ -622,11 +589,14 @@ class AsyncRuntime:
         self, system_prompt: Union[str, SystemPromptParts], messages: List[Dict] = None
     ) -> str:
         """
-        Stream the LLM response token by token — 3-state machine:
+        Stream the LLM response token by token — 2-state machine:
 
-          'streaming'  — before the codepilot fence: emit to user in real time.
-          'buffering'  — after codepilot fence, before completion fence: buffer silently.
-          'completing' — inside the completion fence: emit to user in real time.
+          'streaming' — before the codepilot fence: emit to user in real time.
+          'buffering' — after codepilot fence detected: buffer silently.
+
+        The completion block is intentionally NOT streamed here. It is emitted
+        by run() via on_stream() only AFTER _execute() completes, ensuring the
+        user sees the agent's summary only after tools have physically run.
 
         A 13-character hold-back prevents premature emission when fence markers
         are split across streaming chunks.
@@ -634,11 +604,9 @@ class AsyncRuntime:
         Returns the complete response text for normal pipeline processing.
         """
         msgs = messages if messages is not None else self.messages
-        chunks:              list = []
-        pre_fence_emitted:   int  = 0
-        compl_emitted:       int  = 0  # absolute offset of last emitted completion char
-        compl_content_start: int  = 0  # absolute offset where completion block content begins
-        state:               str  = "streaming"
+        chunks:            list = []
+        pre_fence_emitted: int  = 0
+        state:             str  = "streaming"
 
         async for chunk in self.provider.chat_stream(
             messages=msgs,
@@ -660,33 +628,17 @@ class AsyncRuntime:
                                         text=accumulated[pre_fence_emitted:safe_end])
                         pre_fence_emitted = safe_end
                 else:
-                    # Control fence found — flush remaining pre-fence text.
+                    # Control fence found — flush remaining pre-fence text and go silent.
                     if fence_pos > pre_fence_emitted:
                         self.hooks.emit(EventType.STREAM,
                                         text=accumulated[pre_fence_emitted:fence_pos])
                     state = "buffering"
 
-            # Use `if` (not elif) so a transition in the same chunk is handled immediately.
-            if state == "buffering":
-                comp_pos = accumulated.find(self._COMPLETION_FENCE)
-                if comp_pos != -1:
-                    newline_pos = accumulated.find("\n", comp_pos)
-                    if newline_pos != -1:
-                        compl_content_start = newline_pos + 1
-                        compl_emitted       = compl_content_start
-                        state = "completing"
-
-            if state == "completing":
-                # Emit completion content with holdback (avoids emitting
-                # the closing ``` which appears at the very end).
-                safe_end = len(accumulated) - self._HOLDBACK
-                if safe_end > compl_emitted:
-                    self.hooks.emit(EventType.STREAM,
-                                    text=accumulated[compl_emitted:safe_end])
-                    compl_emitted = safe_end
+            # 'buffering' state: accumulate silently until generation finishes.
+            # Completion block content will be emitted by run() after _execute().
 
         # ------------------------------------------------------------------ #
-        # Final flush — emit any content held back by the sliding window.    #
+        # Final flush — only needed for pure conversational responses.       #
         # ------------------------------------------------------------------ #
         accumulated = "".join(chunks)
 
@@ -696,20 +648,15 @@ class AsyncRuntime:
             if remaining:
                 self.hooks.emit(EventType.STREAM, text=remaining)
 
-        elif state == "completing":
-            # Use BlockParser to get the clean, trimmed completion block content
-            # and emit whatever the holdback window was still sitting on.
-            _, _, completion_block = BlockParser.split(accumulated)
-            if completion_block:
-                already_emitted = compl_emitted - compl_content_start
-                remaining = completion_block.content[already_emitted:]
-                if remaining:
-                    self.hooks.emit(EventType.STREAM, text=remaining)
-
         return accumulated
 
     def _emit_prefence_text(self, response_text: str):
-        """Emit pre-fence text and completion block content as STREAM events (non-streaming mode)."""
+        """Emit pre-fence text as STREAM events (non-streaming mode).
+
+        Completion block content is intentionally NOT emitted here — it is
+        emitted by run() after _execute() completes so the user sees the
+        agent's summary only once tools have physically run.
+        """
         fence_pos = response_text.find(self._CONTROL_FENCE)
         if fence_pos > 0:
             pre_text = response_text[:fence_pos].strip()
@@ -718,12 +665,6 @@ class AsyncRuntime:
         elif fence_pos == -1 and response_text.strip():
             # No control block at all — emit everything (display/chat)
             self.hooks.emit(EventType.STREAM, text=response_text.strip())
-            return  # No completion block possible without a control block
-
-        # Emit completion block content if present
-        _, _, completion_block = BlockParser.split(response_text)
-        if completion_block and completion_block.content.strip():
-            self.hooks.emit(EventType.STREAM, text=completion_block.content.strip())
 
     # ------------------------------------------------------------------ #
     #  Sandbox + execution                                                 #
@@ -741,19 +682,11 @@ class AsyncRuntime:
         return sandbox
 
     async def _execute(self, code: str):
-        """Async wrapper — runs the CPU-bound + pexpect-bound execution in a thread."""
+        """Async wrapper — runs the CPU-bound + PTY-bound execution in a thread."""
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, self._execute_sync, code)
 
     def _execute_sync(self, code: str):
-        validator = ASTValidator(self.config.runtime.allowed_imports)
-        try:
-            validator.validate(code)
-        except SecurityViolation as exc:
-            self.hooks.emit(EventType.SECURITY_ERROR, error=str(exc))
-            self._append_execution(f"SECURITY ERROR: {exc}")
-            return
-
         _print_lines: list = []
 
         def _captured_print(*args, sep=" ", end="\n", file=None, flush=False):

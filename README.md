@@ -23,9 +23,9 @@ Instead of forcing the model through brittle JSON schemas or generic function-ca
 
 **What CodePilot is not:** not a chatbot UI, not a generic "AI agent" wrapper, and not another hosted coding assistant. It is a library-first runtime for embedding autonomous software agents into your own application stack.
 
-**Version:** `0.8.8`
+**Version:** `0.8.9`
 
-> **Note:** Deployment on Linux works best and is recommended. Cross platform support is experimental and may not work as expected due to underlying dependencies depends on POSIX-compliance.
+> **Cross-Platform:** CodePilot runs on **Linux**, **macOS**, and **Windows 10 1809+** (ConPTY required). Linux and macOS use `pexpect` for PTY management; Windows uses `pywinpty`. All terminal tools — including TUI applications, interactive REPLs, and raw control sequences (`Ctrl+C`, `Ctrl+D`, arrow keys) — work identically across all three platforms.
 
 ---
 
@@ -1565,4 +1565,4 @@ create_session(
 
 ---
 
-*CodePilot-ai v0.8.8*
+*CodePilot-ai v0.8.9 — MIT License — [GitHub](https://github.com/Jahanzeb-git/codepilot) — [PyPI](https://pypi.org/project/codepilot-ai/) — Built by [Jahanzeb Ahmed](https://github.com/Jahanzeb-git)*

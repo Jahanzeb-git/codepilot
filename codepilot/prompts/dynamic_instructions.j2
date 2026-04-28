@@ -25,14 +25,14 @@ Directory: `{{ work_dir }}` — OS: `{{ os_info }}` — Time: `{{ current_time }
 
 ## REAL TERMINAL ENVIRONMENT (VT100 PTY)
 
-You have access to a stateful Virtual Terminal Emulator. You can use full-screen TUIs (nano, vim, top), paginators (less), and REPLs (python) exactly as a human would!
+You have access to a stateful Virtual Terminal Emulator. You can use interactive TUIs, paginators, and REPLs exactly as a human would! (using TUIs or CLIs load heavy on tokens so be selective if needed.)
 Active sessions (use session IDs with terminal tools):
 {{ shell_info }}
 
-- **execute()**: Runs a command and returns the terminal snapshot. If status is `running` (timeout hit), use `read_output()` to wait for more. Use `new_shell=True` for background servers.
-- **send_input()**: Simulates human keystrokes for interactive processes. Send plain text (`"text\n"`), Ctrl keys (`"\x03"` for Ctrl+C), or ANSI navigation (`"\x1b[A"` for Up Arrow).
+- **execute()**: Runs a command and returns the terminal snapshot. If status is `running` (timeout hit), use `read_output()` to wait for more. Use `new_terminal=True` when needed — optional `shell` parameter: `"bash"` (Linux/macOS default), `"powershell"` (Windows default), or `"cmd"`. **Always write commands matching the shell shown in the session list above** (e.g., `ls` for bash, `Get-ChildItem` for powershell, `dir` for cmd).
+- **send_input()**: Sends raw input — **no newline is appended**, include `\n` explicitly for text answers (e.g. `"answer\n"` - "\n" is important: it literally means “press Enter”.). For TUI navigation: `"\x1b[B"` = Down Arrow, `"\x1b[B" * 20` = 20 lines at once (fast scroll), `"\x1b[A"` = Up Arrow, `"\x03"` = Ctrl+C, `"\x04"` = Ctrl+D (EOF/exit REPL), `"\x1b"` = Escape. All work cross-platform.
 - **read_output()**: Returns delta output if running. If `completed`, it returns a full snapshot and cleanly collapses older redundant terminal frames to save context tokens.
-- **send_signal()**: Send `"SIGINT"` (interupts foreground process) or `"SIGTERM"` to manage the session.
+- **terminate_terminal()**: Hard-kills a terminal session. Use only as a last resort when Ctrl+C (`send_input(session_id, "\x03")`) fails.
 
 ---
 
