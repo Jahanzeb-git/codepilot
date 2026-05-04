@@ -41,6 +41,14 @@ class ToolRegistry:
         """Register a single callable under the given tool name."""
         self._tools[name] = func
 
+    def unregister(self, name: str):
+        """Remove a tool by name. No-op if the tool is not registered.
+
+        Used by the runtime to hide a tool from the LLM's system prompt
+        (e.g., when semantic_search is enabled but misconfigured).
+        """
+        self._tools.pop(name, None)
+
     def register_from_instance(self, instance, only: list = None):
         """
         Register all public, non-dunder methods on *instance* as tools.

@@ -226,7 +226,7 @@ class TerminalSession:
             rf'{re.escape(self._marker)}_RC_(\d+)'
         )
         self._cwd_pattern = re.compile(
-            rf'^{re.escape(self._marker)}_CWD_(.*)$', re.MULTILINE
+            rf'{re.escape(self._marker)}_CWD_([^\r\n]*)'
         )
 
         self._backend = _create_backend(work_dir, DEFAULT_COLS, DEFAULT_ROWS, shell=self.shell)
@@ -730,6 +730,12 @@ class TerminalManager:
 
         self._touch_session(session_id)
 
+        # Warn the LLM if plain text input is missing a trailing newline.
+        # Control sequences (Ctrl+C, arrows, Ctrl+D, Escape) intentionally
+        # omit \n so we only flag printable text that looks like a prompt answer.
+        _is_control = text.startswith(("\x03", "\x04", "\x1b")) or (len(text) <= 2 and not text[-1:].isalnum())
+        _missing_newline = not _is_control and not text.endswith("\n") and text.isprintable()
+
         try:
             delta, completed, rc = session.send_text(text, timeout)
         except Exception as e:
@@ -746,6 +752,14 @@ class TerminalManager:
             session.status, session.return_code, session.pid,
             label=f'(after input: "{text}")',
         )
+
+        if _missing_newline:
+            result += (
+                "\n\n\u26a0 WARNING: Your text input did not end with \\n. "
+                "Interactive prompts require an explicit \\n to submit "
+                "(e.g. 'my answer\\n'). Without it the process is still "
+                "waiting for Enter. Add \\n to your text and resend."
+            )
 
         # Track for deduplication
         key = (session_id, session.command_tag)

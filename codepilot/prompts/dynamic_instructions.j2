@@ -23,9 +23,11 @@ Directory: `{{ work_dir }}` — OS: `{{ os_info }}` — Time: `{{ current_time }
 **Agentic step info:**
 {{ step_info }}
 
-## REAL TERMINAL ENVIRONMENT (VT100 PTY)
+## STATEFUL VIRTUAL TERMINAL (VT100 PTY)
 
-You have access to a stateful Virtual Terminal Emulator. You can use interactive TUIs, paginators, and REPLs exactly as a human would! (using TUIs or CLIs load heavy on tokens so be selective if needed.)
+**EXECUTION PROTOCOL (ACI vs HCI):**
+1. **VISUAL/CONTINUOUS (TUIs/Pagers/Editors):** AVOID. Human-centric interfaces pollute context. Only use when genuinely needed.
+2. **INTERACTIVE PROMPTS (Installers/Auth):** MINIMIZE. You can use CLI's if needed but not overly.
 Active sessions (use session IDs with terminal tools):
 {{ shell_info }}
 

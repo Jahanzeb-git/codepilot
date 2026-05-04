@@ -56,7 +56,7 @@ fn main() {
 [status: running | pid: 25128 | cwd: /home/jahanzeb-ahmed]
 
 
-[terminal:main:cmd3] (after input: "ubuntu@2002\n")
+[terminal:main:cmd3] (after input: "mypassword\n")
 [sudo] password for jahanzeb-ahmed:
 Hit:1 https://packages.microsoft.com/repos/code stable InRelease
 Hit:2 http://archive.ubuntu.com/ubuntu focal InRelease

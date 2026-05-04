@@ -49,7 +49,7 @@ from ..tools.interaction import InteractionTools
 from ..tools.registry import ToolRegistry
 from ..tools.search import SearchTools
 from ..tools.terminal import TerminalManager
-from ..tools.semantic import SemanticTools
+from ..tools.semantic import SemanticTools, SemanticConfigError
 
 
 _ROLE_USER      = "user"
@@ -140,6 +140,7 @@ class AsyncRuntime:
 
         self.registry = ToolRegistry()
         self._register_enabled_tools()
+        self._validate_semantic_config()
 
         # Start default terminal session (cross-platform)
         self._terminal_manager.start_default_terminal()
@@ -438,12 +439,15 @@ class AsyncRuntime:
             self.hooks.emit(EventType.USER_MESSAGE_INJECTED, message=msg)
 
     def _register_enabled_tools(self):
+        # If the user supplies a tools: list in agent.yaml, honour it exactly.
+        # If no tools: block is present, fall back to a safe default set.
+        # NOTE: semantic_search is intentionally ABSENT from the default set.
+        # It is an opt-in tool that requires explicit configuration in agent.yaml.
         enabled = (
             {tc.name for tc in self.config.tools if tc.enabled}
             if self.config.tools
             else {"write_file", "read_file", "execute", "read_output",
-                  "send_input", "terminate_terminal",
-                  "ask_user", "semantic_search", "find"}
+                  "send_input", "terminate_terminal", "ask_user", "find"}
         )
         if "write_file"          in enabled: self.registry.register("write_file",          self._fs_tools.write_file)
         if "read_file"           in enabled: self.registry.register("read_file",           self._fs_tools.read_file)
@@ -454,6 +458,25 @@ class AsyncRuntime:
         if "ask_user"            in enabled: self.registry.register("ask_user",            self._interaction_tools.ask_user)
         if "semantic_search"     in enabled: self.registry.register("semantic_search",     self._semantic_tools.semantic_search)
         if "find"                in enabled: self.registry.register("find",                self._search_tools.find)
+
+    def _validate_semantic_config(self):
+        """Pre-flight check for semantic_search when it is explicitly enabled.
+
+        If the tool is registered but misconfigured (wrong provider, missing
+        API key, etc.), we:
+        1. Unregister it so the LLM never sees it in the system prompt.
+        2. Raise a RuntimeError so the user gets an immediate, clear message
+           at startup rather than a confusing mid-task failure.
+        """
+        if self.registry.get("semantic_search") is None:
+            # Tool not enabled — nothing to validate.
+            return
+        try:
+            self._semantic_tools.validate_config()
+        except SemanticConfigError as exc:
+            # Hide the tool from the LLM.
+            self.registry.unregister("semantic_search")
+            raise RuntimeError(str(exc)) from exc
 
         # Context management tools (always enabled)
         self.registry.register("archive_context",       self._context_tools.archive_context)
