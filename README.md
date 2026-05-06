@@ -23,7 +23,7 @@ Instead of forcing the model through brittle JSON schemas or generic function-ca
 
 **What CodePilot is not:** not a chatbot UI, not a generic "AI agent" wrapper, and not another hosted coding assistant. It is a library-first runtime for embedding autonomous software agents into your own application stack.
 
-**Version:** `0.9.0`
+**Version:** `0.9.1`
 
 > **Cross-Platform:** CodePilot runs on **Linux**, **macOS**, and **Windows 10 1809+** (ConPTY required). Linux and macOS use `pexpect` for PTY management; Windows uses `pywinpty`. All terminal tools — including TUI applications, interactive REPLs, and raw control sequences (`Ctrl+C`, `Ctrl+D`, arrow keys) — work identically across all three platforms.
 
@@ -48,6 +48,8 @@ export DASHSCOPE_API_KEY="..."
 
 Create an `agent.yaml`:
 
+Paths in `agent.yaml` are resolved relative to the YAML file itself, not the shell's current working directory. So `work_dir: "./workspace"` means "a `workspace/` directory next to this `agent.yaml` file."
+
 ```yaml
 agent:
   name: "CodePilot"
@@ -70,6 +72,14 @@ agent:
     - name: "execute"
       enabled: true
     - name: "read_output"
+      enabled: true
+    - name: "send_input"
+      enabled: true
+    - name: "terminate_terminal"
+      enabled: true
+    - name: "find"
+      enabled: true
+    - name: "ask_user"
       enabled: true
 ```
 
@@ -106,31 +116,32 @@ If you want the full config surface and runtime behavior details, keep reading.
 
 ## Table of Contents
 
-1. [How it works](#1-how-it-works)
-2. [AgentFile (YAML config)](#2-agentfile)
-3. [Basic usage](#3-basic-usage)
-4. [Streaming](#4-streaming)
-5. [Multi-turn execution](#5-multi-turn-execution)
-6. [Session persistence](#6-session-persistence)
-7. [Context memory management](#7-context-memory-management)
-8. [Resuming a session](#8-resuming-a-session)
-9. [Resetting a session](#9-resetting-a-session)
-10. [Hooks â€” full observability](#10-hooks)
-11. [Permission gating](#11-permission-gating)
-12. [Mid-task message injection](#12-mid-task-message-injection)
-13. [Multi-operation steps](#13-multi-operation-steps)
-14. [Shell tools](#14-shell-tools)
-15. [Completion block](#15-completion-block)
-16. [Workspace change detection](#16-workspace-change-detection)
-17. [Chat mode](#17-chat-mode)
-18. [Custom tools](#18-custom-tools)
-19. [Aborting the agent](#19-aborting-the-agent)
-20. [Building a CLI tool](#20-building-a-cli-tool)
-21. [Building a web server integration](#21-building-a-web-server-integration)
-22. [Full API surface](#22-full-api-surface)
+1. [How it works](#how-it-works)
+2. [AgentFile (YAML config)](#agentfile)
+3. [Basic usage](#basic-usage)
+4. [Streaming](#streaming)
+5. [Multi-turn execution](#multi-turn-execution)
+6. [Session persistence](#session-persistence)
+7. [Context memory management](#context-memory-management)
+8. [Resuming a session](#resuming-a-session)
+9. [Resetting a session](#resetting-a-session)
+10. [Hooks](#hooks)
+11. [Permission gating](#permission-gating)
+12. [Mid-task message injection](#mid-task-message-injection)
+13. [Multi-operation steps](#multi-operation-steps)
+14. [Shell tools](#shell-tools)
+15. [Completion block](#completion-block)
+16. [Workspace change detection](#workspace-change-detection)
+17. [Chat mode](#chat-mode)
+18. [Custom tools](#custom-tools)
+19. [Aborting the agent](#aborting-the-agent)
+20. [Building a CLI tool](#building-a-cli-tool)
+21. [Building a web server integration](#building-a-web-server-integration)
+22. [Full API surface](#full-api-surface)
 
 ---
 
+<a id="how-it-works"></a>
 ## 1. How It Works
 
 CodePilot uses a **code-as-interface** paradigm. Instead of the LLM describing actions in JSON, it writes Python code that the runtime executes directly.
@@ -149,7 +160,7 @@ Each agent step:
 
 **Payload Blocks** (` ```python `, ` ```js `, etc. after a codepilot block) file content consumed by `write_file()` in order. Never executed.
 
-**Completion Block** (` ```completion `) natural text that streams directly to the user in real time. Its presence marks the task complete andthe agentic loop terminates after this step. Can be combined with the codepilot block and payload blocks in a single agentic step.
+**Completion Block** (` ```completion `) natural text that streams directly to the user in real time. Its presence marks the task complete and the agentic loop terminates after this step. Can be combined with the codepilot block and payload blocks in a single agentic step.
 
 ### Response shapes
 
@@ -158,7 +169,7 @@ Each agent step:
 Alright, let me read the file first to get the line numbers.
 
 ```codepilot
-# Reading before editing â€” exact line numbers required.
+# Reading before editing - exact line numbers required.
 read_file("routes/profile.py", start_line=35, end_line=65)
 ```
 ````
@@ -172,7 +183,7 @@ Got it updating the timeout value.
 write_file("config.py", start_line=12, end_line=12, mode="edit")
 ```
 
-```python
+```python filename=config.py
 TIMEOUT = 30
 ```
 
@@ -199,9 +210,10 @@ The fallback is an empty dict, so callers always get a valid dict no None checks
 
 ---
 
+<a id="agentfile"></a>
 ## 2. AgentFile
 
-Every Runtime is driven by a YAML config. Paths are resolved relative to the YAML file's location not the caller's CWD.
+Every Runtime is driven by a YAML config. Paths are resolved relative to the YAML file's location, not the caller's CWD.
 
 ```yaml
 # agent.yaml
@@ -226,12 +238,6 @@ agent:
     work_dir: "./workspace"         # where the agent reads/writes files
     max_steps: 30                   # hard cap on agentic steps per run()
     unsafe_mode: false              # true = allow writes outside work_dir
-    allowed_imports:                # stdlib modules allowed in the control block
-      - "re"
-      - "json"
-      - "math"
-      - "datetime"
-      - "pathlib"
 
   tools:
     - name: "write_file"
@@ -254,10 +260,7 @@ agent:
     - name: "send_input"
       enabled: true
 
-    - name: "send_signal"
-      enabled: true
-
-    - name: "kill_shell"
+    - name: "terminate_terminal"
       enabled: true
 
     - name: "ask_user"
@@ -279,12 +282,12 @@ agent:
         # VoyageAI uses an OpenAI-compatible API - this is the default endpoint
         base_url: "https://api.voyageai.com/v1"
 
-        # Provider name passed to grepai internals (leave as "openai"
+        # Provider name passed to grepai internals (leave as "openai" -
         # it's the protocol name, not the vendor)
         provider: "openai"
 
         # Maximum results returned per search (default: 5)
-        top_k: 5
+        max_results: 5
 
         # Max seconds to wait for a grepai command (default: 60)
         timeout: 60
@@ -292,6 +295,8 @@ agent:
         # Truncate output to prevent context overflow (default: 8000 chars)
         max_output_chars: 8000
 ```
+
+If you provide a `tools:` list, CodePilot honours it exactly. If you omit the `tools:` block entirely, the runtime falls back to its default built-in tool set.
 
 **Supported providers:**
 
@@ -303,6 +308,7 @@ agent:
 
 ---
 
+<a id="basic-usage"></a>
 ## 3. Basic Usage
 
 **Sync Usage**
@@ -332,6 +338,7 @@ if __name__ == "__main__":
 
 ---
 
+<a id="streaming"></a>
 ## 4. Streaming
 
 Enable streaming to receive the agent's reasoning text token-by-token, in real time, *before* any code executes. This dramatically improves perceived responsiveness.
@@ -377,14 +384,15 @@ def show_reasoning(text: str, **_):
 
 ---
 
+<a id="multi-turn-execution"></a>
 ## 5. Multi-turn Execution
 
 Call `run()` multiple times on the same `Runtime` instance. Each call appends to the shared conversation history. The LLM sees every prior task, every file it wrote, and every command it ran.
 
 ```python
-from codepilot import AsyncRuntime
+from codepilot import Runtime
 
-runtime = AsyncRuntime("agent.yaml")
+runtime = Runtime("agent.yaml")
 
 # Turn 1
 runtime.run("Create a FastAPI app with a /items GET endpoint")
@@ -398,15 +406,16 @@ runtime.run("Add pytest tests for both endpoints")
 
 ---
 
+<a id="session-persistence"></a>
 ## 6. Session Persistence
 
 Session backends are chosen at construction time.
 
 | Backend | Storage | Survives restart | Best for |
 |---|---|---|---|
-| `"memory"` (default) | RAM only | Scripts, one-off tasks |
-| `"file"` | `~/.codepilot/sessions/` | CLI tools, local dev |
-| `"db"` | Any SQL database | Web apps, containers, multi-user |
+| `"memory"` (default) | RAM only | No | Scripts, one-off tasks |
+| `"file"` | `~/.codepilot/sessions/` | Yes | CLI tools, local dev |
+| `"db"` | Any SQL database | Yes | Web apps, containers, multi-user |
 
 ### In-memory (default)
 
@@ -442,9 +451,14 @@ Session file format:
   "agent_name": "BackendEngineer",
   "created_at": 1712345678.0,
   "updated_at": 1712349999.0,
-  "messages": [ ... ]
+  "messages": [ ... ],
+  "extra": {
+    "memory_state": { ... }
+  }
 }
 ```
+
+The `extra` field stores runtime-owned session state such as archived-context memory, so a resumed session restores more than just raw message history.
 
 ### Database-backed
 
@@ -480,8 +494,8 @@ runtime = Runtime(
 | Moment | What happens |
 |---|---|
 | `Runtime(...)` construction | One `SELECT` loads prior messages for the session_id, or `[]` for new sessions |
-| Each `run()` call | All agentic steps run **fully in-memory** â€” zero DB I/O during inference |
-| `run()` completes | One atomic `UPSERT` full messages list written to DB |
+| Each `run()` call | All agentic steps run fully in-memory with zero DB I/O during inference |
+| `run()` completes | One atomic `UPSERT` writes the full messages list plus runtime extra state |
 | New `Runtime(...)` same `session_id` | One `SELECT` session fully restored |
 | `runtime.reset()` | `DELETE` row clean slate |
 
@@ -497,6 +511,7 @@ for s in ds.list_sessions():
 
 ---
 
+<a id="context-memory-management"></a>
 ## 7. Context Memory Management
 
 CodePilot uses agent-driven context control with a global safety net.
@@ -564,6 +579,7 @@ list_archived_context()
 
 ---
 
+<a id="resuming-a-session"></a>
 ## 8. Resuming a Session
 
 Pass the same `session_id` to a new file-backed Runtime and the prior conversation loads automatically.
@@ -607,7 +623,8 @@ else:
 
 ---
 
-## 8. Resetting a Session
+<a id="resetting-a-session"></a>
+## 9. Resetting a Session
 
 Wipes all history and deletes the session file (if file-backed). The next `run()` starts completely fresh.
 
@@ -622,7 +639,8 @@ runtime.run("Start over build a GraphQL API instead")
 
 ---
 
-## 9. Hooks
+<a id="hooks"></a>
+## 10. Hooks
 
 Hooks are the observability system. Every significant runtime event fires a hook. Register handlers to receive them in your application.
 
@@ -657,7 +675,7 @@ def handle_tool_call(tool: str, args: dict, label: str = "", **_):
     Falls back to args dump if label is not set.
     """
     display = label if label else str(args)
-    print(f"\nâš™ï¸  [{tool}] {display}")
+    print(f"\n[tool:{tool}] {display}")
 
 
 @on_tool_result(runtime)
@@ -714,7 +732,7 @@ runtime.hooks.register(EventType.FINISH,  lambda summary, **_: save_to_db(summar
 | `ASK_USER` | `question` | Agent calls `ask_user()` |
 | `PERMISSION_REQUEST` | `tool`, `description` | Tool with `require_permission: true` fires |
 | `SECURITY_ERROR` | `error` | AST validation rejects the control block |
-| `RUNTIME_ERROR` | `error` | `exec()` throws an exception |
+| `RUNTIME_ERROR` | `error` | Provider, parser, or control-block execution error occurs |
 | `FINISH` | `summary` | Task complete completion block detected |
 | `MAX_STEPS` | - | Loop exits because `max_steps` was reached |
 | `USER_MESSAGE_QUEUED` | `message` | `send_message()` called |
@@ -723,7 +741,8 @@ runtime.hooks.register(EventType.FINISH,  lambda summary, **_: save_to_db(summar
 
 ---
 
-## 10. Permission Gating
+<a id="permission-gating"></a>
+## 11. Permission Gating
 
 The `execute` tool (and optionally `write_file`) supports `require_permission: true` in the AgentFile. When enabled, a `PERMISSION_REQUEST` hook fires before the tool runs. Return `True` to approve, `False` to deny. Falls back to a CLI `y/N` prompt if no handler is registered.
 
@@ -752,7 +771,7 @@ runtime.run("Deploy the application")
 ```python
 @on_permission_request(runtime)
 def auto_gate(tool: str, description: str, **_) -> bool:
-    if tool == "read_file":
+    if tool == "write_file" and "config.py" in description:
         return True
     if tool == "execute" and "pytest" in description:
         return True
@@ -761,12 +780,13 @@ def auto_gate(tool: str, description: str, **_) -> bool:
 
 ---
 
-## 11. Mid-task Message Injection
+<a id="mid-task-message-injection"></a>
+## 12. Mid-task Message Injection
 
 `runtime.run()` is blocking and runs on the calling thread. From any other thread, call `runtime.send_message()` to inject a message into the running agent.
 
 1. Queued immediately (non-blocking, thread-safe)
-2. Tagged `[USER MESSAGE]` â€” distinct from `[USER INPUT]` (the original task)
+2. Tagged `[USER MESSAGE]` and kept distinct from `[USER INPUT]` (the original task)
 3. Injected into the LLM context at the **next step boundary** never mid-step
 
 ```python
@@ -792,7 +812,8 @@ async def run_agent():
 
 ---
 
-## 12. Multi-operation Steps
+<a id="multi-operation-steps"></a>
+## 13. Multi-operation Steps
 
 The agent can perform multiple file operations in a single step, reducing round-trips and improving efficiency.
 
@@ -810,7 +831,7 @@ write_file("config.py")
 write_file("utils.py")
 ```
 
-```python
+```python filename=config.py
 import json, os
 
 def load(path: str) -> dict:
@@ -820,7 +841,7 @@ def load(path: str) -> dict:
         return json.load(f)
 ```
 
-```python
+```python filename=utils.py
 def slugify(text: str) -> str:
     return text.lower().replace(" ", "-")
 ```
@@ -836,11 +857,11 @@ Use `mode='multi_edit'` with `edits=[(start1, end1), (start2, end2)]` to fix mul
 write_file("routes/profile.py", mode="multi_edit", edits=[(42, 48), (55, 55)])
 ```
 
-```python
+```python filename=routes/profile.py
 # ... replacement for L42-48 ...
 ```
 
-```python
+```python filename=routes/profile.py
 # ... replacement for L55 ...
 ```
 ````
@@ -858,11 +879,12 @@ read_file("tests/test_config.py")
 
 ---
 
-## 13. Shell Tools
+<a id="shell-tools"></a>
+## 14. Shell Tools
 
-The agent has a **persistent, non-blocking shell session system** powered by pexpect. Commands never hang the agent, output is captured up to a timeout and returned immediately.
+The agent has a **persistent, non-blocking shell session system** powered by `pexpect` on Linux/macOS and `pywinpty` on Windows. Commands never hang the agent, output is captured up to a timeout and returned immediately.
 
-> **Linux/macOS only.** pexpect requires POSIX. Deploy in a Linux container.
+> **Cross-platform:** Linux and macOS use `pexpect`; Windows 10 1809+ uses ConPTY via `pywinpty`.
 
 A default shell session (`"main"`) starts automatically when the Runtime is created and persists across `run()` calls on the same Runtime instance. Its PID, status, and current working directory are shown in the system prompt every step.
 
@@ -879,8 +901,8 @@ execute("main", "pytest tests/ -v", 30)
 # status: running timeout hit, process still alive
 execute("main", "pip install -r requirements.txt", 10)
 
-# Spin up a server on its own shell, in one step
-execute("server", "uvicorn app.main:app --host 0.0.0.0 --port 8000", 4, new_shell=True)
+# Spin up a server in its own terminal session, in one step
+execute("server", "uvicorn app.main:app --host 0.0.0.0 --port 8000", 4, new_terminal=True)
 ```
 
 ### read_output -wait for more output
@@ -905,29 +927,28 @@ send_input("main", "yes\n", 5)    # confirm a CLI prompt
 send_input("main", "admin\n", 5)  # enter a username
 ```
 
-### send_signal -interrupt or stop
+### send_input - interrupt or send control keys
 
 ```python
-# Interrupt foreground process (Ctrl+C) â€” shell survives
-send_signal("server", "SIGINT")
+# Interrupt foreground process with Ctrl+C. The terminal session survives.
+send_input("server", "\x03", 5)
 
-# Terminate or kill the shell process entirely
-send_signal("server", "SIGTERM")
-send_signal("server", "SIGKILL")
+# Send Ctrl+D / EOF to exit REPLs or stdin-driven programs.
+send_input("main", "\x04", 5)
 ```
 
-### kill_shell - destroy a session
+### terminate_terminal - destroy a session
 
 ```python
-kill_shell("server")   # terminates the process, removes the session
+terminate_terminal("server")   # hard-kills the terminal session as a last resort
 ```
 
 ### Full example: server + test
 
 ```python
 # Step 1 LLM control block:
-# Start server on its own shell, verify startup logs within 4s
-execute("server", "uvicorn app.main:app --port 8000", 4, new_shell=True)
+# Start server in its own terminal session, verify startup logs within 4s
+execute("server", "uvicorn app.main:app --port 8000", 4, new_terminal=True)
 
 # Step 2 LLM control block (after seeing server startup logs):
 # Run tests against the live server from main shell
@@ -935,7 +956,7 @@ execute("main", "pytest tests/test_api.py -v", 30)
 
 # Step 3 LLM control block (after tests pass):
 # Shut server down cleanly then use a completion block to finish
-send_signal("server", "SIGINT")
+send_input("server", "\x03", 5)
 ```
 
 ### Context deduplication
@@ -944,7 +965,8 @@ When `read_output()` returns in full-mode (the command is already done, no new d
 
 ---
 
-## 14. Completion Block
+<a id="completion-block"></a>
+## 15. Completion Block
 
 The ` ```completion ` block is how the agent signals a task is done. Its content is natural text that **streams directly to the user in real time** token by token just like the pre-fence reasoning. When the runtime detects it, the agentic loop terminates after the current step.
 
@@ -1006,7 +1028,8 @@ summary = runtime.run("Fix the login bug")
 
 ---
 
-## 15. Workspace Change Detection
+<a id="workspace-change-detection"></a>
+## 16. Workspace Change Detection
 
 The runtime automatically detects when **you** modify files in the workspace between agent steps. If you edit a file while the agent is working, it will be notified at the start of the next step with exact line numbers of what changed.
 
@@ -1034,7 +1057,8 @@ No configuration is required - this is always on.
 
 ---
 
-## 16. Chat Mode
+<a id="chat-mode"></a>
+## 17. Chat Mode
 
 The agent can respond to questions and explanations without executing any code. If the LLM produces a response with no ` ```codepilot ` block, the runtime treats it as a conversational reply: the response is fully streamed to the user and the loop exits cleanly.
 
@@ -1082,11 +1106,12 @@ This allows the agent to reason about time, deadlines, and to self-regulate effi
 
 ---
 
-## 17. Custom Tools
+<a id="custom-tools"></a>
+## 18. Custom Tools
 
 Register any callable as a tool. Its docstring is automatically pulled into the system prompt so the agent knows when and how to use it.
 
-**Important:** `exec()` discards return values. If your tool produces output the agent should see, explicitly call `runtime._append_execution(result)`.
+**Important:** `exec()` discards return values. If your tool produces output the agent should see, explicitly append it to the execution buffer. In sync `Runtime` examples below, that means calling `runtime._async._append_execution(...)` on the underlying runtime.
 
 ```python
 from codepilot import Runtime
@@ -1101,7 +1126,7 @@ def web_search(query: str):
     or anything the codebase snapshot can't answer.
     """
     result = my_search_api(query)
-    runtime._append_execution(f"[web_search] {result}")
+    runtime._async._append_execution(f"[web_search] {result}")
 
 
 def send_slack(channel: str, message: str):
@@ -1111,7 +1136,7 @@ def send_slack(channel: str, message: str):
     channel should be the channel name without #, e.g. 'deployments'.
     """
     slack_client.chat_postMessage(channel=f"#{channel}", text=message)
-    runtime._append_execution(f"[send_slack] Message sent to #{channel}.")
+    runtime._async._append_execution(f"[send_slack] Message sent to #{channel}.")
 
 
 runtime.register_tool("web_search", web_search)
@@ -1123,16 +1148,16 @@ runtime.run("Research the latest SQLAlchemy 2.0 async API and implement a connec
 ### Overriding a built-in tool
 
 ```python
-def safe_execute(session_id: str, command: str, timeout: int = 10, new_shell: bool = False):
+def safe_execute(session_id: str, command: str, timeout: int = 10, new_terminal: bool = False):
     """
     Run a shell command. Restricted to read-only operations in this environment.
-    Never import subprocess or os directly â€” always use this tool.
+    Never import subprocess or os directly; always use this tool.
     """
     blocked = ["rm", "del", "format", ">", "sudo", "pip install"]
     if any(cmd in command for cmd in blocked):
-        runtime._append_execution(f"[execute] Blocked: '{command}' is not permitted.")
+        runtime._async._append_execution(f"[execute] Blocked: '{command}' is not permitted.")
         return
-    runtime._shell_manager.execute(session_id, command, timeout, new_shell)
+    return runtime._async._terminal_manager.execute(session_id, command, timeout, new_terminal)
 
 
 runtime.register_tool("execute", safe_execute, replace=True)
@@ -1140,7 +1165,8 @@ runtime.register_tool("execute", safe_execute, replace=True)
 
 ---
 
-## 18. Aborting the Agent
+<a id="aborting-the-agent"></a>
+## 19. Aborting the Agent
 
 ```python
 import asyncio
@@ -1154,12 +1180,13 @@ agent_task = asyncio.create_task(
 
 # From anywhere stops after the current step completes (never mid-step)
 runtime.abort()
-agent_task.join()
+await agent_task
 ```
 
 ---
 
-## 19. Building a CLI Tool
+<a id="building-a-cli-tool"></a>
+## 20. Building a CLI Tool
 
 ### Simple conversational CLI
 
@@ -1246,7 +1273,7 @@ def streaming(text: str, **_):
 
 @on_finish(runtime)
 def done(summary: str, **_):
-    print(f"\nâœ… {summary}\n")
+    print(f"\nDone: {summary}\n")
 
 
 while True:
@@ -1276,7 +1303,8 @@ python cli.py --list                       # show all saved sessions
 
 ---
 
-## 20. Building a Web Server Integration
+<a id="building-a-web-server-integration"></a>
+## 21. Building a Web Server Integration
 
 FastAPI example with WebSocket streaming (token-by-token to the browser) and mid-task injection:
 
@@ -1322,7 +1350,7 @@ runtime.hooks.register(EventType.RUNTIME_ERROR,
 
 @app.post("/run")
 def start_task(task: str):
-    """Start a new task. Non-blocking â€” agent runs in background thread."""
+    """Start a new task. Non-blocking; the agent runs in a background thread."""
     threading.Thread(target=runtime.run, args=(task,), daemon=True).start()
     return {"status": "started"}
 
@@ -1355,7 +1383,8 @@ async def stream_events(websocket: WebSocket):
 
 ---
 
-## 21. Full API Surface
+<a id="full-api-surface"></a>
+## 22. Full API Surface
 
 ### `Runtime`
 
@@ -1419,22 +1448,23 @@ from codepilot import (
 | `'insert'` | Insert after `after_line` (`0` = top of file) | 1 per file per step |
 | `'multi_edit'` | `edits=[(s1,e1), (s2,e2)]`. Runtime applies bottom-to-top. | 1 per file per step |
 
-Content always comes from the next payload block â€” never pass it as a string argument.
+Content always comes from the next payload block; never pass it as a string argument.
 
 #### `read_file(path, start_line=1, end_line=None)`
 
 Returns file content with 1-indexed line numbers. Multiple calls per step are allowed.
 
-#### `execute(session_id, command, timeout=10, new_shell=False)`
+#### `execute(session_id, command, timeout=10, new_terminal=False, shell=None)`
 
-Runs a command on a persistent shell session. Returns captured output up to `timeout` seconds.
+Runs a command on a persistent terminal session. Returns captured output up to `timeout` seconds.
 
 | Parameter | Description |
 |---|---|
-| `session_id` | Shell session to use. `"main"` exists by default (recreated after `reset()`). |
+| `session_id` | Terminal session to use. `"main"` exists by default (recreated after `reset()`). |
 | `command` | Shell command string. |
 | `timeout` | Seconds to wait. Output captured on timeout. |
-| `new_shell` | `True` = create and use a new shell in one step. |
+| `new_terminal` | `True` = create and use a new terminal session in one step. |
+| `shell` | Optional shell for new sessions: `"bash"`, `"powershell"`, or `"cmd"`. |
 
 Result includes `status: completed` (done, has `return_code`) or `status: running` (timed out, process alive).
 
@@ -1448,13 +1478,9 @@ Read new output from the latest command. Returns delta (new content only) or ful
 
 Send text to an interactive command waiting for input. Returns new output after sending.
 
-#### `send_signal(session_id, signal='SIGINT')`
+#### `terminate_terminal(session_id)`
 
-Send `SIGINT` (Ctrl+C, shell survives), `SIGTERM`, or `SIGKILL` to the shell session.
-
-#### `kill_shell(session_id)`
-
-Terminate and remove a shell session entirely.
+Hard-kill a terminal session. Prefer `send_input(session_id, "\x03")` first so Ctrl+C can shut down the foreground process cleanly.
 
 #### `ask_user(question)`
 
@@ -1474,15 +1500,15 @@ List archived tasks with summary previews and estimated token savings.
 
 #### `find(pattern, scope='codebase', target=None, include=None, max_results=50)`
 
-Text / regex search across a file, multiple files, or the entire workspace. Results are returned as `file:line:matched_line` â€” one match per line.
+Text / regex search across a file, multiple files, or the entire workspace. Results are returned as `file:line:matched_line`, one match per line.
 
-Uses **ripgrep** (`rg`) when available â€” fast and honours `.gitignore` automatically (ignores `node_modules`, build artifacts, lock files). Falls back to a pure-Python implementation when `rg` is not installed.
+Uses **ripgrep** (`rg`) when available, fast and honoring `.gitignore` automatically (ignoring `node_modules`, build artifacts, lock files). Falls back to a pure-Python implementation when `rg` is not installed.
 
 | Parameter | Description |
 |---|---|
 | `pattern` | Regex pattern. Escape special chars: `r'validate_email\('` |
 | `scope` | `'file'` / `'files'` / `'codebase'` |
-| `target` | File path (str) or list of paths â€” required for `scope='file'/'files'` |
+| `target` | File path (str) or list of paths; required for `scope='file'/'files'` |
 | `include` | Glob filter for `scope='codebase'`. e.g. `'*.py'`, `'tests/**'` |
 | `max_results` | Cap on returned matches (default 50) |
 
@@ -1513,7 +1539,7 @@ Semantically searches the codebase using the `voyage-code-3` embedding model via
 | `'search'` | Find files/functions matching a natural language concept |
 | `'trace_callers'` | Find every place that calls a given function/method |
 | `'trace_callees'` | Find everything a function calls internally |
-| `'trace_graph'` | Full dependency tree up to `depth` levels â€” use before modifying code with wide blast radius |
+| `'trace_graph'` | Full dependency tree up to `depth` levels; use before modifying code with wide blast radius |
 
 **Environment setup:**
 
@@ -1522,9 +1548,9 @@ export VOYAGE_API_KEY="pa-..."
 ```
 
 **How the API key flows:**
-grepai internally reads `OPENAI_API_KEY`. The runtime automatically aliases your `VOYAGE_API_KEY` â†’ `OPENAI_API_KEY` at subprocess launch â€” you never need to rename your env var.
+grepai internally reads `OPENAI_API_KEY`. The runtime automatically aliases your `VOYAGE_API_KEY` to `OPENAI_API_KEY` at subprocess launch; you never need to rename your env var.
 
-**grepai index location:** `~/.codepilot/grepai/<hash>/` â€” entirely outside your project. No `.grepai/` directory is created in your codebase.
+**grepai index location:** `~/.codepilot/grepai/<hash>/`, entirely outside your project. No `.grepai/` directory is created in your codebase.
 
 ### `FileSession`
 
@@ -1556,13 +1582,14 @@ InMemorySession(session_id="default")
 
 ```python
 create_session(
-    backend: str = "memory",     # "memory" | "file"
+    backend: str = "memory",     # "memory" | "file" | "db"
     session_id: str = "default",
     agent_name: str = "agent",
     session_dir: Path = None,
+    db_url: Optional[str] = None,
 ) -> BaseSession
 ```
 
 ---
 
-*CodePilot-ai v0.9.0 — MIT License — [GitHub](https://github.com/Jahanzeb-git/codepilot) — [PyPI](https://pypi.org/project/codepilot-ai/) — Built by [Jahanzeb Ahmed](https://github.com/Jahanzeb-git)*
+*CodePilot-ai v0.9.1 — MIT License — [GitHub](https://github.com/Jahanzeb-git/codepilot) — [PyPI](https://pypi.org/project/codepilot-ai/) — Built by [Jahanzeb Ahmed](https://github.com/Jahanzeb-git)*

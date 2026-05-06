@@ -53,6 +53,12 @@ class BlockParser:
     # Extracts filename= from a fence tag. Supports quoted and bare values:
     #   filename=routes/profile.py   filename="routes/profile.py"
     _FILENAME_RE = re.compile(r'filename=(?:"([^"]+)"|\'([^\']+)\'|(\S+))')
+    _WRITE_FILE_RE = re.compile(r'write_file\s*\(')
+    _INLINE_CONTENT_ARG_RE = re.compile(
+        r'write_file\s*\([^)]*\b(content|payload|text|data)\s*=',
+        re.DOTALL,
+    )
+    _VALID_WRITE_MODES = frozenset({"w", "a", "edit", "insert", "multi_edit"})
 
 
     @classmethod
@@ -123,11 +129,12 @@ class BlockParser:
                 # filename= so they pass through safely even if placed after the
                 # codepilot block, without triggering validation.
                 payload_blocks   = [b for b in remaining if b.language != "completion" and b.filename is not None]
+                unannotated_blocks = [b for b in remaining if b.language != "completion" and b.filename is None]
                 completion_list  = [b for b in remaining if b.language == "completion"]
                 completion_block = completion_list[0] if completion_list else None
 
                 # Validate filename= annotations before handing off to runtime
-                cls._validate_payload_filenames(block, payload_blocks)
+                cls._validate_payload_filenames(block, payload_blocks, unannotated_blocks)
 
                 return block, payload_blocks, completion_block
 
@@ -174,6 +181,17 @@ class BlockParser:
                 continue
             filepath = path_match.group(1)
 
+            mode_match = re.search(r'mode\s*=\s*["\']([^"\']+)["\']', call_args)
+            if mode_match:
+                mode = mode_match.group(1)
+                if mode not in BlockParser._VALID_WRITE_MODES:
+                    valid = "', '".join(sorted(BlockParser._VALID_WRITE_MODES))
+                    raise ValueError(
+                        f"write_file() for '{filepath}' uses invalid mode '{mode}'. "
+                        f"Valid modes are '{valid}'. Use mode='a' for append and "
+                        "mode='multi_edit' for multiple non-contiguous edits."
+                    )
+
             # Detect multi_edit and count its tuples
             is_multi_edit = bool(re.search(r'mode\s*=\s*["\']multi_edit["\']', call_args))
             if is_multi_edit:
@@ -207,6 +225,7 @@ class BlockParser:
         cls,
         control_block: CodeBlock,
         payload_blocks: List[CodeBlock],
+        unannotated_blocks: List[CodeBlock],
     ) -> None:
         """
         Cross-checks payload block filename= annotations against the write_file()
@@ -220,7 +239,25 @@ class BlockParser:
           2. A payload block is missing its filename= annotation
           3. A payload block's filename= doesn't match the corresponding write_file() target
         """
+        if cls._INLINE_CONTENT_ARG_RE.search(control_block.content):
+            raise ValueError(
+                "write_file() was called with an inline content-like argument "
+                "(content=, payload=, text=, or data=). write_file() never accepts "
+                "file content as a Python argument. Put the file content in a "
+                "Payload Block immediately after the ```codepilot block, annotated "
+                "with filename=<same path>."
+            )
+
         write_calls = cls._extract_write_file_calls(control_block.content)
+
+        if not write_calls and cls._WRITE_FILE_RE.search(control_block.content):
+            raise ValueError(
+                "write_file() call found, but its first argument was not a literal "
+                "quoted path. Payload-backed write_file() calls must use a literal "
+                "path like write_file(\"src/app.py\", mode=\"w\") so the runtime can "
+                "validate Payload Block filename= annotations. For computed content "
+                "or dynamic paths, use Python native file I/O with WORK_DIR instead."
+            )
 
         # No write_file calls → no payload blocks expected
         if not write_calls:
@@ -240,6 +277,17 @@ class BlockParser:
 
         # --- Failure mode 1: count mismatch ---
         if len(payload_blocks) != len(expected):
+            if unannotated_blocks:
+                block_numbers = ", ".join(str(b.index + 1) for b in unannotated_blocks)
+                raise ValueError(
+                    f"Payload Block(s) after the ```codepilot block are missing filename= "
+                    f"annotations (block number(s): {block_numbers}). Found "
+                    f"{len(payload_blocks)} annotated payload block(s), expected "
+                    f"{len(expected)} (write_file calls in order: "
+                    f"{', '.join(f'{fp} ×{n}' if n > 1 else fp for fp, n in write_calls)}). "
+                    "Every write_file() payload must be fenced like "
+                    "```python filename=path/from/write_file.py."
+                )
             summary = ", ".join(
                 f"{fp} ×{n}" if n > 1 else fp for fp, n in write_calls
             )

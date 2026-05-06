@@ -30,7 +30,7 @@ Every response has two parts:
 
 **Control Block** (```codepilot) — Python code executed by the runtime.
   - Regular blocks (like ```python, ```bash) outside the control block are display-only.
-  - Use extensive `#` comments for chain-of-thought.
+  - Use concise `#` comments to explain operational intent, tool ordering, and runtime constraints before actions.
 
 **Payload Blocks** — each `write_file()` call in the control block consumes the next Payload Block in sequence. For `mode='multi_edit'`, one block per tuple. Order must match exactly. Never executed. Always annotate: ` ```python filename=routes/profile.py `.
 
@@ -191,4 +191,5 @@ In a single step, combine **INDEPENDENT** operations freely to save steps:
    - Low stress: skip archiving entirely. High stress: act, but you judge what's load-bearing.
 8. Archive summaries are your ONLY memory of that task (unless you `reveal_context`). Pack densely: exact files, commands, decisions, errors, outcomes. Reading it later must tell you exactly what happened, where, and why — so you can judge whether revealing is needed. Never be vague.
 9. Conversation mode: respond in plain markdown without ```codepilot. Normal language blocks are fine.
+10. Search guidance: prefer `find()` for ordinary text/regex lookup because it returns cleaner, structured search results directly in context; use terminal `rg`/`grep` via `execute()` only when you specifically need CLI-only behavior such as pipes, context lines, multiline flags, count/file-only output, or other shell composition.
 {# -------------------- END OF THE STATIC INSTRUCTIONS -------------------- #}

@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 
 class FilesystemTools:
+    _VALID_WRITE_MODES = frozenset({"w", "a", "edit", "insert", "multi_edit"})
 
     def __init__(self, runtime: "Runtime"):
         self.runtime = runtime
@@ -52,6 +53,65 @@ class FilesystemTools:
                     "Enable unsafe_mode in AgentFile to allow this."
                 )
         return str(abs_path)
+
+    def _write_error(self, message: str) -> None:
+        result = f"[write_file] ERROR: {message}"
+        self.runtime._append_execution(result)
+        self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="write_file", result=result)
+
+    def _read_error(self, message: str) -> str:
+        result = f"[read_file] ERROR: {message}"
+        self.runtime._append_execution(result)
+        self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="read_file", result=result)
+        return result
+
+    @classmethod
+    def _valid_modes_text(cls) -> str:
+        return "'w', 'a', 'edit', 'insert', or 'multi_edit'"
+
+    @staticmethod
+    def _is_int(value) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool)
+
+    def _validate_edits_shape(self, edits) -> Optional[str]:
+        if not isinstance(edits, list) or not edits:
+            return "mode='multi_edit' requires a non-empty edits list like edits=[(10, 12), (25, 25)]."
+        for idx, item in enumerate(edits, start=1):
+            if (
+                not isinstance(item, (tuple, list))
+                or len(item) != 2
+                or not self._is_int(item[0])
+                or not self._is_int(item[1])
+            ):
+                return (
+                    f"edits item {idx} is invalid: {item!r}. Each multi_edit item "
+                    "must be a two-integer tuple/list: (start_line, end_line)."
+                )
+        return None
+
+    def _validate_replace_range(self, path: str, start_line: int, end_line: int, total_lines: int, mode: str) -> Optional[str]:
+        if not self._is_int(start_line) or not self._is_int(end_line):
+            return (
+                f"mode='{mode}' line ranges must be integers. Got "
+                f"start_line={start_line!r}, end_line={end_line!r}."
+            )
+        if start_line < 1 or end_line < 1:
+            return (
+                f"mode='{mode}' uses 1-indexed inclusive line ranges. Got "
+                f"L{start_line}-{end_line}; line numbers must be >= 1."
+            )
+        if start_line > end_line:
+            return (
+                f"mode='{mode}' got an invalid range L{start_line}-{end_line}: "
+                "start_line must be <= end_line."
+            )
+        if end_line > total_lines:
+            return (
+                f"mode='{mode}' range L{start_line}-{end_line} is outside '{path}', "
+                f"which has {total_lines} lines. Call read_file('{path}') to get "
+                "current line numbers, then retry with an in-range edit."
+            )
+        return None
 
     def write_file(
         self,
@@ -86,7 +146,7 @@ class FilesystemTools:
         elif mode == "insert":
             ui_status = f"Inserting into a file {path}: L{after_line}"
         elif mode == "multi_edit":
-            if edits:
+            if isinstance(edits, list) and edits and self._validate_edits_shape(edits) is None:
                 min_line = min(s for s, e in edits)
                 max_line = max(e for s, e in edits)
                 ui_status = f"Refactoring a file {path}: L{min_line}-{max_line}"
@@ -104,32 +164,46 @@ class FilesystemTools:
         )
 
         # ------------------------------------------------------------------ #
+        #  Argument validation before consuming Payload Blocks                 #
+        # ------------------------------------------------------------------ #
+        if mode not in self._VALID_WRITE_MODES:
+            self._write_error(
+                f"Unknown mode {mode!r} for '{path}'. Valid modes are "
+                f"{self._valid_modes_text()}. Use mode='a' for append and "
+                "mode='multi_edit' for multiple non-contiguous edits. No file was changed."
+            )
+            return
+
+        if mode == "multi_edit":
+            edits_error = self._validate_edits_shape(edits)
+            if edits_error:
+                self._write_error(f"{edits_error} No file was changed.")
+                return
+
+        # ------------------------------------------------------------------ #
         #  ALWAYS consume the payload block(s) first to maintain ordering     #
         # ------------------------------------------------------------------ #
         payloads: list[CodeBlock] = []
         if mode == "multi_edit":
-            if not edits:
-                result = "[write_file] ERROR: mode='multi_edit' requires the 'edits' parameter."
-                self.runtime._append_execution(result)
-                self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="write_file", result=result)
-                return
             for _ in edits:
                 p = self.runtime.pop_next_payload_block()
                 if p is None:
-                    result = f"[write_file] ERROR: Not enough Payload Blocks for {len(edits)} edits."
-                    self.runtime._append_execution(result)
-                    self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="write_file", result=result)
+                    self._write_error(
+                        f"Not enough Payload Blocks for {len(edits)} multi_edit edits "
+                        f"on '{path}'. Provide one Payload Block per edits tuple, in the "
+                        "same order, each annotated filename=<same path>. No file was changed."
+                    )
                     return
                 payloads.append(p)
         else:
             p = self.runtime.pop_next_payload_block()
             if p is None:
-                result = (
-                    f"[write_file] ERROR: No Payload Block found for '{path}'. "
-                    "Provide a fenced code block for each write_file() call."
+                self._write_error(
+                    f"No Payload Block found for '{path}'. Provide exactly one fenced "
+                    "Payload Block immediately after the ```codepilot block, annotated "
+                    f"as filename={path}. Do not pass file content as a write_file() "
+                    "argument. No file was changed."
                 )
-                self.runtime._append_execution(result)
-                self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="write_file", result=result)
                 return
             payloads.append(p)
 
@@ -139,23 +213,22 @@ class FilesystemTools:
         if mode in ("edit", "insert", "multi_edit"):
             edited_files = self.runtime._step_edited_files
             if path in edited_files:
-                result = (
-                    f"[write_file] ERROR: Only one edit/insert per FILE per step. "
-                    f"'{path}' was already edited this step. Use a separate step."
+                self._write_error(
+                    f"Only one edit/insert/multi_edit per file per step is allowed. "
+                    f"'{path}' was already edited this step. Use a separate agentic "
+                    "step or combine all non-contiguous edits for this file into one "
+                    "mode='multi_edit' call. This write was skipped."
                 )
-                self.runtime._append_execution(result)
-                self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="write_file", result=result)
                 return
             edited_files.add(path)
 
         else:
             if self.runtime._step_write_count >= 5:
-                result = (
-                    f"[write_file] ERROR: Maximum 5 file writes per step exceeded. "
-                    f"Skipped '{path}'."
+                self._write_error(
+                    f"Maximum 5 mode='w'/'a' file writes per step exceeded. "
+                    f"Skipped '{path}'. Continue in the next agentic step for "
+                    "additional file writes."
                 )
-                self.runtime._append_execution(result)
-                self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="write_file", result=result)
                 return
             self.runtime._step_write_count += 1
 
@@ -171,9 +244,11 @@ class FilesystemTools:
             else:
                 op = "full file"
             if not self._request_permission("write_file", f"Write '{path}' ({op})"):
-                result = f"[write_file] Permission denied for '{path}'."
-                self.runtime._append_execution(result)
-                self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="write_file", result=result)
+                self._write_error(
+                    f"Permission denied by user/runtime policy for '{path}'. No file "
+                    "was changed. Ask the user for permission or choose a different "
+                    "approach; do not assume the write succeeded."
+                )
                 return
 
         # ------------------------------------------------------------------ #
@@ -185,8 +260,6 @@ class FilesystemTools:
         try:
             new_content = payloads[0].content if payloads else ""
             abs_path    = self._safe_path(path)
-            parent      = Path(abs_path).parent
-            parent.mkdir(parents=True, exist_ok=True)
 
             # -------------------------------------------------------------- #
             #  mode='multi_edit'                                               #
@@ -197,6 +270,12 @@ class FilesystemTools:
 
                 with open(abs_path, "r", encoding="utf-8") as f:
                     lines = f.readlines()
+
+                total_lines = len(lines)
+                for idx, (s_line, e_line) in enumerate(edits, start=1):
+                    range_error = self._validate_replace_range(path, s_line, e_line, total_lines, "multi_edit")
+                    if range_error:
+                        raise ValueError(f"edits item {idx}: {range_error}")
 
                 # Pair edits with payloads, sort by start_line DESCENDING 
                 # (bottom-to-top) so earlier line numbers don't shift!
@@ -242,6 +321,7 @@ class FilesystemTools:
             #  mode='w'                                                        #
             # -------------------------------------------------------------- #
             elif mode == "w":
+                Path(abs_path).parent.mkdir(parents=True, exist_ok=True)
                 with open(abs_path, "w", encoding="utf-8") as f:
                     f.write(new_content)
                 line_count = new_content.count("\n") + (
@@ -256,6 +336,7 @@ class FilesystemTools:
             #  mode='a'                                                        #
             # -------------------------------------------------------------- #
             elif mode == "a":
+                Path(abs_path).parent.mkdir(parents=True, exist_ok=True)
                 if new_content:
                     if Path(abs_path).is_file() and Path(abs_path).stat().st_size > 0:
                         with open(abs_path, "rb") as f:
@@ -288,8 +369,12 @@ class FilesystemTools:
                 with open(abs_path, "r", encoding="utf-8") as f:
                     lines = f.readlines()
 
-                start_idx = max(0, start_line - 1)
-                end_idx   = min(len(lines), end_line)
+                range_error = self._validate_replace_range(path, start_line, end_line, len(lines), "edit")
+                if range_error:
+                    raise ValueError(range_error)
+
+                start_idx = start_line - 1
+                end_idx   = end_line
 
                 if new_content and not new_content.endswith("\n"):
                     new_content += "\n"
@@ -314,13 +399,22 @@ class FilesystemTools:
             elif mode == "insert":
                 if after_line is None:
                     raise ValueError("mode='insert' requires the after_line parameter.")
+                if not self._is_int(after_line):
+                    raise ValueError(f"mode='insert' requires after_line to be an integer. Got {after_line!r}.")
                 if not Path(abs_path).is_file():
                     raise FileNotFoundError(f"Cannot insert into '{path}': file does not exist.")
 
                 with open(abs_path, "r", encoding="utf-8") as f:
                     lines = f.readlines()
 
-                insert_idx = min(len(lines), max(0, after_line))
+                if after_line < 0 or after_line > len(lines):
+                    raise ValueError(
+                        f"mode='insert' after_line={after_line} is outside '{path}', "
+                        f"which has {len(lines)} lines. Use after_line=0 for top-of-file "
+                        "insertion, or call read_file() to choose an in-range line."
+                    )
+
+                insert_idx = after_line
 
                 if new_content and not new_content.endswith("\n"):
                     new_content += "\n"
@@ -340,11 +434,15 @@ class FilesystemTools:
 
             else:
                 raise ValueError(
-                    f"Unknown mode '{mode}'. Use 'w', 'a', 'edit', or 'insert'."
+                    f"Unknown mode '{mode}'. Use {self._valid_modes_text()}."
                 )
 
         except Exception as exc:
-            result = f"[write_file] ERROR writing '{path}': {exc}"
+            result = (
+                f"[write_file] ERROR writing '{path}': {exc} No file was changed "
+                "unless the error occurred during a low-level OS write. Re-read the "
+                "target file before retrying if there is any chance of partial change."
+            )
 
         self.runtime._append_execution(result)
         self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="write_file", result=result)
@@ -369,40 +467,83 @@ class FilesystemTools:
             EventType.TOOL_CALL, tool="read_file",
             args={"path": path, "start_line": start_line, "end_line": end_line, "ui_status": ui_status},
         )
-        abs_path = self._safe_path(path)
-        if not Path(abs_path).is_file():
-            raise FileNotFoundError(f"read_file: '{path}' not found.")
+        try:
+            if not self._is_int(start_line):
+                return self._read_error(
+                    f"start_line must be an integer >= 1. Got {start_line!r}. "
+                    "Use read_file(path) for the full file, or pass explicit integer line numbers."
+                )
+            if start_line < 1:
+                return self._read_error(
+                    f"read_file() uses 1-indexed lines. Got start_line={start_line}. "
+                    "Line numbers must be >= 1."
+                )
+            if end_line is not None:
+                if not self._is_int(end_line):
+                    return self._read_error(
+                        f"end_line must be an integer >= start_line, or None. Got {end_line!r}."
+                    )
+                if end_line < start_line:
+                    return self._read_error(
+                        f"Invalid range for '{path}': start_line={start_line}, end_line={end_line}. "
+                        "end_line must be >= start_line."
+                    )
 
-        with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
-            all_lines = f.readlines()
+            abs_path = self._safe_path(path)
+            if not Path(abs_path).is_file():
+                return self._read_error(
+                    f"'{path}' not found in the workspace. Confirm the path from the codebase snapshot "
+                    "or use a search/read step on the correct file path."
+                )
 
-        total = len(all_lines)
-        s     = max(0, start_line - 1)
-        e     = end_line if end_line is not None else total
-        e     = min(e, total)
+            with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+                all_lines = f.readlines()
 
-        numbered = [f"{i + s + 1:5} | {line.rstrip()}" for i, line in enumerate(all_lines[s:e])]
-        content  = "\n".join(numbered)
+            total = len(all_lines)
+            if total == 0:
+                result = f"[read_file] '{path}' (lines 1-0 of 0)\n[END OF FILE]"
+                self.runtime._append_execution(result)
+                self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="read_file", result=result)
+                if hasattr(self.runtime, '_watcher'):
+                    self.runtime._watcher.register(abs_path)
+                return "[END OF FILE]"
 
-        # Footer logic: help the LLM understand if it reached the end or needs to read more.
-        footer = ""
-        if e >= total:
-            footer = "\n[END OF FILE]"
-        else:
-            remaining = total - e
-            footer = f"\n[TRUNCATED: {remaining} lines remaining]"
+            if start_line > total:
+                return self._read_error(
+                    f"Requested start_line={start_line} for '{path}', but the file has only {total} lines. "
+                    f"Use a start_line between 1 and {total}."
+                )
 
-        result = (
-            f"[read_file] '{path}' (lines {s + 1}–{e} of {total})\n"
-            + content
-            + footer
-        )
+            e = end_line if end_line is not None else total
+            if e > total:
+                e = total
 
-        self.runtime._append_execution(result)
-        self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="read_file", result=result)
+            s = start_line - 1
+            numbered = [f"{i + s + 1:5} | {line.rstrip()}" for i, line in enumerate(all_lines[s:e])]
+            content  = "\n".join(numbered)
 
-        # Register with watcher so external changes are detected next step
-        if hasattr(self.runtime, '_watcher'):
-            self.runtime._watcher.register(abs_path)
+            footer = ""
+            if e >= total:
+                footer = "\n[END OF FILE]"
+            else:
+                remaining = total - e
+                footer = f"\n[TRUNCATED: {remaining} lines remaining]"
 
-        return content + footer
+            result = (
+                f"[read_file] '{path}' (lines {s + 1}–{e} of {total})\n"
+                + content
+                + footer
+            )
+
+            self.runtime._append_execution(result)
+            self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="read_file", result=result)
+
+            if hasattr(self.runtime, '_watcher'):
+                self.runtime._watcher.register(abs_path)
+
+            return content + footer
+        except Exception as exc:
+            return self._read_error(
+                f"Unexpected failure while reading '{path}': {exc}. "
+                "Treat this as a tool failure from read_file(); do not assume any file content was returned."
+            )

@@ -89,15 +89,24 @@ class SearchTools:
         Search for a text pattern (regex) across a file, list of files, or the
         whole codebase. Returns one 'file:line:matched_line' per matching line.
 
+        Prefer this tool over execute("rg ...") / execute("grep ...") for ordinary
+        codebase text search because it returns cleaner, agent-friendly results
+        directly in [EXECUTION RESULT] without terminal noise or shell quoting issues.
+        Use terminal rg/grep only when you specifically need CLI-only behavior such as
+        pipes, context lines, count-only/file-only output, multiline flags, or other
+        ripgrep options this tool does not expose.
+
         scope='file'     — single file. target='path/to/file.py'
         scope='files'    — multiple files. target=['a.py', 'b.py']
         scope='codebase' — entire workspace. Use include='*.py' to restrict by glob.
 
         Examples:
-          find(pattern=r'class \w+Error', scope='codebase', include='*.py')
-          find(pattern=r'def login\(', scope='file', target='routes/auth.py')
+          find(pattern=r'class \\w+Error', scope='codebase', include='*.py')
+          find(pattern=r'def login\\(', scope='file', target='routes/auth.py')
 
-        Use raw strings for regex special chars: r'validate_email\(' not 'validate_email('.
+        Use raw strings for regex special chars: r'validate_email\\(' not 'validate_email('.
+        Limitations: one result per matching line, no multiline/context flags, and
+        no arbitrary ripgrep CLI options. Results are capped by max_results.
         """
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="find",

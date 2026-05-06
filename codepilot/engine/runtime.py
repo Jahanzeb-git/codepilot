@@ -58,6 +58,7 @@ _ROLE_ASSISTANT = "assistant"
 TAG_USER_INJECTION   = "[USER MESSAGE]"
 TAG_EXECUTION_RESULT = "[EXECUTION RESULT]"
 TAG_ENV_CHANGE       = "[ENVIRONMENT CHANGE]"
+CONTROL_BLOCK_FILENAME = "<codepilot-control-block>"
 
 # Background timer delay for upgrading Anthropic cache TTL to 1h.
 # Set to 4.5 minutes — just before the default 5min TTL expires.
@@ -141,6 +142,7 @@ class AsyncRuntime:
         self.registry = ToolRegistry()
         self._register_enabled_tools()
         self._validate_semantic_config()
+        self._register_context_tools()
 
         # Start default terminal session (cross-platform)
         self._terminal_manager.start_default_terminal()
@@ -297,8 +299,18 @@ class AsyncRuntime:
                 self._append_execution_result(f"PROVIDER ERROR: {error_msg}")
                 continue
 
-            # 4. Parse response first so we can extract payload blocks
-            control_block, payload_blocks, completion_block = BlockParser.split(response_text)
+            # 4. Parse response first so we can extract payload blocks.
+            # Parser errors are recoverable model-format mistakes. Preserve the
+            # assistant response in history, then feed back a protocol-level
+            # correction message so the next inference can fix its block shape.
+            try:
+                control_block, payload_blocks, completion_block = BlockParser.split(response_text)
+            except ValueError as exc:
+                self.messages.append({"role": _ROLE_ASSISTANT, "content": response_text})
+                error_msg = self._format_parser_error(str(exc))
+                self.hooks.emit(EventType.RUNTIME_ERROR, error=error_msg)
+                self._append_execution_result(error_msg)
+                continue
 
             # 4.5 Strip payload block contents from memory to save massive tokens
             memory_text = response_text
@@ -478,6 +490,13 @@ class AsyncRuntime:
             self.registry.unregister("semantic_search")
             raise RuntimeError(str(exc)) from exc
 
+    def _register_context_tools(self):
+        """Register context management tools that are always available.
+
+        These tools are independent of agent.yaml's optional tools list because
+        they are part of the runtime's memory-management protocol, not external
+        workspace capabilities like filesystem, terminal, or semantic search.
+        """
         # Context management tools (always enabled)
         self.registry.register("archive_context",       self._context_tools.archive_context)
         self.registry.register("reveal_context",        self._context_tools.reveal_context)
@@ -689,6 +708,25 @@ class AsyncRuntime:
             # No control block at all — emit everything (display/chat)
             self.hooks.emit(EventType.STREAM, text=response_text.strip())
 
+    @staticmethod
+    def _format_parser_error(error: str) -> str:
+        return (
+            "PARSER ERROR: The previous assistant response was not executed because "
+            "it violated CodePilot's Markdown block protocol.\n\n"
+            f"Specific parser failure: {error}\n\n"
+            "How to fix your next response:\n"
+            "1. Emit exactly one ```codepilot fenced Control Block if you want tools to run.\n"
+            "2. For every write_file(...) call, provide the required Payload Block(s) immediately "
+            "after the Control Block.\n"
+            "3. Every Payload Block must include a filename= annotation that exactly matches the "
+            "corresponding write_file path, for example: ```python filename=src/app.py.\n"
+            "4. Payload Blocks are consumed strictly in write_file call order. For mode='multi_edit', "
+            "provide one Payload Block per tuple in edits=[...], in the same order as the tuples.\n"
+            "5. Do not include a ```completion block in the corrective response unless the corrected "
+            "operation has actually executed and its result has been observed.\n\n"
+            "No tool code from the previous response ran. Re-emit a corrected CodePilot response now."
+        )
+
     # ------------------------------------------------------------------ #
     #  Sandbox + execution                                                 #
     # ------------------------------------------------------------------ #
@@ -716,15 +754,65 @@ class AsyncRuntime:
             _print_lines.append(sep.join(str(a) for a in args) + end)
 
         try:
-            exec(code, self._build_sandbox(captured_print=_captured_print))  # noqa: S102
-        except Exception:
+            compiled = compile(code, CONTROL_BLOCK_FILENAME, "exec")
+        except SyntaxError as exc:
             tb = traceback.format_exc()
-            self.hooks.emit(EventType.RUNTIME_ERROR, error=tb)
-            self._append_execution(f"EXECUTION ERROR:\n{tb}")
+            error_text = self._format_execution_error(exc, tb, ran_any_statements=False)
+            self.hooks.emit(EventType.RUNTIME_ERROR, error=error_text)
+            self._append_execution(error_text)
+            return
+
+        try:
+            exec(compiled, self._build_sandbox(captured_print=_captured_print))  # noqa: S102
+        except Exception as exc:
+            tb = traceback.format_exc()
+            error_text = self._format_execution_error(exc, tb, ran_any_statements=True)
+            self.hooks.emit(EventType.RUNTIME_ERROR, error=error_text)
+            self._append_execution(error_text)
 
         printed = "".join(_print_lines).strip()
         if printed:
             self._execution_buffer.insert(0, printed)
+
+    @staticmethod
+    def _format_execution_error(exc: BaseException, traceback_text: str, ran_any_statements: bool) -> str:
+        line_no = getattr(exc, "lineno", None)
+        if line_no is None:
+            match = re.search(
+                rf'File "{re.escape(CONTROL_BLOCK_FILENAME)}", line (\d+)',
+                traceback_text,
+            )
+            if match:
+                line_no = match.group(1)
+        line_no = line_no or "unknown"
+        origin = f"generated ```codepilot Control Block, line {line_no}"
+        exception_name = type(exc).__name__
+        exception_message = str(exc) or "(no exception message)"
+
+        if ran_any_statements:
+            semantics = (
+                "Execution semantics:\n"
+                "- Python started executing the Control Block.\n"
+                "- Statements before the failing line may already have run and may have produced tool results or side effects.\n"
+                "- The failing statement did not complete, and statements after it did not run.\n"
+                "- Tool results printed before this error are still ground truth; inspect them before retrying."
+            )
+        else:
+            semantics = (
+                "Execution semantics:\n"
+                "- Python could not compile the Control Block.\n"
+                "- No statements in the Control Block ran.\n"
+                "- No tool calls or file/terminal side effects came from this failed Control Block."
+            )
+
+        return (
+            "EXECUTION ERROR: The assistant's ```codepilot Control Block raised a Python exception.\n\n"
+            f"Origin: {origin}.\n"
+            f"Exception: {exception_name}: {exception_message}\n\n"
+            f"{semantics}\n\n"
+            "Raw traceback:\n"
+            f"{traceback_text}"
+        )
 
     def _append_execution_result(self, result: str):
         self.messages.append({
