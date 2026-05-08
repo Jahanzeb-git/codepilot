@@ -20,9 +20,11 @@ Copyright (c) 2026 Jahanzeb Ahmed.
 Licensed under the MIT License.
 """
 
+import json
 import os
 import platform
 import re
+import socket
 import sys
 import time
 import uuid
@@ -54,6 +56,7 @@ if IS_WINDOWS:
     import winpty  # pywinpty
 else:
     import pexpect
+    import pexpect.fdpexpect
 
 
 # ======================================================================
@@ -116,6 +119,104 @@ class _PosixPtyBackend:
         """Forcefully terminate the process."""
         if self._process.isalive():
             self._process.close(force=True)
+
+
+class _SocketPtyBackend:
+    """
+    POSIX PTY backend that connects to a running MuxServer via Unix Domain Socket.
+
+    Exposes the identical interface as _PosixPtyBackend so TerminalSession
+    requires zero changes. The MuxServer owns the real bash PTY; this class
+    is purely a client that sends keystrokes and receives VT100 byte output.
+
+    On connect, the MuxServer sends exactly one JSON handshake line:
+        {"pid": <int>, "cols": <int>, "rows": <int>}\n
+    We consume that line to learn the bash PID (used by _read_until for
+    /proc/<pid>/cwd lookups). All subsequent bytes on the socket are raw
+    PTY output.
+    """
+
+    def __init__(self, socket_path: str, cols: int, rows: int):
+        # Keep a reference to the socket object on self so Python's garbage
+        # collector never closes the underlying file descriptor while pexpect
+        # is still using it.
+        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._sock.connect(socket_path)
+
+        # Read the handshake line (terminated by '\n') to extract bash PID.
+        # We use a raw blocking read here because the handshake is tiny and
+        # arrives immediately after connect.
+        raw = b""
+        while b"\n" not in raw:
+            chunk = self._sock.recv(4096)
+            if not chunk:
+                raise ConnectionError(
+                    f"MuxServer at {socket_path} closed the connection "
+                    "before sending the handshake."
+                )
+            raw += chunk
+
+        handshake_line, _remainder = raw.split(b"\n", 1)
+        handshake = json.loads(handshake_line.decode())
+        self.pid: int = handshake["pid"]
+
+        # Wrap the socket's file descriptor in pexpect.fdpexpect so the
+        # rest of TerminalSession can use the identical sendline/expect API.
+        # We do NOT call setwinsize() here — that is meaningless on a socket
+        # fd. Window size is managed by MuxServer directly on master_fd.
+        self._process = pexpect.fdpexpect.fdspawn(
+            self._sock.fileno(),
+            encoding="utf-8",
+            timeout=30,
+            maxread=65536,
+        )
+
+    def sendline(self, text: str):
+        """Send text followed by a newline (for shell command submission)."""
+        self._process.sendline(text)
+
+    def send(self, text: str):
+        """Send raw bytes with no newline appended (for control sequences, TUI keys)."""
+        self._process.send(text)
+
+    def expect(self, pattern: re.Pattern, timeout: int):
+        """Search for pattern in output. Returns (before_text, match) or raises."""
+        try:
+            self._process.expect(pattern, timeout=timeout)
+            return self._process.before, self._process.match
+        except pexpect.TIMEOUT:
+            return self._process.before, None
+        except pexpect.EOF:
+            return self._process.before, "EOF"
+
+    def read_nonblocking(self, size: int = 65536, timeout: float = 0.5) -> str:
+        try:
+            return self._process.read_nonblocking(size=size, timeout=timeout)
+        except (pexpect.TIMEOUT, pexpect.EOF):
+            return ""
+
+    def is_alive(self) -> bool:
+        """Returns True if the underlying socket is still connected."""
+        try:
+            # MSG_DONTWAIT + MSG_PEEK: returns 0 bytes on clean close, raises on error.
+            data = self._sock.recv(1, socket.MSG_DONTWAIT | socket.MSG_PEEK)
+            return len(data) > 0
+        except BlockingIOError:
+            return True   # No data ready, but socket is alive
+        except OSError:
+            return False
+
+    def terminate(self):
+        """Disconnect from the MuxServer and stop it if we own it."""
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+        # If this backend started the MuxServer (always true on POSIX), stop
+        # it cleanly so bash is terminated and the socket file is removed.
+        mux = getattr(self, "_mux_server", None)
+        if mux is not None:
+            mux.stop()
 
 
 class _WindowsPtyBackend:
@@ -203,12 +304,61 @@ class _WindowsPtyBackend:
             pass
 
 
-def _create_backend(work_dir: str, cols: int, rows: int, shell: str = None):
-    """Factory: returns the correct PTY backend for the current OS."""
+def _create_backend(session_id: str, work_dir: str, cols: int, rows: int, shell: str = None):
+    """
+    Factory: return the correct PTY backend for the current OS.
+
+    On POSIX (Linux / macOS):
+        Always starts a MuxServer daemon thread for this session. The MuxServer
+        owns the real bash PTY and exposes it via a session-scoped Unix Domain
+        Socket. _SocketPtyBackend connects to that socket so pexpect talks to
+        bash through the multiplexer. Any additional client (xterm.js, VS Code)
+        can connect to the same socket and share the exact same session.
+
+        Socket path per session: /tmp/codepilot_<session_id>.sock
+
+    On Windows:
+        ConPTY via pywinpty is used directly. Multiplexing is not supported.
+    """
+    import threading
+    from ..core.multiplexer import MuxServer
+
     shell = shell or DEFAULT_SHELL
     if IS_WINDOWS:
         return _WindowsPtyBackend(work_dir, cols, rows, shell=shell)
-    return _PosixPtyBackend(work_dir, cols, rows, shell=shell)
+
+    # Each session gets its own MuxServer and socket path so multiple
+    # concurrent terminal sessions remain fully independent.
+    socket_path = f"/tmp/codepilot_{session_id}.sock"
+
+    server = MuxServer(
+        socket_path=socket_path,
+        cols=cols,
+        rows=rows,
+        work_dir=work_dir,
+    )
+    server.start()  # forks bash, binds socket — non-blocking
+
+    # serve() blocks in the selector event loop, so we run it in a daemon
+    # thread. Daemon threads are killed automatically when the main process
+    # exits, so no explicit cleanup is needed for normal shutdown.
+    mux_thread = threading.Thread(
+        target=server.serve,
+        name=f"codepilot-mux-{session_id}",
+        daemon=True,
+    )
+    mux_thread.start()
+
+    # Give the event loop one tick to reach sel.select() and be ready to
+    # accept the first client connection.
+    time.sleep(0.1)
+
+    backend = _SocketPtyBackend(socket_path, cols, rows)
+    # Store server reference on the backend so:
+    # (a) GC does not destroy the server while the backend is alive.
+    # (b) terminate() can call server.stop() for a clean shutdown.
+    backend._mux_server = server
+    return backend
 
 
 # ======================================================================
@@ -229,7 +379,7 @@ class TerminalSession:
             rf'{re.escape(self._marker)}_CWD_([^\r\n]*)'
         )
 
-        self._backend = _create_backend(work_dir, DEFAULT_COLS, DEFAULT_ROWS, shell=self.shell)
+        self._backend = _create_backend(self.session_id, work_dir, DEFAULT_COLS, DEFAULT_ROWS, shell=self.shell)
         self.pid = self._backend.pid
 
         # Virtual terminal emulator — one per session, reset before each command.
