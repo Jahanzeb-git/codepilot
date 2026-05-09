@@ -368,9 +368,10 @@ def _create_backend(session_id: str, work_dir: str, cols: int, rows: int, shell:
 class TerminalSession:
     """A single persistent terminal process managed via the OS-appropriate PTY backend."""
 
-    def __init__(self, session_id: str, work_dir: str, shell: str = None):
+    def __init__(self, session_id: str, work_dir: str, shell: str = None, on_user_command=None):
         self.session_id = session_id
         self.shell = shell or DEFAULT_SHELL
+        self.on_user_command = on_user_command
         self._marker = f"__CP_{uuid.uuid4().hex[:8]}__"
         self._rc_pattern = re.compile(
             rf'{re.escape(self._marker)}_RC_(\d+)'
@@ -378,10 +379,10 @@ class TerminalSession:
         self._cwd_pattern = re.compile(
             rf'{re.escape(self._marker)}_CWD_([^\r\n]*)'
         )
+        self.agent_active_command = False
 
         self._backend = _create_backend(self.session_id, work_dir, DEFAULT_COLS, DEFAULT_ROWS, shell=self.shell)
         self.pid = self._backend.pid
-
         # Virtual terminal emulator — one per session, reset before each command.
         self._screen: VirtualScreen = VirtualScreen(cols=DEFAULT_COLS, rows=DEFAULT_ROWS)
 
@@ -394,30 +395,48 @@ class TerminalSession:
         self.last_used: float = time.time()
         self.cwd: str = work_dir
         self._bytes_fed: int = 0   # total raw chars fed to VT screen this command
+        
+        import threading
+        self._bg_thread = threading.Thread(target=self._bg_listener, daemon=True)
+        self._bg_thread.start()
+
+    def _bg_listener(self):
+        """Background thread to read socket when agent is idle and detect human commands."""
+        import time
+        while True:
+            if not self._backend.is_alive():
+                break
+            if not getattr(self, 'agent_active_command', False) and "bash" in self.shell:
+                # Read chunks directly into screen
+                chunk = self._backend.read_nonblocking(size=65536, timeout=0.1)
+                if chunk:
+                    self._screen.feed(chunk)
+                    if getattr(self._screen, 'command_finished', False):
+                        self.cwd = self._screen.cwd or self.cwd
+                        self._screen.command_finished = False
+                        if self.on_user_command:
+                            output = self._screen.delta_snapshot()
+                            self.on_user_command(self.session_id, output)
+            time.sleep(0.05)
 
     def _build_full_cmd(self, command: str) -> str:
         """Wrap user command with RC/CWD markers appropriate for the shell type."""
-        if self.shell == "powershell":
+        if "bash" in self.shell:
+            # We don't need wrappers for bash anymore! OSC 633 handles it.
+            return command
+        elif self.shell == "powershell":
             return (
                 f'Write-Host "{self._marker}_START"; '
                 f'{command}; $__cp_rc=$LASTEXITCODE; '
                 f'Write-Host "{self._marker}_CWD_$(Get-Location)"; '
                 f'Write-Host "{self._marker}_RC_$__cp_rc"'
             )
-        elif self.shell == "cmd":
+        else:
             return (
                 f'echo {self._marker}_START& '
                 f'{command} & set __cp_rc=%ERRORLEVEL% & '
                 f'echo {self._marker}_CWD_%CD% & '
                 f'echo {self._marker}_RC_%__cp_rc%'
-            )
-        else:
-            # bash (POSIX default)
-            return (
-                f'printf "{self._marker}_START\\n"; '
-                f'{command}; __cp_rc=$?; '
-                f'printf "{self._marker}_CWD_%s\\n" "$PWD"; '
-                f'echo "{self._marker}_RC_${{__cp_rc}}"'
             )
 
     def run(self, command: str, timeout: int):
@@ -428,6 +447,7 @@ class TerminalSession:
         self.status = "running"
         self.return_code = None
         self.last_used = time.time()
+        self.agent_active_command = True
 
         # Reset the virtual screen so previous command output doesn't bleed in
         self._screen.reset()
@@ -436,14 +456,17 @@ class TerminalSession:
         full_cmd = self._build_full_cmd(command)
         self._backend.sendline(full_cmd)
 
-        # Discard the PTY command echo. Wait for the START marker and ignore
-        # everything before it. This is perfectly robust against line-wrapping.
-        start_pat = re.compile(rf"{re.escape(self._marker)}_START\s*\r?\n")
-        try:
-            self._backend.expect(start_pat, timeout=2)
-            # Reset _bytes_fed since we effectively flushed the buffer
-            self._bytes_fed = 0
-        except Exception:
+        if "bash" not in self.shell:
+            # Discard the PTY command echo. Wait for the START marker and ignore
+            # everything before it.
+            start_pat = re.compile(rf"{re.escape(self._marker)}_START\s*\r?\n")
+            try:
+                self._backend.expect(start_pat, timeout=2)
+                self._bytes_fed = 0
+            except Exception:
+                pass
+        else:
+            # Wait a tiny bit for the command echo to start if needed, but VirtualScreen handles it
             pass
 
         output, completed, rc = self._read_until(timeout, delta=False)
@@ -458,6 +481,7 @@ class TerminalSession:
         if completed:
             self.status = "completed"
             self.return_code = rc
+            self.agent_active_command = False
         return output, completed, rc
 
     def read_new(self, timeout: int):
@@ -484,6 +508,7 @@ class TerminalSession:
         if completed:
             self.status = "completed"
             self.return_code = rc
+            self.agent_active_command = False
         return delta, completed, rc
 
     def send_text(self, text: str, timeout: int):
@@ -536,6 +561,30 @@ class TerminalSession:
             text = self._screen.delta_snapshot() if delta else self._screen.snapshot()
             return self._extract_cwd_marker(text)
 
+        if "bash" in self.shell:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                chunk = self._backend.read_nonblocking(size=65536, timeout=0.1)
+                if chunk:
+                    self._screen.feed(chunk)
+                    if self._screen.command_finished:
+                        self.cwd = self._screen.cwd or self.cwd
+                        return _render(), True, self._screen.osc_633_d_rc
+                else:
+                    if not self._backend.is_alive():
+                        return _render(), True, -1
+                    time.sleep(0.05)
+            
+            # Timeout
+            try:
+                proc_cwd = os.readlink(f"/proc/{self._backend.pid}/cwd")
+                if proc_cwd:
+                    self.cwd = proc_cwd
+            except (OSError, AttributeError):
+                pass
+            return _render(), False, None
+
+        # Windows/CMD legacy expect fallback
         before, match = self._backend.expect(self._rc_pattern, timeout)
 
         if before:
@@ -546,24 +595,19 @@ class TerminalSession:
                 self._screen.feed(new_bytes)
 
         if match is None:
-            # Timeout — the RC/CWD marker was never printed (command still running).
-            # Read the bash process's real CWD directly from the OS so we always
-            # report an accurate directory even for long-running commands like
-            # `docker compose up` where the shell already cd'd before forking.
+            # Timeout
             try:
                 proc_cwd = os.readlink(f"/proc/{self._backend.pid}/cwd")
                 if proc_cwd:
                     self.cwd = proc_cwd
             except (OSError, AttributeError):
-                pass  # /proc not available (macOS/Windows) — keep existing cwd
+                pass
             output = _render()
             return output, False, None
         elif match == "EOF":
-            # Process exited
             output = _render()
             return output, True, -1
         else:
-            # RC marker found
             output = _render()
             rc = int(match.group(1))
             return output, True, rc
@@ -591,6 +635,94 @@ class TerminalManager:
         self._session_order: List[str] = []          # most recent first
         self._output_history: Dict[tuple, List[str]] = {}  # (sid, cmd_tag) -> [result strings]
 
+        self._control_socket_path = "/tmp/codepilot_control.sock"
+        self._control_clients = []
+        self._start_control_server()
+
+    def _start_control_server(self):
+        import threading
+        import json
+
+        def _serve():
+            try:
+                os.unlink(self._control_socket_path)
+            except OSError:
+                pass
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(self._control_socket_path)
+            os.chmod(self._control_socket_path, 0o600)
+            server.listen(5)
+            
+            while True:
+                try:
+                    conn, _ = server.accept()
+                    self._control_clients.append(conn)
+                    
+                    # Immediately notify the new client about all existing terminals!
+                    # This prevents race conditions if the UI connects *after* Python started.
+                    for sid in list(self._sessions.keys()):
+                        try:
+                            conn.sendall((json.dumps({
+                                "event": "terminal_created",
+                                "session_id": sid,
+                                "socket_path": f"/tmp/codepilot_{sid}.sock"
+                            }) + "\n").encode('utf-8'))
+                        except Exception:
+                            pass
+                            
+                    def _handle_client(c):
+                        try:
+                            while True:
+                                data = c.recv(4096)
+                                if not data:
+                                    break
+                                try:
+                                    event = json.loads(data.decode('utf-8'))
+                                    if event.get("event") == "human_terminal_created":
+                                        sid = event.get("session_id")
+                                        if sid and sid not in self._sessions:
+                                            work_dir = self.runtime.config.runtime.work_dir
+                                            session = TerminalSession(sid, work_dir)
+                                            session.owner = "human"
+                                            self._sessions[sid] = session
+                                            self._session_order.insert(0, sid)
+                                    elif event.get("event") == "resize":
+                                        sid = event.get("session_id")
+                                        cols = event.get("cols", DEFAULT_COLS)
+                                        rows = event.get("rows", DEFAULT_ROWS)
+                                        session = self._sessions.get(sid)
+                                        if session and hasattr(session._backend, "_mux_server"):
+                                            session._backend._mux_server.set_window_size(cols, rows)
+                                            session._screen.resize(cols, rows)
+                                except json.JSONDecodeError:
+                                    pass
+                        except Exception:
+                            pass
+                        finally:
+                            if c in self._control_clients:
+                                self._control_clients.remove(c)
+                            try:
+                                c.close()
+                            except OSError:
+                                pass
+                                
+                    threading.Thread(target=_handle_client, args=(conn,), daemon=True).start()
+                except Exception:
+                    pass
+                        
+        t = threading.Thread(target=_serve, daemon=True)
+        t.start()
+
+    def _broadcast_control_event(self, event_data: dict):
+        import json
+        data = (json.dumps(event_data) + "\n").encode('utf-8')
+        for c in self._control_clients[:]:
+            try:
+                c.sendall(data)
+            except Exception:
+                if c in self._control_clients:
+                    self._control_clients.remove(c)
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -599,9 +731,20 @@ class TerminalManager:
         """Start the default 'main' terminal session."""
         work_dir = self.runtime.config.runtime.work_dir
         try:
-            session = TerminalSession("main", work_dir)
+            def _on_user(sid, output):
+                msg = f"[Environment Detection Notification] User just ran a command in terminal {sid}:\n{output}"
+                self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="execute", result=msg)
+                self.runtime._append_execution(msg)
+                
+            session = TerminalSession("main", work_dir, on_user_command=_on_user)
+            session.owner = "agent"
             self._sessions["main"] = session
             self._session_order.insert(0, "main")
+            self._broadcast_control_event({
+                "event": "terminal_created",
+                "session_id": "main",
+                "socket_path": "/tmp/codepilot_main.sock"
+            })
         except Exception as e:
             self.runtime._append_execution(
                 f"[terminal] Warning: Could not start default terminal: {e}"
@@ -627,8 +770,9 @@ class TerminalManager:
             session = self._sessions.get(sid)
             if session and session.is_alive():
                 tag = " (most recent)" if i == 0 else ""
+                owner_tag = " [Created by User]" if getattr(session, "owner", "agent") == "human" else ""
                 lines.append(
-                    f'  session_id="{sid}" | shell: {session.shell} | PID: {session.pid} | status: {session.status} | cwd: {session.cwd}{tag}'
+                    f'  session_id="{sid}" | shell: {session.shell} | PID: {session.pid} | status: {session.status} | cwd: {session.cwd}{owner_tag}{tag}'
                 )
         return "\n".join(lines) if lines else "No terminal sessions active."
 
@@ -709,9 +853,20 @@ class TerminalManager:
                 )
                 return result
             try:
+                def _on_user(sid, output):
+                    msg = f"[Environment Detection Notification] User just ran a command in terminal {sid}:\n{output}"
+                    self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="execute", result=msg)
+                    self.runtime._append_execution(msg)
+                    
                 work_dir = self.runtime.config.runtime.work_dir
-                session = TerminalSession(session_id, work_dir, shell=shell)
+                session = TerminalSession(session_id, work_dir, shell=shell, on_user_command=_on_user)
+                session.owner = "agent"
                 self._sessions[session_id] = session
+                self._broadcast_control_event({
+                    "event": "terminal_created",
+                    "session_id": session_id,
+                    "socket_path": f"/tmp/codepilot_{session_id}.sock"
+                })
             except Exception as e:
                 result = f"[terminal:{session_id}] Error creating terminal: {e}"
                 self.runtime._append_execution(result)

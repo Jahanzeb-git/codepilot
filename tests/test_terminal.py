@@ -54,68 +54,38 @@ def main() -> None:
 
     result = manager.execute(
         session_id="main",
-        command="""python3 -c 'name=input("What is your name? "); print(f"Hello, {name}")'""",
-        timeout=5,
+        command="""neofetch""",
+        timeout=3,
     )
     print(result)
     time.sleep(1)
     
-    result1 = manager.send_input("main", "Jahanzeb Ahmed\n", 1)
+    ##print("\n")
+    #print(result1)
+    #print("\n")
+    #result2 = manager.read_output("main", 1)
+    #print(result2)
+    #print("\n")
+    #time.sleep(1)
+    #result3 = manager.execute("main", "", 5)
+    #print(result3)
+    #print("\n")
+    #time.sleep(1)
+    #result4 = manager.execute("main", "cd ~/python/drills && python3 day9_drills.py", 5)
+    #print(result4)
     print("\n")
-    print(result1)
-    print("\n")
-    result2 = manager.read_output("main", 1)
-    print(result2)
-    print("\n")
-    result3 = manager.execute("main", "cd ~ && cat example.rs", 2)
-    print(result3)
-    print("\n")
-    result4 = manager.execute("main", "cd ~/python/drills && python3 day9_drills.py", 5)
-    print(result4)
-    print("\n")
+    print("✅ All automated tests finished.")
+    print("⏳ Keeping the backend alive for 10 minutes so you can play with Code-Server...")
+    print("   → Try clicking the '+' button in Code-Server's terminal panel and select 'CodePilot Terminal'!")
+    print("   → Any commands you type will be piped to Python!")
+    
+    try:
+        time.sleep(1000)
+    except KeyboardInterrupt:
+        print("\nShutting down.")
+    finally:
+        manager.cleanup_all()
 
-    result5 = manager.execute("main", "sudo apt update", 5)
-    print(result5)
-    print("\n")
-    result6 = manager.send_input("main", "ubuntu@2002\n", 60)
-    print(result6)
-    print("\n")
-    result7 = manager.execute("main", "cd ~/omniroot-agent && docker compose up", 20)
-    print(result7)
-    print("\n")
-    result8 = manager.send_input("main", "\x03", 20)
-    print(result8)
-    print("\n")
-    result9 = manager.execute("main", "ls /nonexistent/path", 1)
-    print(result9)
-    print("\n")
-    result10 = manager.execute("main", "nonexist_command", 1)
-    print(result10)
-    print("\n")
-    result11 = manager.execute("main", "python3 -c 'import sys; sys.exit(42)'", 2)
-    print(result11)
-    print("\n")
-    result12 = manager.execute("main", "python3", 3)
-    print(result12)
-    print("\n")
-    result13 = manager.send_input("main", "x = 42\n", 2)
-    print(result13)
-    print("\n")
-    result14 = manager.send_input("main", "print(x * 2)\n", 2)
-    print(result14)
-    print("\n")
-    result15 = manager.send_input("main", "\x04", 2)
-    print(result15)
-    print("\n")
-    result16 = manager.execute("session_b", "export MYVAR='hello world' && echo $MYVAR", 2, True)
-    print(result16)
-    print("\n")
-    result17 = manager.execute("main", "echo $MYVAR", 1)
-    print(result17)
-    print("\n")
-
-    manager.cleanup_all()
-
-
+    
 if __name__ == "__main__":
     main()

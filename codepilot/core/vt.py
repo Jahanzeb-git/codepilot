@@ -100,6 +100,14 @@ class VirtualScreen:
         self._param_buf: str = ""
         self._inter_buf: str = ""
 
+        # OSC 633 Shell Integration State
+        self.osc_633_a_count: int = 0
+        self.osc_633_b_count: int = 0
+        self.osc_633_c_count: int = 0
+        self.osc_633_d_rc: Optional[int] = None
+        self.cwd: Optional[str] = None
+        self.command_finished: bool = False
+
         # Delta watermark (index into self._scrollback)
         self._delta_mark: int = 0
 
@@ -108,6 +116,9 @@ class VirtualScreen:
     def reset(self) -> None:
         """Clear all terminal state — call before each new shell command."""
         with self._lock:
+            # Preserve OSC state if we just reset screen, or maybe just reset standard terminal states.
+            # Actually, `reset()` is called before each command in `TerminalSession`. 
+            # We must clear OSC command_finished so we can wait for the new one.
             self._init_state()
 
     def feed(self, text: str) -> None:
@@ -143,6 +154,31 @@ class VirtualScreen:
         """Advance the delta watermark to the current position (skip pending lines)."""
         with self._lock:
             self._delta_mark = len(self._scrollback)
+
+    def resize(self, cols: int, rows: int) -> None:
+        """Dynamically resize the virtual screen grid."""
+        with self._lock:
+            if cols == self.cols and rows == self.rows:
+                return
+            new_grid = [[" "] * cols for _ in range(rows)]
+            for r in range(min(self.rows, rows)):
+                for c in range(min(self.cols, cols)):
+                    new_grid[r][c] = self._grid[r][c]
+            self._grid = new_grid
+            self.cols = cols
+            self.rows = rows
+            self._row = min(self._row, rows - 1)
+            self._col = min(self._col, cols - 1)
+            self._scroll_top = 0
+            self._scroll_bot = rows - 1
+            if self._alt_grid:
+                new_alt = [[" "] * cols for _ in range(rows)]
+                alt_rows = len(self._alt_grid)
+                alt_cols = len(self._alt_grid[0]) if alt_rows > 0 else 0
+                for r in range(min(alt_rows, rows)):
+                    for c in range(min(alt_cols, cols)):
+                        new_alt[r][c] = self._alt_grid[r][c]
+                self._alt_grid = new_alt
 
     # ── rendering ─────────────────────────────────────────────────────────────
 
@@ -335,10 +371,13 @@ class VirtualScreen:
         # ── OSC ─────────────────────────────────────────────────────────────
         if state == _OSC:
             if ch == "\x07":                            # BEL terminates OSC
+                self._dispatch_osc(self._param_buf)
                 self._state = _NORMAL
             elif ch == "\x1b":
+                self._dispatch_osc(self._param_buf)
                 self._state = _ESC                      # will consume ST backslash
-            # else: accumulate and ignore
+            else:
+                self._param_buf += ch
             return
 
         # ── IGNORE (DCS / PM / APC) ──────────────────────────────────────────
@@ -491,6 +530,27 @@ class VirtualScreen:
             pass                                        # colours/attrs ignored cleanly
 
         # Any unrecognised final byte: silently ignored.
+
+    def _dispatch_osc(self, buf: str) -> None:
+        """Handle Operating System Command sequences."""
+        if buf.startswith("633;"):
+            parts = buf.split(";")
+            if len(parts) >= 2:
+                cmd = parts[1]
+                if cmd == "A":
+                    self.osc_633_a_count += 1
+                elif cmd == "B":
+                    self.osc_633_b_count += 1
+                elif cmd == "C":
+                    self.osc_633_c_count += 1
+                elif cmd == "D":
+                    self.osc_633_d_rc = int(parts[2]) if len(parts) > 2 and parts[2].lstrip('-').isdigit() else 0
+                    self.command_finished = True
+                elif cmd == "P":
+                    for prop in parts[2:]:
+                        if prop.startswith("Cwd="):
+                            self.cwd = prop[4:]
+        # Other OSC sequences (like terminal title) are ignored.
 
     def _dispatch_csi_private(self, buf: str, final: str) -> None:
         """Handle CSI ? … sequences (DEC private modes)."""
