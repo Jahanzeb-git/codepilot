@@ -1,256 +1,191 @@
-import { useEffect, useMemo, useState } from "react";
+import { useState, useEffect } from "react";
+import { BookOpen, Moon, Sun, Github, Menu, X, ChevronRight, Info } from "lucide-react";
+import { navGroups, allPages, findNav, type PageId } from "./pages";
 import {
-  BookOpen,
-  ChevronRight,
-  Github,
-  Menu,
-  Moon,
-  Search,
-  Sun,
-  X,
-} from "lucide-react";
-import { featureCards, navGroups, sections, stats } from "./content";
+  PageIntroduction,
+  PageInstallation,
+  PageQuickStart,
+  PageAgentFile,
+  PageHowItWorks,
+  PageBasicUsage,
+  PageStreaming,
+  PageMultiTurn,
+  PageShellTools,
+  PageCompletionBlock,
+  PageChatMode,
+  PageWorkspaceChanges,
+  PageSessionPersistence,
+  PageContextMemory,
+  PageResumingSession,
+  PageResettingSession,
+  PageHooks,
+  PagePermissionGating,
+  PageMidTaskInjection,
+  PageMultiOperation,
+  PageCustomTools,
+  PageAborting,
+  PageCLIPattern,
+  PageWebServer,
+  PageAPIReference,
+} from "./PageContent";
+import "./styles.css";
 
 type Theme = "light" | "dark";
 
 function getInitialTheme(): Theme {
   if (typeof window === "undefined") return "light";
-  const saved = window.localStorage.getItem("codepilot-theme");
+  const saved = localStorage.getItem("cp-theme");
   if (saved === "light" || saved === "dark") return saved;
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
+function getInitialPage(): PageId {
+  const hash = window.location.hash.slice(1) as PageId;
+  return allPages.includes(hash) ? hash : "introduction";
+}
+
 export function App() {
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
-  const [activeId, setActiveId] = useState(sections[0].id);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const activeSection = useMemo(
-    () => sections.find((section) => section.id === activeId) ?? sections[0],
-    [activeId],
-  );
+  const [page, setPage] = useState<PageId>(getInitialPage);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
-    window.localStorage.setItem("codepilot-theme", theme);
+    localStorage.setItem("cp-theme", theme);
   }, [theme]);
 
   useEffect(() => {
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const visible = entries
-          .filter((entry) => entry.isIntersecting)
-          .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
-        if (visible?.target.id) setActiveId(visible.target.id);
-      },
-      { rootMargin: "-20% 0px -65% 0px", threshold: [0.1, 0.35, 0.7] },
-    );
+    window.location.hash = page;
+    window.scrollTo({ top: 0, behavior: "instant" });
+    setSidebarOpen(false);
+  }, [page]);
 
-    sections.forEach((section) => {
-      const node = document.getElementById(section.id);
-      if (node) observer.observe(node);
-    });
-
-    return () => observer.disconnect();
+  useEffect(() => {
+    const onHash = () => {
+      const h = window.location.hash.slice(1) as PageId;
+      if (allPages.includes(h)) setPage(h);
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
-  const closeMenu = () => setMenuOpen(false);
+  const nav = findNav(page);
+
+  const pageComponents: Record<PageId, JSX.Element> = {
+    introduction: <PageIntroduction nav={setPage} />,
+    installation: <PageInstallation />,
+    "quick-start": <PageQuickStart />,
+    agentfile: <PageAgentFile />,
+    "how-it-works": <PageHowItWorks />,
+    "basic-usage": <PageBasicUsage />,
+    streaming: <PageStreaming />,
+    "multi-turn": <PageMultiTurn />,
+    "shell-tools": <PageShellTools />,
+    "completion-block": <PageCompletionBlock />,
+    "chat-mode": <PageChatMode />,
+    "workspace-changes": <PageWorkspaceChanges />,
+    "session-persistence": <PageSessionPersistence />,
+    "context-memory": <PageContextMemory />,
+    "resuming-session": <PageResumingSession />,
+    "resetting-session": <PageResettingSession />,
+    hooks: <PageHooks />,
+    "permission-gating": <PagePermissionGating />,
+    "mid-task-injection": <PageMidTaskInjection />,
+    "multi-operation": <PageMultiOperation />,
+    "custom-tools": <PageCustomTools />,
+    aborting: <PageAborting />,
+    "cli-pattern": <PageCLIPattern />,
+    "web-server": <PageWebServer />,
+    "api-reference": <PageAPIReference />,
+  };
 
   return (
-    <div className="site-shell">
-      <Header
-        theme={theme}
-        menuOpen={menuOpen}
-        onMenu={() => setMenuOpen((open) => !open)}
-        onTheme={() => setTheme((value) => (value === "dark" ? "light" : "dark"))}
-      />
+    <div className="site">
+      <header className="topbar">
+        <button
+          className="icon-btn mobile-menu-btn"
+          onClick={() => setSidebarOpen((o) => !o)}
+          aria-label="Toggle sidebar"
+        >
+          {sidebarOpen ? <X size={18} /> : <Menu size={18} />}
+        </button>
+
+        <a
+          className="brand"
+          href="#introduction"
+          onClick={(e) => { e.preventDefault(); setPage("introduction"); }}
+        >
+          <span className="brand-icon">
+            <BookOpen size={16} />
+          </span>
+          CodePilot
+        </a>
+
+        <nav className="top-nav">
+          <button className={page === "introduction" ? "active" : ""} onClick={() => setPage("introduction")}>Docs</button>
+          <button className={page === "how-it-works" ? "active" : ""} onClick={() => setPage("how-it-works")}>How It Works</button>
+          <button className={page === "api-reference" ? "active" : ""} onClick={() => setPage("api-reference")}>API Reference</button>
+        </nav>
+
+        <div className="top-actions">
+          <a
+            className="icon-btn"
+            href="https://github.com/Jahanzeb-git/codepilot"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="GitHub"
+          >
+            <Github size={18} />
+          </a>
+          <button
+            className="icon-btn"
+            onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+            aria-label="Toggle theme"
+          >
+            {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
+          </button>
+        </div>
+      </header>
 
       <div className="layout">
-        <aside className={`sidebar ${menuOpen ? "is-open" : ""}`}>
-          <div className="sidebar-top">
-            <span className="sidebar-label">Documentation</span>
-            <button className="icon-button mobile-only" onClick={closeMenu} aria-label="Close menu">
-              <X size={18} />
-            </button>
-          </div>
-          <nav aria-label="Documentation">
-            {navGroups.map((group) => (
-              <div className="nav-group" key={group.title}>
-                <p>{group.title}</p>
-                {group.items.map((item) => (
-                  <a
-                    className={item.id === activeId ? "active" : ""}
-                    href={`#${item.id}`}
-                    key={item.id}
-                    onClick={closeMenu}
-                  >
-                    {item.label}
-                  </a>
-                ))}
-              </div>
-            ))}
-          </nav>
+        {/* Overlay for mobile */}
+        <div
+          className={`sidebar-overlay ${sidebarOpen ? "open" : ""}`}
+          onClick={() => setSidebarOpen(false)}
+        />
+
+        <aside className={`sidebar ${sidebarOpen ? "open" : ""}`}>
+          {navGroups.map((group) => (
+            <div className="sidebar-section" key={group.title}>
+              <div className="sidebar-label">{group.title}</div>
+              {group.items.map((item) => (
+                <button
+                  key={item.id}
+                  className={`sidebar-link ${page === item.id ? "active" : ""}`}
+                  onClick={() => setPage(item.id)}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          ))}
         </aside>
 
-        <main className="content">
-          <Hero />
-          <section className="quick-grid" aria-label="Highlights">
-            {featureCards.map((card) => {
-              const Icon = card.icon;
-              return (
-                <article className="feature-card" key={card.title}>
-                  <Icon size={20} />
-                  <h3>{card.title}</h3>
-                  <p>{card.description}</p>
-                </article>
-              );
-            })}
-          </section>
-
-          <div className="doc-flow">
-            {sections.map((section) => {
-              const Icon = section.icon;
-              return (
-                <section className="doc-section" id={section.id} key={section.id}>
-                  <div className="section-heading">
-                    <div className="section-icon">
-                      <Icon size={18} />
-                    </div>
-                    <span>{section.eyebrow}</span>
-                  </div>
-                  <h2>{section.title}</h2>
-                  <p>{section.description}</p>
-                  {section.points ? (
-                    <ul className="point-list">
-                      {section.points.map((point) => (
-                        <li key={point}>{point}</li>
-                      ))}
-                    </ul>
-                  ) : null}
-                  {section.code ? <CodeBlock code={section.code} /> : null}
-                </section>
-              );
-            })}
+        <main className="main">
+          <div className="page-breadcrumb">
+            <span>Docs</span>
+            <ChevronRight size={14} />
+            <span>{nav.group}</span>
+            <ChevronRight size={14} />
+            <span style={{ color: "var(--text)" }}>{nav.label}</span>
           </div>
+
+          {pageComponents[page] ?? <PageIntroduction nav={setPage} />}
         </main>
-
-        <aside className="toc" aria-label="On this page">
-          <p>On This Page</p>
-          <a href={`#${activeSection.id}`}>{activeSection.eyebrow ?? activeSection.title}</a>
-          <div className="toc-card">
-            <span>Current section</span>
-            <strong>{activeSection.title}</strong>
-          </div>
-        </aside>
       </div>
     </div>
   );
 }
 
-function Header({
-  theme,
-  menuOpen,
-  onMenu,
-  onTheme,
-}: {
-  theme: Theme;
-  menuOpen: boolean;
-  onMenu: () => void;
-  onTheme: () => void;
-}) {
-  return (
-    <header className="topbar">
-      <a className="brand" href="#introduction" aria-label="CodePilot home">
-        <span className="brand-mark">
-          <BookOpen size={20} />
-        </span>
-        <span>CodePilot</span>
-      </a>
-
-      <nav className="top-links" aria-label="Primary">
-        <a href="#quick-start">Docs</a>
-        <a href="#runtime">Runtime</a>
-        <a href="#microvms">Architecture</a>
-        <a href="#api">Reference</a>
-      </nav>
-
-      <div className="top-actions">
-        <label className="search-box">
-          <Search size={16} />
-          <span>Search docs...</span>
-          <kbd>/</kbd>
-        </label>
-        <a
-          className="icon-button"
-          href="https://github.com/Jahanzeb-git/codepilot"
-          aria-label="Open GitHub repository"
-        >
-          <Github size={18} />
-        </a>
-        <button className="icon-button" onClick={onTheme} aria-label="Toggle theme">
-          {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
-        </button>
-        <button className="icon-button mobile-only" onClick={onMenu} aria-label="Open menu">
-          {menuOpen ? <X size={18} /> : <Menu size={18} />}
-        </button>
-      </div>
-    </header>
-  );
-}
-
-function Hero() {
-  return (
-    <section className="hero" id="top">
-      <div className="breadcrumb">
-        <span>Docs</span>
-        <ChevronRight size={14} />
-        <span>Agentic Runtime</span>
-      </div>
-      <div className="hero-grid">
-        <div>
-          <p className="eyebrow">CodePilot Documentation</p>
-          <h1>Build coding agents that can actually work inside real projects.</h1>
-          <p className="hero-copy">
-            A quiet, fast documentation home for the CodePilot library: runtime concepts,
-            tool execution, terminal multiplexing, persistence, and hosted workspace architecture.
-          </p>
-          <div className="hero-actions">
-            <a className="primary-action" href="#quick-start">
-              Quick Start
-            </a>
-            <a className="secondary-action" href="#microvms">
-              View Architecture
-            </a>
-          </div>
-        </div>
-        <div className="hero-panel">
-          <div className="panel-dots">
-            <span />
-            <span />
-            <span />
-          </div>
-          <CodeBlock
-            code={
-              "from codepilot import AsyncRuntime\n\nruntime = AsyncRuntime('agent.yaml', stream=True)\nawait runtime.run('Fix the failing API test.')"
-            }
-          />
-          <div className="stats-grid">
-            {stats.map((stat) => (
-              <div key={stat.label}>
-                <span>{stat.label}</span>
-                <strong>{stat.value}</strong>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function CodeBlock({ code }: { code: string }) {
-  return (
-    <pre className="code-block">
-      <code>{code}</code>
-    </pre>
-  );
-}
+// Re-export helpers used by pages
+export { Info };
