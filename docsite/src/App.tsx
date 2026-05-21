@@ -1,32 +1,13 @@
 import { useState, useEffect } from "react";
-import { BookOpen, Moon, Sun, Github, Menu, X, ChevronRight, Info } from "lucide-react";
+import { Moon, Sun, Github, Menu, X, ChevronRight, BookOpen, ExternalLink } from "lucide-react";
 import { navGroups, allPages, findNav, type PageId } from "./pages";
 import {
-  PageIntroduction,
-  PageInstallation,
-  PageQuickStart,
-  PageAgentFile,
-  PageHowItWorks,
-  PageBasicUsage,
-  PageStreaming,
-  PageMultiTurn,
-  PageShellTools,
-  PageCompletionBlock,
-  PageChatMode,
-  PageWorkspaceChanges,
-  PageSessionPersistence,
-  PageContextMemory,
-  PageResumingSession,
-  PageResettingSession,
-  PageHooks,
-  PagePermissionGating,
-  PageMidTaskInjection,
-  PageMultiOperation,
-  PageCustomTools,
-  PageAborting,
-  PageCLIPattern,
-  PageWebServer,
-  PageAPIReference,
+  PageIntroduction, PageInstallation, PageQuickStart, PageAgentFile,
+  PageHowItWorks, PageBasicUsage, PageStreaming, PageMultiTurn,
+  PageShellTools, PageCompletionBlock, PageChatMode, PageWorkspaceChanges,
+  PageSessionPersistence, PageContextMemory, PageResumingSession, PageResettingSession,
+  PageHooks, PagePermissionGating, PageMidTaskInjection, PageMultiOperation,
+  PageCustomTools, PageAborting, PageCLIPattern, PageWebServer, PageAPIReference,
 } from "./PageContent";
 import "./styles.css";
 
@@ -48,6 +29,7 @@ export function App() {
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const [page, setPage] = useState<PageId>(getInitialPage);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [logoError, setLogoError] = useState(false);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -101,6 +83,7 @@ export function App() {
 
   return (
     <div className="site">
+      {/* ── Topbar ── */}
       <header className="topbar">
         <button
           className="icon-btn mobile-menu-btn"
@@ -115,9 +98,16 @@ export function App() {
           href="#introduction"
           onClick={(e) => { e.preventDefault(); setPage("introduction"); }}
         >
-          <span className="brand-icon">
-            <BookOpen size={16} />
-          </span>
+          {!logoError ? (
+            <img
+              src="/codepilot/codepilot.png"
+              alt="CodePilot logo"
+              className="brand-logo"
+              onError={() => setLogoError(true)}
+            />
+          ) : (
+            <span className="brand-icon"><BookOpen size={15} /></span>
+          )}
           CodePilot
         </a>
 
@@ -128,27 +118,18 @@ export function App() {
         </nav>
 
         <div className="top-actions">
-          <a
-            className="icon-btn"
-            href="https://github.com/Jahanzeb-git/codepilot"
-            target="_blank"
-            rel="noopener noreferrer"
-            aria-label="GitHub"
-          >
-            <Github size={18} />
+          <a className="icon-btn" href="https://github.com/Jahanzeb-git/codepilot" target="_blank" rel="noopener noreferrer" aria-label="GitHub">
+            <Github size={17} />
           </a>
-          <button
-            className="icon-btn"
-            onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
-            aria-label="Toggle theme"
-          >
-            {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
+          <button className="icon-btn" onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))} aria-label="Toggle theme">
+            {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
           </button>
         </div>
       </header>
 
-      <div className="layout">
-        {/* Overlay for mobile */}
+      {/* ── Body: sidebar flush left + main content ── */}
+      <div className="site-body">
+        {/* Mobile overlay */}
         <div
           className={`sidebar-overlay ${sidebarOpen ? "open" : ""}`}
           onClick={() => setSidebarOpen(false)}
@@ -171,21 +152,80 @@ export function App() {
           ))}
         </aside>
 
-        <main className="main">
-          <div className="page-breadcrumb">
-            <span>Docs</span>
-            <ChevronRight size={14} />
-            <span>{nav.group}</span>
-            <ChevronRight size={14} />
-            <span style={{ color: "var(--text)" }}>{nav.label}</span>
-          </div>
+        {/* Main + Footer share the remaining column */}
+        <div className="main-wrapper">
+          <main className="main">
+            <div className="page-breadcrumb">
+              <span>Docs</span>
+              <ChevronRight size={13} />
+              <span>{nav.group}</span>
+              <ChevronRight size={13} />
+              <span style={{ color: "var(--text)" }}>{nav.label}</span>
+            </div>
+            {pageComponents[page] ?? <PageIntroduction nav={setPage} />}
+          </main>
 
-          {pageComponents[page] ?? <PageIntroduction nav={setPage} />}
-        </main>
+          <Footer />
+        </div>
       </div>
     </div>
   );
 }
 
-// Re-export helpers used by pages
-export { Info };
+function Footer() {
+  return (
+    <>
+      <footer className="footer">
+        <div className="footer-col">
+          <div className="footer-col-title">Getting Started</div>
+          <a href="#introduction">Introduction</a>
+          <a href="#installation">Installation</a>
+          <a href="#quick-start">Quick Start</a>
+          <a href="#agentfile">AgentFile</a>
+        </div>
+        <div className="footer-col">
+          <div className="footer-col-title">Core Concepts</div>
+          <a href="#how-it-works">How It Works</a>
+          <a href="#streaming">Streaming</a>
+          <a href="#shell-tools">Shell Tools</a>
+          <a href="#completion-block">Completion Block</a>
+        </div>
+        <div className="footer-col">
+          <div className="footer-col-title">Sessions</div>
+          <a href="#session-persistence">Session Persistence</a>
+          <a href="#context-memory">Context Memory</a>
+          <a href="#resuming-session">Resuming a Session</a>
+          <a href="#resetting-session">Resetting a Session</a>
+        </div>
+        <div className="footer-col">
+          <div className="footer-col-title">Production</div>
+          <a href="#hooks">Hooks</a>
+          <a href="#permission-gating">Permission Gating</a>
+          <a href="#custom-tools">Custom Tools</a>
+          <a href="#web-server">Web Server Integration</a>
+        </div>
+        <div className="footer-col">
+          <div className="footer-col-title">Links</div>
+          <a href="https://github.com/Jahanzeb-git/codepilot" target="_blank" rel="noopener noreferrer">
+            GitHub <ExternalLink size={11} style={{ display: "inline", verticalAlign: "middle" }} />
+          </a>
+          <a href="https://pypi.org/project/codepilot-ai/" target="_blank" rel="noopener noreferrer">
+            PyPI <ExternalLink size={11} style={{ display: "inline", verticalAlign: "middle" }} />
+          </a>
+          <a href="#api-reference">API Reference</a>
+          <a href="https://github.com/Jahanzeb-git/codepilot/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">MIT License</a>
+        </div>
+      </footer>
+      <div className="footer-bottom">
+        <span>
+          Built by{" "}
+          <a href="https://github.com/Jahanzeb-git" target="_blank" rel="noopener noreferrer">
+            Jahanzeb Ahmed
+          </a>{" "}
+          and the community.
+        </span>
+        <span>CodePilot v0.9.1 · MIT License</span>
+      </div>
+    </>
+  );
+}

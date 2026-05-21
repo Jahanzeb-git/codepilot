@@ -1,11 +1,59 @@
-import { Info } from "lucide-react";
+import { Info, Copy, Check } from "lucide-react";
+import { useState, useEffect, useRef } from "react";
+import hljs from "highlight.js/lib/core";
+import python from "highlight.js/lib/languages/python";
+import yaml from "highlight.js/lib/languages/yaml";
+import bash from "highlight.js/lib/languages/bash";
+import json from "highlight.js/lib/languages/json";
+import typescript from "highlight.js/lib/languages/typescript";
+import plaintext from "highlight.js/lib/languages/plaintext";
+
+hljs.registerLanguage("python", python);
+hljs.registerLanguage("yaml", yaml);
+hljs.registerLanguage("bash", bash);
+hljs.registerLanguage("json", json);
+hljs.registerLanguage("typescript", typescript);
+hljs.registerLanguage("text", plaintext);
+hljs.registerLanguage("plaintext", plaintext);
+
+const LANG_ALIAS: Record<string, string> = {
+  py: "python",
+  sh: "bash",
+  shell: "bash",
+  yml: "yaml",
+  ts: "typescript",
+  js: "typescript",
+};
 
 export function Code({ children, lang }: { children: string; lang?: string }) {
+  const [copied, setCopied] = useState(false);
+  const codeRef = useRef<HTMLElement>(null);
+  const resolvedLang = lang ? (LANG_ALIAS[lang] ?? lang) : "plaintext";
+
+  useEffect(() => {
+    if (codeRef.current) {
+      codeRef.current.removeAttribute("data-highlighted");
+      hljs.highlightElement(codeRef.current);
+    }
+  }, [children, resolvedLang]);
+
+  const copy = async () => {
+    await navigator.clipboard.writeText(children);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
   return (
     <div className="code-wrap">
-      {lang && <span className="code-lang">{lang}</span>}
+      <div className="code-header">
+        <span className="code-lang-badge">{lang ?? "text"}</span>
+        <button className={`copy-btn ${copied ? "copied" : ""}`} onClick={copy} aria-label="Copy code">
+          {copied ? <Check size={12} /> : <Copy size={12} />}
+          {copied ? "Copied!" : "Copy"}
+        </button>
+      </div>
       <pre className="code-block">
-        <code>{children}</code>
+        <code className={`language-${resolvedLang}`} ref={codeRef}>{children}</code>
       </pre>
     </div>
   );
@@ -14,7 +62,7 @@ export function Code({ children, lang }: { children: string; lang?: string }) {
 export function Callout({ children }: { children: React.ReactNode }) {
   return (
     <div className="callout">
-      <span className="callout-icon"><Info size={16} /></span>
+      <span className="callout-icon"><Info size={15} /></span>
       <div>{children}</div>
     </div>
   );
