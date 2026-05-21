@@ -123,6 +123,7 @@ class MuxServer:
         self._sel: Optional[selectors.DefaultSelector] = None
         self._clients: list = []
         self._running: bool = False
+        self._rcfile_path: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -172,6 +173,13 @@ class MuxServer:
             except OSError:
                 pass
             self._master_fd = None
+
+        if self._rcfile_path is not None:
+            try:
+                os.unlink(self._rcfile_path)
+            except OSError:
+                pass
+            self._rcfile_path = None
 
         if self._bash_pid is not None:
             try:
@@ -230,10 +238,29 @@ class MuxServer:
             except OSError:
                 pass
 
-            # Suppress the shell prompt via the environment so no client
-            # ever receives prompt noise in its byte stream.
-            os.environ["PS1"] = ""
-            os.environ["PS2"] = ""
+            # Setup OSC 633 shell integration
+            if "bash" in self._shell:
+                self._rcfile_path = f"/tmp/codepilot_bashrc_{os.getpid()}"
+                try:
+                    with open(self._rcfile_path, "w") as f:
+                        f.write('''\
+if [ -f ~/.bashrc ]; then
+    source ~/.bashrc
+fi
+
+__cp_command_finished() {
+    local rc=$?
+    printf "\\033]633;D;%s\\007" "$rc"
+    printf "\\033]633;P;Cwd=%s\\007" "$PWD"
+}
+
+PS1="\\[\\033]633;A\\007\\]${PS1}\\[\\033]633;B\\007\\]"
+PS0="\\033]633;C\\007"
+PROMPT_COMMAND="__cp_command_finished; $PROMPT_COMMAND"
+''')
+                    self._shell_args = [self._shell, "--rcfile", self._rcfile_path]
+                except OSError as e:
+                    _log.error("Could not write rcfile: %s", e)
 
             os.execv(self._shell, self._shell_args)
             # os.execv() never returns on success. If it does, bail.
@@ -243,6 +270,10 @@ class MuxServer:
         os.close(slave_fd)
         self._master_fd = master_fd
         self._bash_pid = pid
+        
+        # We need the parent to also know the rcfile path to clean it up
+        if "bash" in self._shell:
+            self._rcfile_path = f"/tmp/codepilot_bashrc_{pid}"
 
         # Reap bash automatically when it exits to avoid zombie processes.
         signal.signal(signal.SIGCHLD, self._on_sigchld)

@@ -32,7 +32,7 @@ Observable hooks
     runtime.run("Refactor the database module.")
 """
 
-__version__ = "0.9.1"
+__version__ = "0.9.2"
 __author__  = "CodePilot"
 
 # Core entry point
@@ -42,7 +42,15 @@ from .engine.runtime import Runtime, AsyncRuntime
 from .core.agent_file import AgentConfig, AgentFile
 
 # Session backends
-from .core.session import InMemorySession, FileSession, DatabaseSession, BaseSession, create_session
+from .core.session import (
+    InMemorySession,
+    FileSession,
+    DatabaseSession,
+    AsyncDatabaseSession,
+    BaseSession,
+    AsyncBaseSession,
+    create_session,
+)
 from .core.memory import MemoryManager, MemoryConfig, ContextArchive
 
 # Hook decorators — developers import these to wire up observability
@@ -67,7 +75,9 @@ __all__ = [
     "InMemorySession",
     "FileSession",
     "DatabaseSession",
+    "AsyncDatabaseSession",
     "BaseSession",
+    "AsyncBaseSession",
     "create_session",
     "MemoryManager",
     "MemoryConfig",

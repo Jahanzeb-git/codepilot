@@ -53,6 +53,8 @@ def _sanitise_id(session_id: str) -> str:
 
 class BaseSession(ABC):
 
+    is_async: bool = False  # Allows runtime to branch between sync and async calls
+
     @abstractmethod
     def load(self) -> List[Dict]:
         """Return the stored message list (empty list if no history yet)."""
@@ -74,6 +76,45 @@ class BaseSession(ABC):
         """Persist additional session state (archive, counters)."""
 
     def load_extra(self) -> Dict:
+        """Load additional session state."""
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# Async abstract base
+# ---------------------------------------------------------------------------
+
+class AsyncBaseSession(ABC):
+    """
+    Abstract base class for async-native session backends.
+
+    All methods are coroutines so they can be safely awaited inside
+    AsyncRuntime.run() without blocking the event loop.
+    """
+
+    is_async: bool = True  # Signals AsyncRuntime to use await on all session calls
+
+    @abstractmethod
+    async def load(self) -> List[Dict]:
+        """Return the stored message list (empty list if no history yet)."""
+
+    @abstractmethod
+    async def save(self, messages: List[Dict]) -> None:
+        """Persist the current message list."""
+
+    @abstractmethod
+    async def reset(self) -> None:
+        """Wipe all stored history."""
+
+    @property
+    @abstractmethod
+    def session_id(self) -> str:
+        """Unique identifier for this session."""
+
+    async def save_extra(self, data: Dict) -> None:
+        """Persist additional session state (archive, counters)."""
+
+    async def load_extra(self) -> Dict:
         """Load additional session state."""
         return {}
 
@@ -317,7 +358,20 @@ class DatabaseSession(BaseSession):
         session_id: str,
         agent_name: str = "agent",
         db_url: str = "sqlite:///./codepilot.db",
+        engine=None,
     ):
+        """
+        Args:
+            session_id:  Unique name for this conversation.
+            agent_name:  Stored as metadata.
+            db_url:      SQLAlchemy connection string. Ignored when ``engine`` is
+                         provided.
+            engine:      Optional pre-built synchronous SQLAlchemy ``Engine``.
+                         When supplied the caller's engine (and its connection
+                         pool) is reused directly — no second pool is created.
+                         Useful when your web application already owns the engine
+                         and you want CodePilot to share the same pool.
+        """
         try:
             import sqlalchemy as sa
         except ImportError:
@@ -329,12 +383,17 @@ class DatabaseSession(BaseSession):
 
         self._session_id = session_id
         self._agent_name = agent_name
-        self._db_url     = db_url
         self._sa         = sa
 
-        # SQLite: enable WAL mode for safe concurrent reads from multiple threads.
-        connect_args = {"check_same_thread": False} if db_url.startswith("sqlite") else {}
-        self._engine = sa.create_engine(db_url, connect_args=connect_args)
+        if engine is not None:
+            # Reuse the caller's engine — no new connection pool created.
+            self._engine = engine
+            self._db_url = repr(engine)   # stored for __repr__ only
+        else:
+            self._db_url = db_url
+            # SQLite: enable WAL mode for safe concurrent reads.
+            connect_args = {"check_same_thread": False} if db_url.startswith("sqlite") else {}
+            self._engine = sa.create_engine(db_url, connect_args=connect_args)
 
         self._table = self._build_table(sa)
         self._ensure_table()
@@ -574,6 +633,243 @@ class DatabaseSession(BaseSession):
 
 
 # ---------------------------------------------------------------------------
+# Async database-backed backend
+# ---------------------------------------------------------------------------
+
+class AsyncDatabaseSession(AsyncBaseSession):
+    """
+    Persists conversation history using a caller-supplied SQLAlchemy
+    ``AsyncEngine`` — the same engine the developer already created for their
+    web application — so no second connection pool is ever created.
+
+    The ``codepilot_sessions`` table is created automatically on the first
+    database operation (lazy initialisation — safe inside an async context).
+
+    Supported databases (anything SQLAlchemy async supports):
+        PostgreSQL: create_async_engine("postgresql+asyncpg://user:pass@host/db")
+        SQLite:     create_async_engine("sqlite+aiosqlite:///./db.sqlite3")
+
+    Requires:
+        pip install sqlalchemy
+        pip install asyncpg      # PostgreSQL
+        pip install aiosqlite    # SQLite async
+    """
+
+    _TABLE_NAME = "codepilot_sessions"
+
+    def __init__(
+        self,
+        session_id: str,
+        agent_name: str = "agent",
+        engine=None,
+    ):
+        """
+        Args:
+            session_id:  Unique name for this conversation.
+            agent_name:  Stored as metadata.
+            engine:      A SQLAlchemy ``AsyncEngine``. Required.
+        """
+        try:
+            from sqlalchemy.ext.asyncio import AsyncEngine
+            import sqlalchemy as sa
+        except ImportError:
+            raise ImportError(
+                "AsyncDatabaseSession requires SQLAlchemy.\n"
+                "Install it with:  pip install sqlalchemy\n"
+                "For PostgreSQL:   pip install asyncpg\n"
+                "For SQLite:       pip install aiosqlite"
+            )
+
+        if engine is None:
+            raise ValueError(
+                "AsyncDatabaseSession requires a pre-built SQLAlchemy AsyncEngine.\n"
+                "Example:\n"
+                "  from sqlalchemy.ext.asyncio import create_async_engine\n"
+                "  engine = create_async_engine('postgresql+asyncpg://user:pass@host/db')\n"
+                "  session = AsyncDatabaseSession('my-session', engine=engine)"
+            )
+
+        if not isinstance(engine, AsyncEngine):
+            raise TypeError(
+                f"AsyncDatabaseSession expects a SQLAlchemy AsyncEngine, "
+                f"got {type(engine).__name__!r}. "
+                "For sync engines use DatabaseSession instead."
+            )
+
+        self._session_id  = session_id
+        self._agent_name  = agent_name
+        self._engine      = engine
+        self._sa          = sa
+        self._table       = self._build_table(sa)
+        self._table_ready = False  # Lazy flag — table created on first DB call
+
+    # ------------------------------------------------------------------
+    # Schema
+    # ------------------------------------------------------------------
+
+    def _build_table(self, sa):
+        meta = sa.MetaData()
+        return sa.Table(
+            self._TABLE_NAME, meta,
+            sa.Column("session_id",  sa.String(255), primary_key=True),
+            sa.Column("agent_name",  sa.String(255), nullable=False, default=""),
+            sa.Column("messages",    sa.Text,         nullable=False, default="[]"),
+            sa.Column("created_at",  sa.Float,        nullable=False),
+            sa.Column("updated_at",  sa.Float,        nullable=False),
+        )
+
+    async def _ensure_table(self) -> None:
+        """Create the table if it does not exist. Idempotent — called lazily."""
+        if self._table_ready:
+            return
+        async with self._engine.begin() as conn:
+            await conn.run_sync(
+                lambda sync_conn: self._table.metadata.create_all(sync_conn, checkfirst=True)
+            )
+        self._table_ready = True
+
+    # ------------------------------------------------------------------
+    # AsyncBaseSession interface
+    # ------------------------------------------------------------------
+
+    async def load(self) -> List[Dict]:
+        """Fetch stored messages. Returns [] for a brand-new session."""
+        await self._ensure_table()
+        sa = self._sa
+        async with self._engine.connect() as conn:
+            result = await conn.execute(
+                sa.select(self._table.c.messages)
+                .where(self._table.c.session_id == self._session_id)
+            )
+            row = result.fetchone()
+
+        if row is None:
+            return []
+        try:
+            parsed = json.loads(row[0])
+            if isinstance(parsed, dict) and "messages" in parsed:
+                return parsed["messages"]
+            return parsed if isinstance(parsed, list) else []
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    async def save(self, messages: List[Dict]) -> None:
+        """Upsert the full message list. Called once per run() completion."""
+        await self._ensure_table()
+        sa  = self._sa
+        now = time.time()
+
+        existing_extra = await self.load_extra()
+        payload_obj = {"messages": messages, "extra": existing_extra}
+        data = json.dumps(payload_obj, ensure_ascii=False)
+
+        async with self._engine.begin() as conn:
+            result = await conn.execute(
+                sa.select(self._table.c.created_at)
+                .where(self._table.c.session_id == self._session_id)
+            )
+            exists = result.fetchone()
+
+            if exists:
+                await conn.execute(
+                    sa.update(self._table)
+                    .where(self._table.c.session_id == self._session_id)
+                    .values(messages=data, updated_at=now)
+                )
+            else:
+                await conn.execute(
+                    sa.insert(self._table).values(
+                        session_id=self._session_id,
+                        agent_name=self._agent_name,
+                        messages=data,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+
+    async def reset(self) -> None:
+        """Delete this session's row from the database."""
+        await self._ensure_table()
+        sa = self._sa
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                sa.delete(self._table)
+                .where(self._table.c.session_id == self._session_id)
+            )
+
+    async def save_extra(self, data: Dict) -> None:
+        """Persist extra state (memory archive, counters) alongside messages."""
+        await self._ensure_table()
+        sa  = self._sa
+        now = time.time()
+
+        async with self._engine.begin() as conn:
+            result = await conn.execute(
+                sa.select(self._table.c.messages)
+                .where(self._table.c.session_id == self._session_id)
+            )
+            row = result.fetchone()
+
+            if row is None:
+                return
+
+            try:
+                parsed = json.loads(row[0])
+                if isinstance(parsed, dict):
+                    parsed["extra"] = data
+                else:
+                    # Old format migration: wrap plain list
+                    parsed = {"messages": parsed, "extra": data}
+            except (json.JSONDecodeError, TypeError):
+                return
+
+            await conn.execute(
+                sa.update(self._table)
+                .where(self._table.c.session_id == self._session_id)
+                .values(
+                    messages=json.dumps(parsed, ensure_ascii=False),
+                    updated_at=now,
+                )
+            )
+
+    async def load_extra(self) -> Dict:
+        """Load extra state from the database."""
+        await self._ensure_table()
+        sa = self._sa
+        async with self._engine.connect() as conn:
+            result = await conn.execute(
+                sa.select(self._table.c.messages)
+                .where(self._table.c.session_id == self._session_id)
+            )
+            row = result.fetchone()
+
+        if row is None:
+            return {}
+        try:
+            parsed = json.loads(row[0])
+            if isinstance(parsed, dict):
+                return parsed.get("extra", {})
+            return {}  # Old format — no extra
+        except (json.JSONDecodeError, TypeError):
+            return {}
+
+    # ------------------------------------------------------------------
+    # Extras
+    # ------------------------------------------------------------------
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    async def dispose(self) -> None:
+        """Release all pooled connections. Call on application shutdown."""
+        await self._engine.dispose()
+
+    def __repr__(self) -> str:
+        return f"AsyncDatabaseSession(id={self._session_id!r})"
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
@@ -583,7 +879,8 @@ def create_session(
     agent_name: str = "agent",
     session_dir: Optional[pathlib.Path] = None,
     db_url: Optional[str] = None,
-) -> BaseSession:
+    engine=None,
+) -> "BaseSession | AsyncBaseSession":
     """
     Create a session backend.
 
@@ -592,13 +889,45 @@ def create_session(
         session_id: Unique name for this session.
         agent_name: Stored as metadata in file / db backends.
         session_dir: Override default ~/.codepilot/sessions/ (file only).
-        db_url:     SQLAlchemy connection string. Required for backend='db'.
-                    "sqlite:///./codepilot.db"
-                    "postgresql://user:pass@localhost/myapp"
+        db_url:     SQLAlchemy connection string. Used for backend='db' when
+                    no ``engine`` is supplied.
+                    e.g. "sqlite:///./codepilot.db"
+                         "postgresql://user:pass@localhost/myapp"
+        engine:     Optional pre-built SQLAlchemy Engine or AsyncEngine.
+                    When provided, ``backend`` is inferred automatically:
+                    - AsyncEngine  → AsyncDatabaseSession  (is_async=True)
+                    - sync Engine  → DatabaseSession        (is_async=False)
+                    The caller's connection pool is reused — no second pool
+                    is created.  ``db_url`` is ignored when engine is set.
 
     Returns:
-        A BaseSession instance ready to use.
+        A BaseSession or AsyncBaseSession instance ready to use.
     """
+    # ------------------------------------------------------------------ #
+    # Engine shortcut — detect sync vs async and bypass backend string    #
+    # ------------------------------------------------------------------ #
+    if engine is not None:
+        try:
+            from sqlalchemy.ext.asyncio import AsyncEngine
+            if isinstance(engine, AsyncEngine):
+                return AsyncDatabaseSession(
+                    session_id=session_id,
+                    agent_name=agent_name,
+                    engine=engine,
+                )
+        except ImportError:
+            pass  # sqlalchemy.ext.asyncio not available — fall through to sync
+
+        # Must be a synchronous Engine
+        return DatabaseSession(
+            session_id=session_id,
+            agent_name=agent_name,
+            engine=engine,
+        )
+
+    # ------------------------------------------------------------------ #
+    # String-based backends (existing behaviour — fully backward-compat)  #
+    # ------------------------------------------------------------------ #
     if backend == "memory":
         return InMemorySession(session_id=session_id)
 

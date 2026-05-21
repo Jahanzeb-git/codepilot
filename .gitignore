@@ -135,6 +135,10 @@ venv.bak/
 # mkdocs documentation
 /site
 
+# Vite documentation site
+docsite/node_modules/
+docsite/dist/
+
 # mypy
 .mypy_cache/
 .dmypy.json
