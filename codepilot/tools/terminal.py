@@ -109,7 +109,7 @@ class _PosixPtyBackend:
     def read_nonblocking(self, size: int = 65536, timeout: float = 0.5) -> str:
         try:
             return self._process.read_nonblocking(size=size, timeout=timeout)
-        except (pexpect.TIMEOUT, pexpect.EOF):
+        except (pexpect.TIMEOUT, pexpect.EOF, OSError):
             return ""
 
     def is_alive(self) -> bool:
@@ -192,7 +192,7 @@ class _SocketPtyBackend:
     def read_nonblocking(self, size: int = 65536, timeout: float = 0.5) -> str:
         try:
             return self._process.read_nonblocking(size=size, timeout=timeout)
-        except (pexpect.TIMEOUT, pexpect.EOF):
+        except (pexpect.TIMEOUT, pexpect.EOF, OSError):
             return ""
 
     def is_alive(self) -> bool:

@@ -114,6 +114,7 @@ class AsyncRuntime:
         session_dir=None,
         stream: bool = False,
         db_url: Optional[str] = None,
+        db=None,
     ):
         """
         Args:
@@ -156,15 +157,29 @@ class AsyncRuntime:
         #  Session / persistence                                               #
         # ------------------------------------------------------------------ #
         _sid = session_id or self.config.name.lower().replace(" ", "-")
+
+        # ``db`` takes precedence over the legacy ``db_url`` string.
+        # If db is an Engine or AsyncEngine, pass it as engine=; otherwise
+        # fall back to the db_url string for backward compatibility.
+        _engine = db if db is not None else None
+        _db_url = db_url if _engine is None else None
+
         self.session: BaseSession = create_session(
             backend=session,
             session_id=_sid,
             agent_name=self.config.name,
             session_dir=session_dir,
-            db_url=db_url,
+            db_url=_db_url,
+            engine=_engine,
         )
 
-        self.messages: List[Dict[str, str]] = self.session.load()
+        # For async sessions, initial load is deferred to the first run() call
+        # because __init__ is synchronous and cannot await coroutines.
+        if self.session.is_async:
+            self.messages: List[Dict[str, str]] = []
+            self._session_bootstrapped = False
+        else:
+            self.messages: List[Dict[str, str]] = self.session.load()
 
         # ------------------------------------------------------------------ #
         #  Context memory manager                                              #
@@ -181,7 +196,7 @@ class AsyncRuntime:
         )
 
         # Restore memory state (archive + global state) from session
-        extra = self.session.load_extra()
+        extra = self.session.load_extra() if not self.session.is_async else {}
         if extra.get("memory_state"):
             self._memory.restore_state(extra["memory_state"])
 
@@ -189,6 +204,9 @@ class AsyncRuntime:
         #  Task position counter                                               #
         # ------------------------------------------------------------------ #
         self._task_counter = get_highest_task_position(self.messages)
+
+        # Set for sync sessions only; async sessions set this in run() bootstrap
+        self._session_bootstrapped = not self.session.is_async
 
         # ------------------------------------------------------------------ #
         #  Per-step ephemeral state                                            #
@@ -234,6 +252,16 @@ class AsyncRuntime:
         self._done  = False
         self._abort = False
         self._terminal_manager.ensure_default_terminal()
+
+        # Async session bootstrap: load history on the very first run() call.
+        # This is deferred from __init__ because __init__ is not async.
+        if not self._session_bootstrapped:
+            self.messages = await self.session.load()
+            extra = await self.session.load_extra()
+            if extra.get("memory_state"):
+                self._memory.restore_state(extra["memory_state"])
+            self._task_counter = get_highest_task_position(self.messages)
+            self._session_bootstrapped = True
 
         # Safety-net: global summarization if context is dangerously high
         self.messages = await self._memory.process(self.messages)
@@ -358,10 +386,16 @@ class AsyncRuntime:
             self._watcher.snapshot_all()
 
         # Persist after every run() call
-        self.session.save(self.messages)
-        self.session.save_extra({
-            "memory_state": self._memory.serialize_state(),
-        })
+        if self.session.is_async:
+            await self.session.save(self.messages)
+            await self.session.save_extra({
+                "memory_state": self._memory.serialize_state(),
+            })
+        else:
+            self.session.save(self.messages)
+            self.session.save_extra({
+                "memory_state": self._memory.serialize_state(),
+            })
 
         # Note: do NOT cancel the cache timer here.
         # It should fire between tasks to upgrade TTL to 1h.
@@ -377,10 +411,25 @@ class AsyncRuntime:
         return self._done_summary if self._done else None
 
     def reset(self):
-        """Wipe the entire conversation history and start fresh."""
+        """Wipe the entire conversation history and start fresh (sync sessions)."""
         self._cancel_cache_timer()
         self.messages = []
-        self.session.reset()
+        if not self.session.is_async:
+            self.session.reset()
+        self._session_bootstrapped = not self.session.is_async
+        self._terminal_manager.cleanup_all()
+        self._terminal_manager.start_default_terminal()
+        self.hooks.emit(EventType.SESSION_RESET)
+
+    async def areset(self):
+        """Wipe conversation history — use this when the session is async."""
+        self._cancel_cache_timer()
+        self.messages = []
+        if self.session.is_async:
+            await self.session.reset()
+        else:
+            self.session.reset()
+        self._session_bootstrapped = not self.session.is_async
         self._terminal_manager.cleanup_all()
         self._terminal_manager.start_default_terminal()
         self.hooks.emit(EventType.SESSION_RESET)
@@ -836,6 +885,37 @@ class Runtime:
     """
 
     def __init__(self, agent_file: str, **kwargs):
+        # ------------------------------------------------------------------ #
+        #  Guard: AsyncEngine is incompatible with the sync Runtime wrapper.  #
+        #                                                                      #
+        #  Runtime.run() calls asyncio.run() on every invocation which        #
+        #  creates and then CLOSES a new event loop each time. SQLAlchemy's   #
+        #  AsyncEngine binds its connection pool to the event loop that was   #
+        #  active when the first connection was made. After asyncio.run()     #
+        #  tears down that loop the pool connections are dead — the second    #
+        #  Runtime.run() call will crash with a cryptic asyncio error.        #
+        #                                                                      #
+        #  Fix: use AsyncRuntime with ``await runtime.run()``.                #
+        # ------------------------------------------------------------------ #
+        _db = kwargs.get("db")
+        if _db is not None:
+            try:
+                from sqlalchemy.ext.asyncio import AsyncEngine
+                if isinstance(_db, AsyncEngine):
+                    raise ValueError(
+                        "Runtime (sync) does not support SQLAlchemy AsyncEngine.\n\n"
+                        "Reason: Runtime.run() calls asyncio.run() internally, which "
+                        "creates and destroys an event loop on every call. An AsyncEngine's "
+                        "connection pool is bound to a single event loop and will break "
+                        "after the first call.\n\n"
+                        "Fix: switch to AsyncRuntime and await your calls:\n\n"
+                        "    from codepilot import AsyncRuntime\n\n"
+                        "    runtime = AsyncRuntime('agent.yaml', db=engine)\n"
+                        "    result  = await runtime.run('your task')"
+                    )
+            except ImportError:
+                pass  # sqlalchemy.ext.asyncio not installed — nothing to guard
+
         self._async = AsyncRuntime(agent_file, **kwargs)
 
     # ── public API mirrors AsyncRuntime ──────────────────────────────────────

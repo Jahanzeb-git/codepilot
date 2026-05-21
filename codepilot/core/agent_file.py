@@ -17,11 +17,13 @@ Copyright (c) 2026 Jahanzeb Ahmed.
 Licensed under the MIT License.
 """
 
-from typing import List, Optional
-from pydantic import BaseModel, Field, field_validator, model_validator
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
 import yaml
-import os
-from typing import Dict, Any
+from pydantic import BaseModel, Field, field_validator
 
  
 class ThinkingConfig(BaseModel):
@@ -95,24 +97,24 @@ class AgentConfig(BaseModel):
         """
         object.__setattr__(self, "_yaml_dir", yaml_dir)
 
+        base = Path(yaml_dir)
+
         # --- system_prompt: load from file if it looks like a path ---
         prompt_val = self.system_prompt
         if prompt_val.endswith((".md", ".txt", ".j2")):
-            candidate = os.path.join(yaml_dir, prompt_val)
-            if os.path.isfile(candidate):
-                with open(candidate, "r", encoding="utf-8") as f:
-                    object.__setattr__(self, "system_prompt", f.read())
+            candidate = base / prompt_val
+            if candidate.is_file():
+                object.__setattr__(self, "system_prompt", candidate.read_text(encoding="utf-8"))
             # If file doesn't exist we leave the string as-is
             # (could be a raw prompt that happens to end with .md)
 
         # --- work_dir: resolve relative to yaml_dir ---
-        if not os.path.isabs(self.runtime.work_dir):
-            resolved = os.path.abspath(
-                os.path.join(yaml_dir, self.runtime.work_dir)
-            )
+        work_dir_path = Path(self.runtime.work_dir)
+        if not work_dir_path.is_absolute():
+            resolved = (base / work_dir_path).resolve()
             # Pydantic models are normally immutable; use object.__setattr__ trick
             # on the nested model:
-            object.__setattr__(self.runtime, "work_dir", resolved)
+            object.__setattr__(self.runtime, "work_dir", str(resolved))
 
     # ------------------------------------------------------------------
     # Class-level factory
@@ -120,14 +122,13 @@ class AgentConfig(BaseModel):
 
     @classmethod
     def load(cls, path: str = "agent.yaml") -> "AgentConfig":
-        abs_path = os.path.abspath(path)
-        if not os.path.isfile(abs_path):
+        abs_path = Path(path).resolve()
+        if not abs_path.is_file():
             raise FileNotFoundError(f"AgentFile not found: {abs_path}")
 
-        yaml_dir = os.path.dirname(abs_path)
+        yaml_dir = str(abs_path.parent)
 
-        with open(abs_path, "r", encoding="utf-8") as f:
-            raw = yaml.safe_load(f)
+        raw: dict = yaml.safe_load(abs_path.read_text(encoding="utf-8"))
 
         # Support both flat YAML and the nested 'agent:' convention
         data = raw.get("agent", raw)
