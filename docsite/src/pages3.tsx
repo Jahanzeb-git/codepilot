@@ -1,17 +1,40 @@
 import { Code, Callout, Table, Section, PageHeader } from "./components";
 
-export function PageShellTools() {
+export function PageTerminalTools() {
   return (
     <>
       <PageHeader
-        title="Shell Tools"
-        subtitle="The agent has a persistent, non-blocking shell session system powered by pexpect on Linux/macOS and pywinpty on Windows. Commands never hang the agent."
+        title="Terminal Tools"
+        subtitle="The agent has a persistent, non-blocking virtual terminal session system. Commands never hang the agent."
       />
 
       <Callout>
         A default shell session (<code>"main"</code>) starts automatically when the Runtime is created and persists
         across <code>run()</code> calls. Its PID, status, and current working directory are shown in the system prompt every step.
       </Callout>
+
+      <Section title="Architecture & PTY Multiplexing">
+        <p>
+          Unlike naive agent frameworks that run command strings using generic <code>subprocess.run</code>, CodePilot features a custom <strong>Virtual Terminal Emulator</strong> built specifically for LLMs.
+        </p>
+        <h4 style={{ color: "var(--text)", marginTop: 16 }}>Key Features:</h4>
+        <ul style={{ paddingLeft: 20, color: "var(--text-soft)", lineHeight: 2 }}>
+          <li><strong>Cross-Platform Support:</strong> CodePilot natively runs pseudo-terminal (PTY) emulation across major operating systems—supporting <strong>Linux and macOS</strong> (via <code>pexpect</code>) and <strong>Windows</strong> (via <code>pywinpty</code> for Windows 10 version 1809+ using ConPTY).</li>
+          <li><strong>Garbage Byte Filtering:</strong> Automatically strips out ANSI escape sequences, raw control bytes, and binary clutter to present a clean text layout.</li>
+          <li><strong>Virtual 220x50 Grid:</strong> Renders a raw snapshot of the terminal screen buffer exactly as a human would see it.</li>
+          <li><strong>Never Hangs:</strong> The agent never blocks or hangs due to long-running or interactive shell processes. On timeout, the virtual terminal captures the current screen buffer snapshot and returns it immediately along with rich metadata (PID, return code, session status, and CWD).</li>
+        </ul>
+
+        <h4 style={{ color: "var(--text)", marginTop: 16 }}>Socket Multiplexing Under the Hood:</h4>
+        <p>
+          CodePilot spawns a custom multiplexer daemon. It manually maps the slave end of a pseudo-terminal (PTY) to the shell process (e.g. <code>bash</code>) and maps the master end to a Unix domain socket.
+        </p>
+        <ul style={{ paddingLeft: 20, color: "var(--text-soft)", lineHeight: 2 }}>
+          <li>A global control socket listens at <code>/tmp/codepilot_control.sock</code> to broadcast discovery and lifecycle events (e.g. <code>{"{ \"event\": \"terminal_created\", \"session_id\": \"main\", \"socket_path\": \"/tmp/codepilot_main.sock\" }"}</code>).</li>
+          <li>The CodePilot virtual terminal connects to the session socket (e.g. <code>/tmp/codepilot_main.sock</code>) to interact.</li>
+          <li><strong>Shared Emulation:</strong> External frontend terminal emulators (like <code>xterm.js</code>) can connect to the same session socket in parallel. This allows a single, live shell session to be shared dynamically between the CodePilot agent and the developer.</li>
+        </ul>
+      </Section>
 
       <Section title="execute — run a command">
         <p>Runs a command, waits up to <code>timeout</code> seconds, returns whatever output is available.</p>
@@ -54,28 +77,6 @@ send_input("main", "\\x04", 5)`}</Code>
 
       <Section title="terminate_terminal — destroy a session">
         <Code lang="python">{`terminate_terminal("server")   # hard-kills the terminal session as a last resort`}</Code>
-      </Section>
-
-      <Section title="Full example: server + test">
-        <Code lang="python">{`# Step 1 — LLM control block:
-# Start server in its own terminal session, verify startup logs within 4s
-execute("server", "uvicorn app.main:app --port 8000", 4, new_terminal=True)
-
-# Step 2 — LLM control block (after seeing server startup logs):
-# Run tests against the live server from main shell
-execute("main", "pytest tests/test_api.py -v", 30)
-
-# Step 3 — LLM control block (after tests pass):
-# Shut server down cleanly
-send_input("server", "\\x03", 5)`}</Code>
-      </Section>
-
-      <Section title="Context deduplication">
-        <p>
-          When <code>read_output()</code> returns in full-mode (the command is already done, no new data), it
-          automatically removes the earlier outputs for that command from the conversation history and returns one
-          complete, consolidated result. This keeps the agent context lean on long-running tasks.
-        </p>
       </Section>
 
       <Section title="execute() parameters">
@@ -242,6 +243,149 @@ Deleted: old_config.py`}</Code>
           <li>Diff limits: 30 changed lines reported per file, 100 total across all files.</li>
         </ul>
         <Callout>No configuration is required — this is always on.</Callout>
+      </Section>
+    </>
+  );
+}
+
+export function PageFileHandling() {
+  return (
+    <>
+      <PageHeader
+        title="File Handling Tools"
+        subtitle="Manage reading and editing files safely in the agent environment."
+      />
+
+      <Section title="read_file">
+        <p>Reads a range of lines from a file. Preserves token budget by avoiding reading full large files unnecessarily.</p>
+        <Code lang="python">{`# LLM control block:
+read_file("app/models.py", start_line=1, end_line=50)`}</Code>
+        <Table
+          headers={["Parameter", "Type", "Description"]}
+          rows={[
+            [<code>path</code>, "str", "Relative path to file in workspace."],
+            [<code>start_line</code>, "int", "1-based starting line number (default: 1)."],
+            [<code>end_line</code>, "int", "Ending line number. If omitted, reads to EOF (max 800 lines)."],
+          ]}
+        />
+      </Section>
+
+      <Section title="write_file">
+        <p>Creates a new file or edits a specified line range of an existing file. Designed to work in tandem with Payload Markdown Blocks to bypass string escaping issues.</p>
+        <Code lang="python">{`# LLM control block:
+write_file("config.py", start_line=12, end_line=15, mode="edit")`}</Code>
+        <Table
+          headers={["Parameter", "Type", "Description"]}
+          rows={[
+            [<code>path</code>, "str", "Relative path to file."],
+            [<code>start_line</code>, "int", "1-based line to start editing (defaults to 1 for write mode)."],
+            [<code>end_line</code>, "int", "Ending line to edit (defaults to EOF for write mode)."],
+            [<code>mode</code>, "str", <>Either <code>"write"</code> (overwrite entire file) or <code>"edit"</code> (replace specific range).</>],
+          ]}
+        />
+      </Section>
+    </>
+  );
+}
+
+export function PageSearchTools() {
+  return (
+    <>
+      <PageHeader
+        title="Search Tools"
+        subtitle="Locate files and search code syntactically and semantically."
+      />
+
+      <Section title="find">
+        <p>Performs a fast, literal or regular expression ripgrep search inside files in the workspace.</p>
+        <Code lang="python">{`# LLM control block:
+find("class ModelConfig", "codepilot/")`}</Code>
+        <Table
+          headers={["Parameter", "Type", "Description"]}
+          rows={[
+            [<code>query</code>, "str", "Search string or regex pattern."],
+            [<code>path</code>, "str", "Workspace subdirectory to search (optional)."],
+          ]}
+        />
+      </Section>
+
+      <Section title="semantic_search">
+        <p>Uses vector embeddings to locate code blocks semantically related to a natural language query.</p>
+        <Code lang="python">{`# LLM control block:
+semantic_search("how is the token count calculated for DeepSeek requests?", max_results=3)`}</Code>
+        <Table
+          headers={["Parameter", "Type", "Description"]}
+          rows={[
+            [<code>query</code>, "str", "Natural language search query."],
+            [<code>max_results</code>, "int", "Maximum number of matched snippets to return (default: 5)."],
+          ]}
+        />
+      </Section>
+    </>
+  );
+}
+
+export function PageContextArchiving() {
+  return (
+    <>
+      <PageHeader
+        title="Context Archiving Tools"
+        subtitle="Actively compress and manage the agent's context history to prevent token overflow."
+      />
+
+      <Section title="archive_context">
+        <p>
+          Compresses a completed task sequence, replacing the original detailed messages with a concise custom summary.
+          This reduces token usage and frees context memory without breaking cached prefix alignment.
+        </p>
+        <Code lang="python">{`# LLM control block:
+archive_context(position=2, summary="Completed database migration setup. Files created: migrations/001_init.py")`}</Code>
+        <Table
+          headers={["Parameter", "Type", "Description"]}
+          rows={[
+            [<code>position</code>, "int", "The completed task index to compress."],
+            [<code>summary</code>, "str", "A concise summary describing what was accomplished."],
+          ]}
+        />
+      </Section>
+
+      <Section title="reveal_context">
+        <p>Retrieves and displays the original, un-summarized message details from an archived task for reference.</p>
+        <Code lang="python">{`# LLM control block:
+reveal_context(position=2)`}</Code>
+      </Section>
+
+      <Section title="list_archived_context">
+        <p>Returns a summary list of all currently archived tasks in the session history.</p>
+        <Code lang="python">{`# LLM control block:
+list_archived_context()`}</Code>
+      </Section>
+    </>
+  );
+}
+
+export function PageUserInteraction() {
+  return (
+    <>
+      <PageHeader
+        title="User Interaction Tools"
+        subtitle="Pause agent execution to request input or clarification from the operator."
+      />
+
+      <Section title="ask_user">
+        <p>
+          Pauses agent execution and prompts the user with a question.
+          In a CLI environment, it falls back to a blocking stdin prompt.
+          In production web applications, it emits an <code>ASK_USER</code> event that can be captured and answered asynchronously.
+        </p>
+        <Code lang="python">{`# LLM control block:
+ask_user("Should I use PostgreSQL or SQLite for the testing database configuration?")`}</Code>
+        <Table
+          headers={["Parameter", "Type", "Description"]}
+          rows={[
+            [<code>question</code>, "str", "The clarification question to present to the user."],
+          ]}
+        />
       </Section>
     </>
   );

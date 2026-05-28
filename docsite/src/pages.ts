@@ -3,9 +3,11 @@ export type PageId =
   | "introduction"
   | "installation"
   | "quick-start"
+  | "models-providers"
   | "agentfile"
   | "how-it-works"
   | "basic-usage"
+  | "code-as-interface"
   | "streaming"
   | "multi-turn"
   | "session-persistence"
@@ -16,7 +18,11 @@ export type PageId =
   | "permission-gating"
   | "mid-task-injection"
   | "multi-operation"
-  | "shell-tools"
+  | "file-handling"
+  | "search-tools"
+  | "terminal-tools"
+  | "context-archiving"
+  | "user-interaction"
   | "completion-block"
   | "workspace-changes"
   | "chat-mode"
@@ -38,6 +44,7 @@ export const navGroups: NavGroup[] = [
       { id: "introduction", label: "Introduction" },
       { id: "installation", label: "Installation" },
       { id: "quick-start", label: "Quick Start" },
+      { id: "models-providers", label: "Models & Providers" },
       { id: "agentfile", label: "AgentFile" },
     ],
   },
@@ -46,12 +53,22 @@ export const navGroups: NavGroup[] = [
     items: [
       { id: "how-it-works", label: "How It Works" },
       { id: "basic-usage", label: "Basic Usage" },
+      { id: "code-as-interface", label: "Code-as-Interface" },
       { id: "streaming", label: "Streaming" },
       { id: "multi-turn", label: "Multi-turn Execution" },
-      { id: "shell-tools", label: "Shell Tools" },
       { id: "completion-block", label: "Completion Block" },
       { id: "chat-mode", label: "Chat Mode" },
       { id: "workspace-changes", label: "Workspace Changes" },
+    ],
+  },
+  {
+    title: "Built-in Tools",
+    items: [
+      { id: "file-handling", label: "File Handling" },
+      { id: "search-tools", label: "Search Tools" },
+      { id: "terminal-tools", label: "Terminal Tools" },
+      { id: "context-archiving", label: "Context Archiving" },
+      { id: "user-interaction", label: "User Interaction" },
     ],
   },
   {

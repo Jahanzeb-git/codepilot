@@ -9,9 +9,9 @@ export function PageCustomTools() {
       />
 
       <Callout>
-        <strong>Important:</strong> <code>exec()</code> discards return values. If your tool produces output the
-        agent should see, explicitly append it to the execution buffer by calling{" "}
-        <code>runtime._async._append_execution(...)</code>.
+        <strong>Important:</strong> custom tools are invoked from the agent control block. If your tool produces
+        output the agent should see, explicitly append it to the execution buffer by calling{" "}
+        <code>runtime._async._append_execution(...)</code> when using <code>Runtime</code>.
       </Callout>
 
       <Section title="Adding custom tools">
@@ -47,7 +47,7 @@ runtime.run("Research the latest SQLAlchemy 2.0 async API and implement a connec
       </Section>
 
       <Section title="Overriding a built-in tool">
-        <Code lang="python">{`def safe_execute(session_id: str, command: str, timeout: int = 10, new_terminal: bool = False):
+        <Code lang="python">{`def safe_execute(session_id: str, command: str, timeout: int = 10, new_terminal: bool = False, shell=None):
     """
     Run a shell command. Restricted to read-only operations in this environment.
     Never import subprocess or os directly; always use this tool.
@@ -56,7 +56,7 @@ runtime.run("Research the latest SQLAlchemy 2.0 async API and implement a connec
     if any(cmd in command for cmd in blocked):
         runtime._async._append_execution(f"[execute] Blocked: '{command}' is not permitted.")
         return
-    return runtime._async._terminal_manager.execute(session_id, command, timeout, new_terminal)
+    return runtime._async._terminal_manager.execute(session_id, command, timeout, new_terminal, shell)
 
 
 runtime.register_tool("execute", safe_execute, replace=True)`}</Code>

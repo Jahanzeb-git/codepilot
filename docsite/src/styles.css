@@ -37,6 +37,17 @@
   --radius: 10px;
   --sidebar-w: 240px;
   --topbar-h: 60px;
+  /* Terminal (light) */
+  --term-bg: #f0f0ee;
+  --term-titlebar-bg: #e4e3e0;
+  --term-border: rgba(0,0,0,0.10);
+  --term-titlebar-border: rgba(0,0,0,0.08);
+  --term-title-color: rgba(0,0,0,0.30);
+  --term-text: #1c1c1c;
+  --term-dim: #888888;
+  --term-dim2: #b0b0b0;
+  --term-cursor-color: rgba(0,0,0,0.70);
+  --term-shadow: 0 0 0 1px rgba(0,0,0,0.12), 0 20px 48px rgba(0,0,0,0.14), 0 6px 20px rgba(0,0,0,0.10);
   color-scheme: light;
 }
 
@@ -55,6 +66,17 @@
   --code-text: #d4d4d8;
   --shadow-sm: 0 1px 3px rgba(0,0,0,0.3);
   --shadow: 0 4px 24px rgba(0,0,0,0.4);
+  /* Terminal (dark) */
+  --term-bg: #0d0d0d;
+  --term-titlebar-bg: #1a1a1a;
+  --term-border: rgba(255,255,255,0.08);
+  --term-titlebar-border: rgba(255,255,255,0.06);
+  --term-title-color: rgba(255,255,255,0.30);
+  --term-text: #c5c5c5;
+  --term-dim: #6a6a6a;
+  --term-dim2: #484848;
+  --term-cursor-color: rgba(255,255,255,0.75);
+  --term-shadow: 0 0 0 1px rgba(0,0,0,0.5), 0 20px 48px rgba(0,0,0,0.5), 0 6px 20px rgba(0,0,0,0.3);
   color-scheme: dark;
 }
 
@@ -217,7 +239,6 @@ button { font: inherit; cursor: pointer; border: none; background: none; }
 .main {
   flex: 1;
   padding: 44px 56px 80px;
-  max-width: 860px;
   width: 100%;
 }
 
@@ -229,6 +250,7 @@ button { font: inherit; cursor: pointer; border: none; background: none; }
   font-size: 13px;
   color: var(--text-muted);
   margin-bottom: 28px;
+  max-width: 860px;
 }
 .page-breadcrumb span { color: var(--text-soft); }
 .page-title {
@@ -237,6 +259,7 @@ button { font: inherit; cursor: pointer; border: none; background: none; }
   letter-spacing: -0.03em;
   line-height: 1.2;
   margin-bottom: 10px;
+  max-width: 860px;
 }
 .page-subtitle {
   font-size: 15.5px;
@@ -245,10 +268,10 @@ button { font: inherit; cursor: pointer; border: none; background: none; }
   max-width: 640px;
   margin-bottom: 32px;
 }
-.page-divider { border: none; border-top: 1px solid var(--line); margin: 32px 0; }
+.page-divider { border: none; border-top: 1px solid var(--line); margin: 32px 0; max-width: 860px; }
 
 /* ── Doc sections ── */
-.doc-section { margin-bottom: 44px; }
+.doc-section { margin-bottom: 44px; max-width: 860px; }
 .doc-section h2 {
   font-size: 20px;
   font-weight: 700;
@@ -407,7 +430,7 @@ tr:last-child td { border-bottom: none; }
   font-size: 17px;
   color: var(--text-soft);
   line-height: 1.7;
-  max-width: 560px;
+  max-width: 600px;
   margin-bottom: 28px;
 }
 .hero-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 40px; }
@@ -492,6 +515,117 @@ tr:last-child td { border-bottom: none; }
 /* ── Badges ── */
 .badges { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 18px; }
 .badges img { height: 20px; }
+
+/* ── Hero flex layout (desktop: text left, terminal flush to viewport right) ── */
+.hero-flex {
+  display: flex;
+  align-items: flex-start;
+  gap: 24px;
+  /* Break out of main's right padding so terminal reaches viewport edge */
+  margin-right: -56px;
+}
+.hero-content {
+  flex: 0 0 calc(45% - 12px);
+  max-width: calc(45% - 12px);
+  min-width: 0;
+}
+.hero-terminal-wrap {
+  flex: 0 0 calc(55% - 12px);
+  max-width: calc(55% - 12px);
+  min-width: 280px;
+  display: flex;
+  align-items: flex-start;
+  /* Same gap from right viewport edge as text has from left */
+  padding-right: 56px;
+}
+
+/* ── Terminal window ── */
+.term-window {
+  width: 100%;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--term-bg);
+  border: 1px solid var(--term-border);
+  box-shadow: var(--term-shadow);
+  font-family: 'JetBrains Mono', 'Fira Code', 'Menlo', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.term-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 14px;
+  background: var(--term-titlebar-bg);
+  border-bottom: 1px solid var(--term-titlebar-border);
+  position: relative;
+}
+.term-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.term-dot-red    { background: #ff5f57; }
+.term-dot-yellow { background: #febc2e; }
+.term-dot-green  { background: #28c840; }
+.term-title {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 11px;
+  color: var(--term-title-color);
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  font-family: inherit;
+}
+.term-body {
+  padding: 14px 16px 16px;
+  height: 300px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.term-line {
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--term-text);
+  min-height: 1.6em;
+}
+.term-input-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  margin-top: 2px;
+}
+.t-user   { color: #3fb950; }
+.t-at     { color: var(--term-dim); }
+.t-host   { color: #58a6ff; }
+.t-colon  { color: var(--term-dim); }
+.t-path   { color: #e3b341; }
+.t-dollar { color: var(--term-dim); }
+.t-typed  { color: var(--term-text); }
+.t-cmd    { color: var(--term-text); }
+.t-dim    { color: var(--term-dim); }
+.t-dim2   { color: var(--term-dim2); }
+.t-success { color: #3fb950; }
+.t-bar-line { display: flex; align-items: center; gap: 6px; }
+.t-bar-track { color: #e3b341; letter-spacing: -1px; }
+.term-cursor {
+  display: inline-block;
+  width: 7px;
+  height: 13px;
+  background: transparent;
+  border-radius: 1px;
+  margin-left: 1px;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+.term-cursor-on { background: var(--term-cursor-color); }
+
+
 
 /* ── Footer ── */
 .footer {
@@ -578,6 +712,11 @@ tr:last-child td { border-bottom: none; }
   .footer { padding: 32px 20px; gap: 28px; }
   .footer-bottom { padding: 16px 20px; flex-direction: column; align-items: flex-start; }
   .feature-grid { grid-template-columns: 1fr; }
+
+  /* Hide terminal on tablet/mobile */
+  .hero-terminal-wrap { display: none; }
+  .hero-flex { display: block; margin-right: 0; }
+  .hero-content { max-width: 100%; flex: none; }
 }
 
 @media (max-width: 560px) {

@@ -8,10 +8,12 @@ LLM provider abstraction layer for the CodePilot agentic runtime.
 
 Architectural Notes:
 Implements a unified async interface (LLMProvider) for OpenAI, Anthropic,
-and Alibaba/Qwen providers. Handles explicit prompt caching (cache_control
-breakpoints) for Anthropic and Alibaba, and extended thinking for Claude.
+AlibabaCloud/Qwen, and DeepSeek providers. Handles explicit prompt caching
+(cache_control breakpoints) for Anthropic and Alibaba, and extended thinking
+for Claude and DeepSeek.
 Rolling cache breakpoints are injected on the last assistant message to
 maximise token reuse across agentic steps without redundant re-processing.
+DeepSeek uses fully automatic server-side caching — no breakpoints needed.
 
 Copyright (c) 2026 Jahanzeb Ahmed.
 Licensed under the MIT License.
@@ -142,13 +144,21 @@ class LLMProvider(ABC):
 class OpenAIProvider(LLMProvider):
     """OpenAI — caching is fully automatic, no API changes needed."""
 
-    def __init__(self, api_key: str, model: str):
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        thinking_enabled: bool = False,
+        reasoning_effort: str = "high",
+    ):
         try:
             from openai import AsyncOpenAI
         except ImportError:
             raise ImportError("Install the openai package: pip install openai")
-        self.client = AsyncOpenAI(api_key=api_key)
-        self.model  = model
+        self.client           = AsyncOpenAI(api_key=api_key)
+        self.model            = model
+        self.thinking_enabled = thinking_enabled
+        self.reasoning_effort = reasoning_effort
 
     async def chat(
         self,
@@ -163,12 +173,20 @@ class OpenAIProvider(LLMProvider):
             msgs.append({"role": "system", "content": sys_text})
         msgs.extend(messages)
 
-        response = await self.client.chat.completions.create(
+        kwargs = dict(
             model=self.model,
             messages=msgs,
-            temperature=temperature,
             max_tokens=max_tokens,
         )
+
+        if self.thinking_enabled:
+            # temperature is unsupported for reasoning models.
+            # Map 'max' (DeepSeek-specific) to 'high' for OpenAI.
+            kwargs["reasoning_effort"] = "high" if self.reasoning_effort == "max" else self.reasoning_effort
+        else:
+            kwargs["temperature"] = temperature
+
+        response = await self.client.chat.completions.create(**kwargs)
         return response.choices[0].message.content
 
     async def chat_stream(
@@ -184,13 +202,21 @@ class OpenAIProvider(LLMProvider):
             msgs.append({"role": "system", "content": sys_text})
         msgs.extend(messages)
 
-        stream = await self.client.chat.completions.create(
+        kwargs = dict(
             model=self.model,
             messages=msgs,
-            temperature=temperature,
             max_tokens=max_tokens,
             stream=True,
         )
+
+        if self.thinking_enabled:
+            # temperature is unsupported for reasoning models.
+            # Map 'max' (DeepSeek-specific) to 'high' for OpenAI.
+            kwargs["reasoning_effort"] = "high" if self.reasoning_effort == "max" else self.reasoning_effort
+        else:
+            kwargs["temperature"] = temperature
+
+        stream = await self.client.chat.completions.create(**kwargs)
         async for chunk in stream:
             if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
@@ -218,7 +244,14 @@ class AnthropicProvider(LLMProvider):
     _SYSTEM_CACHE_TTL = "1h"       # system prompt → survives between tasks
     _CONV_CACHE_TTL   = None       # conversation → 5min default (omit ttl field)
 
-    def __init__(self, api_key: str, model: str, thinking_enabled: bool = False, thinking_budget: int = 8000):
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        thinking_enabled: bool = False,
+        thinking_budget: int = 8000,
+        reasoning_effort: str = "high",
+    ):
         try:
             from anthropic import AsyncAnthropic
         except ImportError:
@@ -227,6 +260,7 @@ class AnthropicProvider(LLMProvider):
         self.model            = model
         self.thinking_enabled = thinking_enabled
         self.thinking_budget  = thinking_budget
+        self.reasoning_effort = reasoning_effort
 
     # ------------------------------------------------------------------ #
     #  System prompt → two content blocks with cache_control               #
@@ -340,10 +374,17 @@ class AnthropicProvider(LLMProvider):
         )
 
         if self.thinking_enabled:
-            kwargs["thinking"] = {
-                "type": "enabled",
-                "budget_tokens": self.thinking_budget,
-            }
+            is_adaptive = any(x in self.model for x in ("-4-7", "-4-6", "4.7", "4.6", "mythos"))
+            if is_adaptive:
+                kwargs["thinking"] = {
+                    "type": "adaptive",
+                    "effort": self.reasoning_effort.lower(),
+                }
+            else:
+                kwargs["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": self.thinking_budget,
+                }
 
         system_blocks = self._build_system_blocks(system)
         if system_blocks:
@@ -379,10 +420,17 @@ class AnthropicProvider(LLMProvider):
         )
 
         if self.thinking_enabled:
-            kwargs["thinking"] = {
-                "type": "enabled",
-                "budget_tokens": self.thinking_budget,
-            }
+            is_adaptive = any(x in self.model for x in ("-4-7", "-4-6", "4.7", "4.6", "mythos"))
+            if is_adaptive:
+                kwargs["thinking"] = {
+                    "type": "adaptive",
+                    "effort": self.reasoning_effort.lower(),
+                }
+            else:
+                kwargs["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": self.thinking_budget,
+                }
 
         system_blocks = self._build_system_blocks(system)
         if system_blocks:
@@ -429,7 +477,7 @@ class AlibabaProvider(LLMProvider):
     Conversational messages use explicit cache_control on the last assistant message.
     """
 
-    def __init__(self, api_key: str, model: str):
+    def __init__(self, api_key: str, model: str, thinking_enabled: bool = False):
         try:
             from openai import AsyncOpenAI
         except ImportError:
@@ -438,11 +486,32 @@ class AlibabaProvider(LLMProvider):
             api_key=api_key,
             base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
         )
-        self.model = model
+        self.model            = model
+        self.thinking_enabled = thinking_enabled
 
     @classmethod
     def _add_rolling_breakpoint(cls, messages: List[Dict]) -> List[Dict]:
         return _insert_cache_breakpoints(messages, ttl=300)
+
+    def _build_kwargs(self, messages, system, temperature, max_tokens) -> dict:
+        msgs = []
+        sys_text = self._system_str(system)
+        if sys_text:
+            msgs.append({"role": "system", "content": sys_text})
+        msgs.extend(self._add_rolling_breakpoint(messages))
+
+        kwargs = dict(
+            model=self.model,
+            messages=msgs,
+            max_tokens=max_tokens,
+        )
+
+        if self.thinking_enabled:
+            kwargs["extra_body"] = {"enable_thinking": True}
+        else:
+            kwargs["temperature"] = temperature
+
+        return kwargs
 
     async def chat(
         self,
@@ -451,19 +520,16 @@ class AlibabaProvider(LLMProvider):
         temperature: float = 0.0,
         max_tokens: int = 4096,
     ) -> str:
-        msgs = []
-        sys_text = self._system_str(system)
-        if sys_text:
-            msgs.append({"role": "system", "content": sys_text})
-        msgs.extend(self._add_rolling_breakpoint(messages))
+        kwargs = self._build_kwargs(messages, system, temperature, max_tokens)
+        response = await self.client.chat.completions.create(**kwargs)
 
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=msgs,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        return response.choices[0].message.content
+        msg = response.choices[0].message
+        content          = msg.content or ""
+        reasoning_content = getattr(msg, "reasoning_content", None) or ""
+
+        if reasoning_content:
+            return f"<thinking>\n{reasoning_content}\n</thinking>\n{content}"
+        return content
 
     async def chat_stream(
         self,
@@ -472,22 +538,182 @@ class AlibabaProvider(LLMProvider):
         temperature: float = 0.0,
         max_tokens: int = 4096,
     ) -> AsyncIterator[str]:
+        kwargs = self._build_kwargs(messages, system, temperature, max_tokens)
+        kwargs["stream"] = True
+
+        stream = await self.client.chat.completions.create(**kwargs)
+
+        in_thinking = False
+
+        async for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+
+            # --- reasoning / thinking content ---
+            reasoning_chunk = getattr(delta, "reasoning_content", None)
+            if reasoning_chunk:
+                if not in_thinking:
+                    # First reasoning token — open the tag.
+                    yield "<thinking>\n"
+                    in_thinking = True
+                yield reasoning_chunk
+                continue
+
+            # --- regular content ---
+            if in_thinking:
+                # Reasoning stream ended — close the tag before answer.
+                yield "\n</thinking>\n"
+                in_thinking = False
+
+            if delta.content:
+                yield delta.content
+
+        # Guard: close tag if stream ended while still in thinking
+        if in_thinking:
+            yield "\n</thinking>\n"
+
+
+class DeepSeekProvider(LLMProvider):
+    """
+    DeepSeek (V4-Flash / V4-Pro) — uses the OpenAI SDK pointed at
+    ``https://api.deepseek.com``.
+
+    Context caching:
+        Fully automatic on DeepSeek's server side (disk-based KV cache).
+        No ``cache_control`` annotations or rolling breakpoints are needed.
+        Cache TTL is hours-to-days — no background refresh timer required.
+
+    Thinking mode:
+        Enabled via ``extra_body={"thinking": {"type": "enabled"}}`` and
+        the ``reasoning_effort`` parameter ("high" or "max").
+        Per DeepSeek docs, ``temperature`` is ignored in thinking mode so
+        we omit it entirely to avoid confusion.
+        Chain-of-thought arrives in ``delta.reasoning_content`` (streaming)
+        or ``message.reasoning_content`` (non-streaming).
+        It is wrapped in ``<thinking>...</thinking>`` tags and prepended to
+        the returned string — exactly like ``AnthropicProvider`` — so the
+        runtime's streaming state machine and conversation history work
+        identically without any changes.
+        Per docs, ``reasoning_content`` does NOT need to be re-sent in
+        subsequent turns for non-tool-call conversations; only ``content``
+        is stored in history.
+    """
+
+    _BASE_URL = "https://api.deepseek.com"
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        thinking_enabled: bool = False,
+        reasoning_effort: str = "high",
+    ):
+        try:
+            from openai import AsyncOpenAI
+        except ImportError:
+            raise ImportError("Install the openai package: pip install openai")
+        self.client           = AsyncOpenAI(api_key=api_key, base_url=self._BASE_URL)
+        self.model            = model
+        self.thinking_enabled = thinking_enabled
+        self.reasoning_effort = reasoning_effort
+
+    # ------------------------------------------------------------------ #
+    #  Internal helpers                                                    #
+    # ------------------------------------------------------------------ #
+
+    def _build_kwargs(self, messages, system, temperature, max_tokens) -> dict:
+        """Build the common kwargs dict for a chat completions call."""
         msgs = []
         sys_text = self._system_str(system)
         if sys_text:
             msgs.append({"role": "system", "content": sys_text})
-        msgs.extend(self._add_rolling_breakpoint(messages))
+        msgs.extend(messages)
 
-        stream = await self.client.chat.completions.create(
+        kwargs = dict(
             model=self.model,
             messages=msgs,
-            temperature=temperature,
             max_tokens=max_tokens,
-            stream=True,
         )
+
+        if self.thinking_enabled:
+            # temperature is silently ignored by DeepSeek in thinking mode
+            # (per docs) — omit it to keep the request clean.
+            kwargs["reasoning_effort"] = self.reasoning_effort
+            kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+        else:
+            kwargs["temperature"] = temperature
+
+        return kwargs
+
+    # ------------------------------------------------------------------ #
+    #  chat (non-streaming)                                                #
+    # ------------------------------------------------------------------ #
+
+    async def chat(
+        self,
+        messages: List[Dict[str, str]],
+        system: Union[str, SystemPromptParts, None] = None,
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+    ) -> str:
+        kwargs = self._build_kwargs(messages, system, temperature, max_tokens)
+        response = await self.client.chat.completions.create(**kwargs)
+
+        msg = response.choices[0].message
+        content          = msg.content or ""
+        reasoning_content = getattr(msg, "reasoning_content", None) or ""
+
+        if self.thinking_enabled and reasoning_content:
+            return f"<thinking>\n{reasoning_content}\n</thinking>\n{content}"
+        return content
+
+    # ------------------------------------------------------------------ #
+    #  chat_stream (streaming)                                             #
+    # ------------------------------------------------------------------ #
+
+    async def chat_stream(
+        self,
+        messages: List[Dict[str, str]],
+        system: Union[str, SystemPromptParts, None] = None,
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+    ) -> AsyncIterator[str]:
+        kwargs = self._build_kwargs(messages, system, temperature, max_tokens)
+        kwargs["stream"] = True
+
+        stream = await self.client.chat.completions.create(**kwargs)
+
+        in_thinking = False
+
         async for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+
+            # --- reasoning / thinking content ---
+            reasoning_chunk = getattr(delta, "reasoning_content", None)
+            if reasoning_chunk:
+                if not in_thinking:
+                    # First reasoning token — open the tag.
+                    yield "<thinking>\n"
+                    in_thinking = True
+                yield reasoning_chunk
+                continue
+
+            # --- regular content ---
+            if in_thinking:
+                # Reasoning stream ended — close the tag before answer.
+                yield "\n</thinking>\n"
+                in_thinking = False
+
+            if delta.content:
+                yield delta.content
+
+        # Guard: close tag if stream ended while still in thinking
+        # (should not happen in practice, but defensive).
+        if in_thinking:
+            yield "\n</thinking>\n"
 
 
 def get_provider(config) -> LLMProvider:
@@ -501,17 +727,31 @@ def get_provider(config) -> LLMProvider:
         )
 
     if provider_name == "openai":
-        return OpenAIProvider(api_key, config.name)
+        return OpenAIProvider(
+            api_key, config.name,
+            thinking_enabled=config.thinking.enabled,
+            reasoning_effort=config.thinking.reasoning_effort,
+        )
     elif provider_name == "anthropic":
         return AnthropicProvider(
             api_key, config.name,
             thinking_enabled=config.thinking.enabled,
             thinking_budget=config.thinking.budget_tokens,
+            reasoning_effort=config.thinking.reasoning_effort,
         )
     elif provider_name == "alibaba":
-        return AlibabaProvider(api_key, config.name)
+        return AlibabaProvider(
+            api_key, config.name,
+            thinking_enabled=config.thinking.enabled,
+        )
+    elif provider_name == "deepseek":
+        return DeepSeekProvider(
+            api_key, config.name,
+            thinking_enabled=config.thinking.enabled,
+            reasoning_effort=config.thinking.reasoning_effort,
+        )
     else:
         raise ValueError(
             f"Unsupported provider: '{provider_name}'. "
-            "Choose from: 'anthropic', 'openai', 'alibaba'."
+            "Choose from: 'anthropic', 'openai', 'alibaba', 'deepseek'."
         )

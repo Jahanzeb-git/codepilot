@@ -27,24 +27,28 @@ from pydantic import BaseModel, Field, field_validator
 
  
 class ThinkingConfig(BaseModel):
-    """Extended thinking config — Anthropic models only."""
+    """Extended thinking / reasoning config — Anthropic, OpenAI, DeepSeek, and Alibaba models."""
     enabled: bool = False
     budget_tokens: int = Field(
         default=8000, gt=0,
-        description="Max tokens the model may spend on internal reasoning."
+        description="Max tokens the model may spend on internal reasoning (Anthropic only)."
+    )
+    reasoning_effort: str = Field(
+        default="high",
+        description="Reasoning effort level: 'high' or 'max' for DeepSeek, 'low', 'medium', or 'high' for OpenAI."
     )
 
 
 class ModelConfig(BaseModel):
-    provider: str = Field(..., description="LLM provider: 'anthropic', 'openai', or 'alibaba'")
+    provider: str = Field(..., description="LLM provider: 'anthropic', 'openai', 'alibaba', or 'deepseek'")
     name: str = Field(..., description="Model identifier, e.g. 'claude-3-5-sonnet-20241022'")
     api_key_env: str = Field(default="OPENAI_API_KEY", description="Name of the env var holding the API key")
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     max_tokens: int = Field(default=4096, gt=0)
     thinking: ThinkingConfig = Field(
         default_factory=ThinkingConfig,
-        description="Extended thinking settings (Anthropic only). "
-                    "When enabled, temperature is forced to 1.0 automatically."
+        description="Extended thinking settings (Anthropic, DeepSeek, OpenAI, Alibaba). "
+                    "When enabled, temperature is forced to 1.0 automatically for Anthropic, and thinking mode is enabled for OpenAI, DeepSeek, and Alibaba."
     )
 
 

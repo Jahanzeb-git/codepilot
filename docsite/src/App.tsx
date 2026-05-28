@@ -2,9 +2,10 @@ import { useState, useEffect } from "react";
 import { Moon, Sun, Github, Menu, X, ChevronRight, BookOpen, ExternalLink } from "lucide-react";
 import { navGroups, allPages, findNav, type PageId } from "./pages";
 import {
-  PageIntroduction, PageInstallation, PageQuickStart, PageAgentFile,
-  PageHowItWorks, PageBasicUsage, PageStreaming, PageMultiTurn,
-  PageShellTools, PageCompletionBlock, PageChatMode, PageWorkspaceChanges,
+  PageIntroduction, PageInstallation, PageQuickStart, PageModelsProviders, PageAgentFile,
+  PageHowItWorks, PageBasicUsage, PageCodeAsInterface, PageStreaming, PageMultiTurn,
+  PageTerminalTools, PageFileHandling, PageSearchTools, PageContextArchiving, PageUserInteraction,
+  PageCompletionBlock, PageChatMode, PageWorkspaceChanges,
   PageSessionPersistence, PageContextMemory, PageResumingSession, PageResettingSession,
   PageHooks, PagePermissionGating, PageMidTaskInjection, PageMultiOperation,
   PageCustomTools, PageAborting, PageCLIPattern, PageWebServer, PageAPIReference,
@@ -57,12 +58,18 @@ export function App() {
     introduction: <PageIntroduction nav={setPage} />,
     installation: <PageInstallation />,
     "quick-start": <PageQuickStart />,
+    "models-providers": <PageModelsProviders />,
     agentfile: <PageAgentFile />,
     "how-it-works": <PageHowItWorks />,
     "basic-usage": <PageBasicUsage />,
+    "code-as-interface": <PageCodeAsInterface />,
     streaming: <PageStreaming />,
     "multi-turn": <PageMultiTurn />,
-    "shell-tools": <PageShellTools />,
+    "file-handling": <PageFileHandling />,
+    "search-tools": <PageSearchTools />,
+    "terminal-tools": <PageTerminalTools />,
+    "context-archiving": <PageContextArchiving />,
+    "user-interaction": <PageUserInteraction />,
     "completion-block": <PageCompletionBlock />,
     "chat-mode": <PageChatMode />,
     "workspace-changes": <PageWorkspaceChanges />,
@@ -181,13 +188,14 @@ function Footer() {
           <a href="#introduction">Introduction</a>
           <a href="#installation">Installation</a>
           <a href="#quick-start">Quick Start</a>
+          <a href="#models-providers">Models & Providers</a>
           <a href="#agentfile">AgentFile</a>
         </div>
         <div className="footer-col">
           <div className="footer-col-title">Core Concepts</div>
           <a href="#how-it-works">How It Works</a>
+          <a href="#code-as-interface">Code-as-Interface</a>
           <a href="#streaming">Streaming</a>
-          <a href="#shell-tools">Shell Tools</a>
           <a href="#completion-block">Completion Block</a>
         </div>
         <div className="footer-col">
@@ -201,6 +209,7 @@ function Footer() {
           <div className="footer-col-title">Production</div>
           <a href="#hooks">Hooks</a>
           <a href="#permission-gating">Permission Gating</a>
+          <a href="#terminal-tools">Terminal Tools</a>
           <a href="#custom-tools">Custom Tools</a>
           <a href="#web-server">Web Server Integration</a>
         </div>

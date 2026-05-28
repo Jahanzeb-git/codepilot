@@ -123,7 +123,7 @@ class BlockParser:
 
         for i, block in enumerate(blocks):
             if block.language == "codepilot":
-                remaining        = blocks[i + 1:]
+                remaining = blocks[i + 1:]
                 # Only blocks with a filename= annotation are payload blocks.
                 # Display-only blocks (```python for explanation, etc.) never carry
                 # filename= so they pass through safely even if placed after the

@@ -48,6 +48,7 @@ PROVIDER_FUDGE = {
     "anthropic": 1.1,   # cl100k undercounts ~10% for Claude
     "openai":    1.0,   # exact
     "together":  1.0,   # Qwen uses cl100k natively
+    "deepseek":  1.0,   # same tokenizer family as OpenAI
 }
 
 

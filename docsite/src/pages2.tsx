@@ -192,3 +192,70 @@ runtime.run("Add pytest tests for both endpoints")`}</Code>
     </>
   );
 }
+
+export function PageCodeAsInterface() {
+  return (
+    <>
+      <PageHeader
+        title="Code-as-Interface"
+        subtitle="Understand the philosophy behind treating execution blocks as the primary interface between the model and the environment."
+      />
+
+      <Section title="Philosophy & Cognitive Span">
+        <p>
+          Traditional agent systems constrain models inside narrow, structured JSON schemas or rigid function-calling definitions.
+          CodePilot reverses this: the model is given a <strong>code-as-interface</strong> runtime.
+          The model writes arbitrary Python code that executes directly in the workspace environment.
+        </p>
+        <ul style={{ paddingLeft: 20, color: "var(--text-soft)", lineHeight: 2 }}>
+          <li><strong>Large Cognitive Span:</strong> Rather than executing single tools sequentially, the model can reason, write logic loops, import standard libraries, handle exceptions with try-except, and perform complex scripting operations in a single step.</li>
+          <li><strong>Flexibility:</strong> The agent can combine built-in tool calls with raw, custom Python code to diagnose problems or inspect outputs dynamically.</li>
+        </ul>
+      </Section>
+
+      <Section title="The Escaping Problem in JSON APIs">
+        <p>
+          A common failure point in structured tool calling (JSON / functions) is writing file contents.
+          When a tool accepts file content as a string argument within a JSON structure, the model must escape quotes, backslashes, and control characters:
+        </p>
+        <Code lang="json">{`{
+  "name": "write_file",
+  "arguments": {
+    "path": "app.py",
+    "content": "def main():\\n    print(\\"Hello World!\\")\\n    # Nested quotes require \\\\\\" escaping"
+  }
+}`}</Code>
+        <p>
+          For large codebases, complex scripts, or text containing raw regex patterns, escaping frequently fails.
+          This results in JSON parsing violations, syntax errors, or corrupted/truncated writes where the agent fails to save any content.
+        </p>
+      </Section>
+
+      <Section title="The Solution: Payload Markdown Blocks">
+        <p>
+          CodePilot solves this by decoupling the tool execution parameters from the file payloads.
+          Instead of passing file contents as escaped arguments inside the tool call, the agent issues a clean Python command:
+        </p>
+        <Code lang="python">{`# The model issues this clean tool call - no nested content argument:
+write_file("app.py", mode="write")`}</Code>
+        <p>
+          Then, it writes the raw, unescaped content inside a separate, natural **Payload Markdown Block** directly following the code block:
+        </p>
+        <Code lang="text">{`\`\`\`python filename=app.py
+def main():
+    print("Hello World!")
+    # Raw text is written exactly as-is. 
+    # Bypasses quote and newline escaping entirely!
+\`\`\``}</Code>
+        <Callout>
+          <strong>Advantages:</strong>
+          <ul style={{ paddingLeft: 20, marginTop: 8, lineHeight: 1.8 }}>
+            <li><strong>Zero Escaping Overhead:</strong> Text is sent exactly as written.</li>
+            <li><strong>Less Token Usage:</strong> Eliminates character bloat caused by quote escapes and backslashes.</li>
+            <li><strong>100% Reliable Writes:</strong> Bypasses JSON serialization limits entirely, guaranteeing file writes match the model's exact target output.</li>
+          </ul>
+        </Callout>
+      </Section>
+    </>
+  );
+}

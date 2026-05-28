@@ -1,47 +1,58 @@
 import { BookOpen, Github, Package, Zap } from "lucide-react";
 import { Code, Callout, Table, Points, Section, PageHeader } from "./components";
+import { TerminalDemo } from "./TerminalDemo";
 import type { PageId } from "./pages";
 
 export function PageIntroduction({ nav }: { nav: (p: PageId) => void }) {
   return (
     <>
       <div className="hero">
-        <div className="hero-eyebrow">CodePilot v0.9.1</div>
-        <h1 className="hero-title">Embeddable Autonomous<br />Agent Framework</h1>
-        <p className="hero-desc">
-          CodePilot is an <strong>Embeddable Autonomous Agent (EAA)</strong> framework for software engineering tasks.
-          Embed an autonomous agent directly into your own systems: DevOps pipelines, web backends, internal tools, CLI workflows.
-        </p>
-        <div className="hero-actions">
-          <button className="btn-primary" onClick={() => nav("quick-start")}>
-            <Zap size={16} /> Quick Start
-          </button>
-          <a
-            className="btn-secondary"
-            href="https://github.com/Jahanzeb-git/codepilot"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Github size={16} /> GitHub
-          </a>
-          <a
-            className="btn-secondary"
-            href="https://pypi.org/project/codepilot-ai/"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Package size={16} /> PyPI
-          </a>
-        </div>
+        <div className="hero-flex">
+          {/* ── Left: text content ── */}
+          <div className="hero-content">
+            <div className="hero-eyebrow">CodePilot v0.9.3</div>
+            <h1 className="hero-title">Embeddable Autonomous<br />Agent Framework</h1>
+            <p className="hero-desc">
+              CodePilot is an <strong>Embeddable Autonomous Agent (EAA)</strong> framework for software engineering tasks.
+              Embed an autonomous agent directly into your own systems: DevOps pipelines, web backends, internal tools, CLI workflows.
+            </p>
+            <div className="hero-actions">
+              <button className="btn-primary" onClick={() => nav("quick-start")}>
+                <Zap size={16} /> Quick Start
+              </button>
+              <a
+                className="btn-secondary"
+                href="https://github.com/Jahanzeb-git/codepilot"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <Github size={16} /> GitHub
+              </a>
+              <a
+                className="btn-secondary"
+                href="https://pypi.org/project/codepilot-ai/"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <Package size={16} /> PyPI
+              </a>
+            </div>
 
-        <div className="hero-code">
-          <span style={{ color: "#71717a" }}>$ </span>pip install codepilot-ai
-        </div>
+            <div className="hero-code">
+              <span style={{ color: "#71717a" }}>$ </span>pip install codepilot-ai
+            </div>
 
-        <div className="badges" style={{ marginTop: 20 }}>
-          <img src="https://img.shields.io/pypi/v/codepilot-ai" alt="PyPI version" />
-          <img src="https://img.shields.io/pypi/pyversions/codepilot-ai" alt="Python" />
-          <img src="https://img.shields.io/badge/license-MIT-black" alt="License" />
+            <div className="badges" style={{ marginTop: 20 }}>
+              <img src="https://img.shields.io/pypi/v/codepilot-ai" alt="PyPI version" />
+              <img src="https://img.shields.io/pypi/pyversions/codepilot-ai" alt="Python" />
+              <img src="https://img.shields.io/badge/license-MIT-black" alt="License" />
+            </div>
+          </div>
+
+          {/* ── Right: terminal demo (desktop only) ── */}
+          <div className="hero-terminal-wrap">
+            <TerminalDemo />
+          </div>
         </div>
       </div>
 
@@ -94,6 +105,7 @@ export function PageIntroduction({ nav }: { nav: (p: PageId) => void }) {
           rows={[
             [<code>anthropic</code>, "claude-opus-4-5, claude-sonnet-4-5", <code>ANTHROPIC_API_KEY</code>],
             [<code>openai</code>, "gpt-4o, gpt-4-turbo", <code>OPENAI_API_KEY</code>],
+            [<code>deepseek</code>, "deepseek-v4-pro, deepseek-v4-flash", <code>DEEPSEEK_API_KEY</code>],
             [<code>alibaba</code>, "qwen-max, qwen-plus, qwen-turbo", <code>DASHSCOPE_API_KEY</code>],
           ]}
         />
@@ -122,6 +134,7 @@ pip install psycopg2-binary   # PostgreSQL driver only`}</Code>
         <Code lang="bash">{`# Pick one
 export ANTHROPIC_API_KEY="sk-ant-..."
 export OPENAI_API_KEY="sk-..."
+export DEEPSEEK_API_KEY="sk-..."
 export DASHSCOPE_API_KEY="..."`}</Code>
       </Section>
 
@@ -131,9 +144,115 @@ export DASHSCOPE_API_KEY="..."`}</Code>
           rows={[
             [<code>anthropic</code>, "claude-opus-4-5, claude-sonnet-4-5", <code>ANTHROPIC_API_KEY</code>],
             [<code>openai</code>, "gpt-4o, gpt-4-turbo", <code>OPENAI_API_KEY</code>],
+            [<code>deepseek</code>, "deepseek-v4-pro, deepseek-v4-flash", <code>DEEPSEEK_API_KEY</code>],
             [<code>alibaba</code>, "qwen-max, qwen-plus, qwen-turbo", <code>DASHSCOPE_API_KEY</code>],
           ]}
         />
+      </Section>
+    </>
+  );
+}
+
+export function PageModelsProviders() {
+  return (
+    <>
+      <PageHeader
+        title="Models & Providers"
+        subtitle="Configure the LLM providers and models that power your autonomous agents."
+      />
+      
+      <Section title="Supported Providers">
+        <p>
+          CodePilot supports four LLM providers out of the box. Providers are selected in your <code>agent.yaml</code> configuration file.
+        </p>
+        <Table
+          headers={["Provider", "Key env var", "Thinking Mode", "Caching Mode"]}
+          rows={[
+            [<code>anthropic</code>, <code>ANTHROPIC_API_KEY</code>, "Adaptive / Manual", "Explicit (Rolling Breakpoints)"],
+            [<code>openai</code>, <code>OPENAI_API_KEY</code>, "Reasoning Effort", "Automatic (Server-side)"],
+            [<code>deepseek</code>, <code>DEEPSEEK_API_KEY</code>, "Reasoning Effort", "Automatic (Server-side)"],
+            [<code>alibaba</code>, <code>DASHSCOPE_API_KEY</code>, "Explicit toggling", "Explicit (Rolling Breakpoints)"],
+          ]}
+        />
+      </Section>
+
+      <Section title="Anthropic">
+        <p>
+          Anthropic's Claude models provide the best overall performance with CodePilot. Newer generations support adaptive thinking.
+        </p>
+        
+        <h3>Adaptive Thinking (Claude 4.6, 4.7+)</h3>
+        <p>
+          Newer Claude models determine their own thinking budget based on the complexity of the request and a specified effort level.
+        </p>
+        <Code lang="yaml">{`agent:
+  model:
+    provider: "anthropic"
+    name: "claude-4-7-opus"
+    api_key_env: "ANTHROPIC_API_KEY"
+    thinking:
+      enabled: true
+      reasoning_effort: "xhigh"  # 'low', 'medium', 'high', 'xhigh', or 'max'`}</Code>
+
+        <h3>Manual Extended Thinking (Claude 3.7, 4.5)</h3>
+        <p>
+          Older thinking-enabled models require a hard-capped token budget for internal reasoning.
+        </p>
+        <Code lang="yaml">{`agent:
+  model:
+    provider: "anthropic"
+    name: "claude-4-5-sonnet"
+    api_key_env: "ANTHROPIC_API_KEY"
+    thinking:
+      enabled: true
+      budget_tokens: 8000`}</Code>
+      </Section>
+
+      <Section title="OpenAI">
+        <p>
+          OpenAI's reasoning models (like <code>gpt-5.5</code>, <code>gpt-5.4</code>, <code>o3-mini</code>) are configured via the <code>reasoning_effort</code> parameter.
+        </p>
+        <p>
+          Note: Since the OpenAI Chat Completions API performs reasoning server-side and does not stream intermediate thought tokens, no <code>&lt;thinking&gt;</code> blocks will appear in the stream. However, the model will generate higher-quality answers based on the configured effort.
+        </p>
+        <Code lang="yaml">{`agent:
+  model:
+    provider: "openai"
+    name: "gpt-5.5"
+    api_key_env: "OPENAI_API_KEY"
+    thinking:
+      enabled: true
+      reasoning_effort: "high"   # 'low', 'medium', or 'high'`}</Code>
+      </Section>
+
+      <Section title="DeepSeek">
+        <p>
+          DeepSeek's models (<code>deepseek-v4-pro</code> and <code>deepseek-v4-flash</code>) offer flagship reasoning performance at a very competitive price. 
+        </p>
+        <p>
+          DeepSeek includes automatic server-side context caching, so no special TTL or breakpoints need to be configured in CodePilot.
+        </p>
+        <Code lang="yaml">{`agent:
+  model:
+    provider: "deepseek"
+    name: "deepseek-v4-pro"
+    api_key_env: "DEEPSEEK_API_KEY"
+    thinking:
+      enabled: true
+      reasoning_effort: "high"   # 'high' or 'max'`}</Code>
+      </Section>
+
+      <Section title="Alibaba (Qwen)">
+        <p>
+          Alibaba Cloud's Qwen models (like <code>qwen-max</code>) support an explicit thinking mode toggled via DashScope parameters.
+        </p>
+        <Code lang="yaml">{`agent:
+  model:
+    provider: "alibaba"
+    name: "qwen-max"
+    api_key_env: "DASHSCOPE_API_KEY"
+    thinking:
+      enabled: true`}</Code>
       </Section>
     </>
   );
@@ -242,13 +361,13 @@ agent:
   system_prompt: "./prompts/instructions.md"
 
   model:
-    provider: "alibaba"             # "anthropic" | "openai" | "alibaba"
-    name: "qwen-max"
-    api_key_env: "DASHSCOPE_API_KEY"
-    temperature: 0.2
-    max_tokens: 8096
+    provider: "anthropic"           # "anthropic" | "openai" | "deepseek" | "alibaba"
+    name: "claude-4-5-sonnet"
+    api_key_env: "ANTHROPIC_API_KEY"
+    temperature: 1.0
+    max_tokens: 8192
     thinking:                       # Anthropic only: extended reasoning
-      enabled: false
+      enabled: true
       budget_tokens: 8000
 
   runtime:

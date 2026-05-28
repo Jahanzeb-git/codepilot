@@ -12,13 +12,14 @@ export function PageAPIReference() {
         <Code lang="python">{`Runtime(
     agent_file: str,              # path to agent.yaml
     session: str = "memory",      # "memory" | "file" | "db"
-    session_id: str = None,       # defaults to agent name, slugified
+    session_id: str = None,       # defaults to lowercased agent name with spaces changed to "-"
     session_dir: Path = None,     # override ~/.codepilot/sessions/
     stream: bool = False,         # True = token-by-token streaming
-    db_url: Optional[str] = None, # database URL (SQLite, PostgreSQL, MySQL, etc.)
+    db_url: Optional[str] = None, # database URL for session="db"
+    db = None,                    # optional SQLAlchemy Engine; AsyncEngine requires AsyncRuntime
 )
 
-# AsyncRuntime() also exists for async operations. Expects same arguments.
+# AsyncRuntime() accepts the same arguments. It is required for SQLAlchemy AsyncEngine sessions.
 
 runtime.run(task: str) -> Optional[str]
     # Blocking. Appends to history. Returns completion block text or None.
@@ -27,7 +28,7 @@ runtime.send_message(message: str)
     # Thread-safe. Non-blocking. Tagged [USER MESSAGE] in context.
 
 runtime.reset()
-    # Wipes messages + session file. Next run() is a blank slate.
+    # Wipes messages, deletes persisted session state, and restarts the default terminal.
 
 runtime.abort()
     # Sets abort flag. Loop stops after current step.
@@ -52,6 +53,11 @@ runtime.registry           # ToolRegistry - inspect registered tools`}</Code>
     on_user_message_queued,     # USER_MESSAGE_QUEUED - send_message() called
     on_user_message_injected,   # USER_MESSAGE_INJECTED - message in context
 )`}</Code>
+        <p>
+          The <code>EventType</code> enum also exposes <code>START</code>, <code>STEP</code>,{" "}
+          <code>SECURITY_ERROR</code>, <code>RUNTIME_ERROR</code>, <code>MAX_STEPS</code>, and{" "}
+          <code>SESSION_RESET</code> for manual <code>runtime.hooks.register(...)</code> usage.
+        </p>
       </Section>
 
       <Section title="write_file()">
@@ -80,7 +86,7 @@ runtime.registry           # ToolRegistry - inspect registered tools`}</Code>
         <Table
           headers={["Parameter", "Description"]}
           rows={[
-            [<code>session_id</code>, <>"main" exists by default (recreated after reset()).</>],
+            [<code>session_id</code>, <><code>"main"</code> exists by default and is recreated after <code>reset()</code>.</>],
             [<code>command</code>, "Shell command string."],
             [<code>timeout</code>, "Seconds to wait. Output captured on timeout."],
             [<code>new_terminal</code>, "True = create and use a new terminal session in one step."],
@@ -115,7 +121,7 @@ runtime.registry           # ToolRegistry - inspect registered tools`}</Code>
 # Archive completed task context with your summary. task is an alias for position.
 
 reveal_context(position)
-# Restore a previously archived task's full original context.
+# Return a previously archived task's full original context as text.
 
 list_archived_context()
 # List archived tasks with summary previews and estimated token savings.`}</Code>
@@ -147,8 +153,12 @@ brew install ripgrep          # macOS`}</Code>
 
       <Section title="semantic_search()">
         <Code lang="python">{`semantic_search(query, mode='search', depth=2, top_k=5)`}</Code>
-        <p>Semantically searches the codebase using the <code>voyage-code-3</code> embedding model via <a href="https://github.com/yoanbernabeu/grepai" target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)" }}>grepai</a>. Finds code by concept — not text match.</p>
-        <p><strong>Requires</strong> <code>VOYAGE_API_KEY</code> set in environment and <code>api_key_env: "VOYAGE_API_KEY"</code> in the AgentFile config.</p>
+        <p>Semantically searches the codebase via <a href="https://github.com/yoanbernabeu/grepai" target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)" }}>grepai</a>. Finds code by concept — not text match.</p>
+        <p>
+          This tool is opt-in and hidden unless enabled in <code>agent.yaml</code> with a valid semantic-search
+          configuration. Supported providers in the implementation are <code>ollama</code>, <code>lmstudio</code>,{" "}
+          <code>synthetic</code>, <code>openai</code>, and <code>openrouter</code>.
+        </p>
         <Table
           headers={["mode", "What it does"]}
           rows={[
@@ -173,12 +183,46 @@ brew install ripgrep          # macOS`}</Code>
 .session_id -> str`}</Code>
       </Section>
 
+      <Section title="DatabaseSession">
+        <Code lang="python">{`DatabaseSession(session_id, agent_name="agent", db_url="sqlite:///./codepilot.db", engine=None)
+
+.load() -> List[Dict]
+.save(messages)
+.reset()
+.exists() -> bool
+.metadata() -> Optional[Dict]
+.list_sessions() -> List[Dict]
+.dispose()
+.save_extra(data)
+.load_extra() -> Dict
+.session_id -> str`}</Code>
+        <p>
+          The table is named <code>codepilot_sessions</code> and has columns <code>session_id</code>,{" "}
+          <code>agent_name</code>, <code>messages</code>, <code>created_at</code>, and <code>updated_at</code>.
+          Runtime extra state is stored inside the JSON held in <code>messages</code>.
+        </p>
+      </Section>
+
+      <Section title="AsyncDatabaseSession">
+        <Code lang="python">{`AsyncDatabaseSession(session_id, agent_name="agent", engine=async_engine)
+
+await .load() -> List[Dict]
+await .save(messages)
+await .reset()
+await .dispose()
+await .save_extra(data)
+await .load_extra() -> Dict
+.session_id -> str`}</Code>
+      </Section>
+
       <Section title="InMemorySession">
         <Code lang="python">{`InMemorySession(session_id="default")
 
 .load() -> List[Dict]
 .save(messages)
 .reset()
+.save_extra(data)
+.load_extra() -> Dict
 .session_id -> str`}</Code>
       </Section>
 
@@ -189,7 +233,12 @@ brew install ripgrep          # macOS`}</Code>
     agent_name: str = "agent",
     session_dir: Path = None,
     db_url: Optional[str] = None,
+    engine = None,                # SQLAlchemy Engine or AsyncEngine
 ) -> BaseSession`}</Code>
+        <p>
+          Passing a SQLAlchemy <code>Engine</code> returns <code>DatabaseSession</code>. Passing an{" "}
+          <code>AsyncEngine</code> returns <code>AsyncDatabaseSession</code>.
+        </p>
       </Section>
     </>
   );

@@ -20,8 +20,8 @@ export function PageSessionPersistence() {
       </Section>
 
       <Section title="In-memory (default)">
-        <Code lang="python">{`runtime = Runtime("agent.yaml")                          # memory, id = agent name
-runtime = Runtime("agent.yaml", session="memory")       # explicit, same thing
+        <Code lang="python">{`runtime = Runtime("agent.yaml")                          # memory, id = lowercased agent name
+runtime = Runtime("agent.yaml", session="memory")       # explicit, same backend
 runtime = Runtime("agent.yaml", session="memory", session_id="my-session")`}</Code>
       </Section>
 
@@ -30,7 +30,7 @@ runtime = Runtime("agent.yaml", session="memory", session_id="my-session")`}</Co
           History is serialised to <code>~/.codepilot/sessions/&lt;session_id&gt;.json</code> after every{" "}
           <code>run()</code>. Directory is created automatically.
         </p>
-        <Code lang="python">{`runtime = Runtime("agent.yaml", session="file")                     # id = agent name
+        <Code lang="python">{`runtime = Runtime("agent.yaml", session="file")                     # id = lowercased agent name
 runtime = Runtime("agent.yaml", session="file", session_id="ecommerce-api")
 
 # Custom session directory
@@ -82,6 +82,10 @@ runtime = Runtime(
     session_id=f"user-{user_id}",
     db_url=os.environ["DATABASE_URL"],
 )`}</Code>
+        <p>
+          You can also pass an existing synchronous SQLAlchemy <code>Engine</code> as <code>db=engine</code>.
+          Async engines are supported by <code>AsyncRuntime</code>, not the synchronous <code>Runtime</code> wrapper.
+        </p>
       </Section>
 
       <Section title="Persistence behaviour">
@@ -90,9 +94,9 @@ runtime = Runtime(
           rows={[
             [<code>Runtime(...)</code> + "construction", "One SELECT loads prior messages for the session_id, or [] for new sessions"],
             ["Each run() call", "All agentic steps run fully in-memory with zero DB I/O during inference"],
-            ["run() completes", "One atomic UPSERT writes the full messages list plus runtime extra state"],
+            ["run() completes", "Messages are saved, then runtime extra state is saved alongside them"],
             ["New Runtime(...) same session_id", "One SELECT — session fully restored"],
-            [<code>runtime.reset()</code>, "DELETE row — clean slate"],
+            [<code>runtime.reset()</code>, "Clears messages, deletes persisted session state, and restarts the default terminal"],
           ]}
         />
       </Section>
