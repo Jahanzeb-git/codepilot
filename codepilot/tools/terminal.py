@@ -397,6 +397,7 @@ class TerminalSession:
         self._bytes_fed: int = 0   # total raw chars fed to VT screen this command
         
         import threading
+        self._lock = threading.Lock()
         self._bg_thread = threading.Thread(target=self._bg_listener, daemon=True)
         self._bg_thread.start()
 
@@ -406,17 +407,20 @@ class TerminalSession:
         while True:
             if not self._backend.is_alive():
                 break
-            if not getattr(self, 'agent_active_command', False) and "bash" in self.shell:
-                # Read chunks directly into screen
-                chunk = self._backend.read_nonblocking(size=65536, timeout=0.1)
-                if chunk:
-                    self._screen.feed(chunk)
-                    if getattr(self._screen, 'command_finished', False):
-                        self.cwd = self._screen.cwd or self.cwd
-                        self._screen.command_finished = False
-                        if self.on_user_command:
-                            output = self._screen.delta_snapshot()
-                            self.on_user_command(self.session_id, output)
+            
+            with self._lock:
+                if not getattr(self, 'agent_active_command', False) and "bash" in self.shell:
+                    # Read chunks directly into screen (timeout=0 prevents blocking inside lock)
+                    chunk = self._backend.read_nonblocking(size=65536, timeout=0)
+                    if chunk:
+                        self._screen.feed(chunk)
+                        if getattr(self._screen, 'command_finished', False):
+                            self.cwd = self._screen.cwd or self.cwd
+                            self._screen.command_finished = False
+                            if self.on_user_command:
+                                output = self._screen.delta_snapshot().strip()
+                                if output:
+                                    self.on_user_command(self.session_id, output)
             time.sleep(0.05)
 
     def _build_full_cmd(self, command: str) -> str:
@@ -447,14 +451,14 @@ class TerminalSession:
         self.status = "running"
         self.return_code = None
         self.last_used = time.time()
-        self.agent_active_command = True
-
-        # Reset the virtual screen so previous command output doesn't bleed in
-        self._screen.reset()
-        self._bytes_fed = 0
-
-        full_cmd = self._build_full_cmd(command)
-        self._backend.sendline(full_cmd)
+        
+        with self._lock:
+            self.agent_active_command = True
+            # Reset the virtual screen so previous command output doesn't bleed in
+            self._screen.reset()
+            self._bytes_fed = 0
+            full_cmd = self._build_full_cmd(command)
+            self._backend.sendline(full_cmd)
 
         if "bash" not in self.shell:
             # Discard the PTY command echo. Wait for the START marker and ignore
@@ -481,7 +485,8 @@ class TerminalSession:
         if completed:
             self.status = "completed"
             self.return_code = rc
-            self.agent_active_command = False
+            with self._lock:
+                self.agent_active_command = False
         return output, completed, rc
 
     def read_new(self, timeout: int):
@@ -508,7 +513,8 @@ class TerminalSession:
         if completed:
             self.status = "completed"
             self.return_code = rc
-            self.agent_active_command = False
+            with self._lock:
+                self.agent_active_command = False
         return delta, completed, rc
 
     def send_text(self, text: str, timeout: int):
@@ -569,6 +575,9 @@ class TerminalSession:
                     self._screen.feed(chunk)
                     if self._screen.command_finished:
                         self.cwd = self._screen.cwd or self.cwd
+                        # Reset the flag so _bg_listener doesn't falsely trigger
+                        # when it reads the straggling PS1 prompt bytes.
+                        self._screen.command_finished = False
                         return _render(), True, self._screen.osc_633_d_rc
                 else:
                     if not self._backend.is_alive():

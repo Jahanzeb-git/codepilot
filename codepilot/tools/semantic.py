@@ -452,7 +452,7 @@ class SemanticTools:
             ["watch", "--status"],
             capture_output=True, text=True, timeout=10,
         )
-        if "running" in status_r.stdout.lower():
+        if "status: running" in status_r.stdout.lower():
             self._set_state(_State.READY)
             return
 

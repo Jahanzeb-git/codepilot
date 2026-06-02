@@ -49,8 +49,20 @@ class ContextTools:
     ) -> str:
         """Archive completed task context, replacing it with your summary.
 
-        Summary must capture what happened — files touched, outcome,
-        key details — so reading it later tells you whether to reveal.
+        Context management guidelines:
+        - Check context stress each step as a pressure signal.
+        - Archive at most once per task, never repeatedly. Never as an
+          opening move.
+        - Prioritize old completed tasks with no bearing on current work.
+        - Immediate preceding tasks likely share context — don't archive
+          speculatively.
+        - Low stress: skip archiving entirely. High stress: act, but you
+          judge what's load-bearing.
+        - Summaries are your ONLY memory of that task (unless you call
+          reveal_context). Pack densely: exact files, commands, decisions,
+          errors, outcomes. Reading it later must tell you exactly what
+          happened, where, and why — so you can judge whether revealing
+          is needed. Never be vague.
 
         Args:
             position: Task position (int) or tuple of positions.

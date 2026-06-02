@@ -130,6 +130,14 @@ class AsyncRuntime:
         self.hooks    = HookSystem()
         self._stream  = stream
 
+        # ------------------------------------------------------------------ #
+        #  Per-step ephemeral state                                            #
+        # ------------------------------------------------------------------ #
+        self._payload_queue:    List[CodeBlock] = []
+        self._execution_buffer: List[str]       = []
+        self._step_write_count:  int = 0
+        self._step_edited_files: set[str] = set()
+
         self.context_manager = ContextManager(self.config.runtime.work_dir)
         self.prompt_manager  = PromptManager()
 
@@ -207,14 +215,6 @@ class AsyncRuntime:
 
         # Set for sync sessions only; async sessions set this in run() bootstrap
         self._session_bootstrapped = not self.session.is_async
-
-        # ------------------------------------------------------------------ #
-        #  Per-step ephemeral state                                            #
-        # ------------------------------------------------------------------ #
-        self._payload_queue:    List[CodeBlock] = []
-        self._execution_buffer: List[str]       = []
-        self._step_write_count:  int = 0
-        self._step_edited_files: set[str] = set()
 
         # ------------------------------------------------------------------ #
         #  Control flags                                                       #
@@ -332,7 +332,7 @@ class AsyncRuntime:
             # assistant response in history, then feed back a protocol-level
             # correction message so the next inference can fix its block shape.
             try:
-                control_block, payload_blocks, completion_block = BlockParser.split(response_text)
+                control_block, payload_blocks = BlockParser.split(response_text)
             except ValueError as exc:
                 self.messages.append({"role": _ROLE_ASSISTANT, "content": response_text})
                 error_msg = self._format_parser_error(str(exc))
@@ -370,15 +370,16 @@ class AsyncRuntime:
                 execution_result = "[Control block executed with no output.]"
             self._append_execution_result(execution_result)
 
-            # 7. Completion block → task is done, loop terminates.
-            #    Emit completion text NOW (after tools ran) so the user's stream
-            #    reflects reality — "File written" appears after the file exists.
-            if completion_block is not None:
-                compl_text = completion_block.content.strip()
-                if compl_text:
-                    self.hooks.emit(EventType.STREAM, text=compl_text)
-                self._done         = True
-                self._done_summary = compl_text
+            # 7. task(finish=True) was called during execution → loop terminates.
+            #    Emit trailing text (after all parsed blocks) NOW so the user's
+            #    stream reflects reality — summary appears after tools ran.
+            if self._done:
+                trailing = self._extract_trailing_text(
+                    response_text, control_block, payload_blocks
+                )
+                if trailing:
+                    self.hooks.emit(EventType.STREAM, text=trailing)
+                self._done_summary = trailing
                 self.hooks.emit(EventType.FINISH, summary=self._done_summary)
                 break
 
@@ -540,16 +541,31 @@ class AsyncRuntime:
             raise RuntimeError(str(exc)) from exc
 
     def _register_context_tools(self):
-        """Register context management tools that are always available.
+        """Register context management and runtime control tools.
 
         These tools are independent of agent.yaml's optional tools list because
-        they are part of the runtime's memory-management protocol, not external
-        workspace capabilities like filesystem, terminal, or semantic search.
+        they are part of the runtime's core protocol, not external workspace
+        capabilities like filesystem, terminal, or semantic search.
         """
         # Context management tools (always enabled)
         self.registry.register("archive_context",       self._context_tools.archive_context)
         self.registry.register("reveal_context",        self._context_tools.reveal_context)
         self.registry.register("list_archived_context", self._context_tools.list_archived_context)
+        # Runtime control
+        self.registry.register("task",                  self._task_control)
+
+    def _task_control(self, *, finish: bool = False):
+        """Signal task lifecycle events.
+
+        task(finish=True) — marks the current task as complete. The agentic
+        loop terminates after this step finishes executing. Write your
+        final summary as plain text before or after the ```codepilot block.
+        """
+        if finish:
+            self._done = True
+            self._append_execution("[task] Task marked as complete.")
+        else:
+            self._append_execution("[task] No action taken (finish=False).")
 
     def _build_system_prompt(self, step: int = 0, max_steps: int = 0) -> SystemPromptParts:
         return self.prompt_manager.render(
@@ -672,9 +688,34 @@ class AsyncRuntime:
     #  Streaming inference                                                 #
     # ------------------------------------------------------------------ #
 
-    _CONTROL_FENCE    = "```codepilot"
-    _COMPLETION_FENCE = "```completion"
-    _HOLDBACK         = max(len(_CONTROL_FENCE), len(_COMPLETION_FENCE))  # 13 chars
+    # ------------------------------------------------------------------ #
+    #  Trailing text extraction                                            #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _extract_trailing_text(
+        response_text: str,
+        control_block,
+        payload_blocks: list,
+    ) -> str:
+        """Extract raw text after the last parsed block.
+
+        This text is the agent's final summary — streamed to the user after
+        execution completes, replacing the old ```completion block.
+        """
+        last_block = payload_blocks[-1] if payload_blocks else control_block
+        if last_block is None:
+            return ""
+        return response_text[last_block.end_pos:].strip()
+
+    # ------------------------------------------------------------------ #
+    #  Streaming inference                                                 #
+    # ------------------------------------------------------------------ #
+
+    _CONTROL_FENCE_RE = re.compile(r"^```codepilot\s*$", re.MULTILINE)
+    # Hold-back: buffer enough chars to avoid prematurely emitting a
+    # partial fence marker split across streaming chunks.
+    _HOLDBACK = len("```codepilot")  # 12 chars
 
     async def _stream_inference(
         self, system_prompt: Union[str, SystemPromptParts], messages: List[Dict] = None
@@ -682,14 +723,16 @@ class AsyncRuntime:
         """
         Stream the LLM response token by token — 2-state machine:
 
-          'streaming' — before the codepilot fence: emit to user in real time.
-          'buffering' — after codepilot fence detected: buffer silently.
+          'streaming' — emit text to the user in real time. Watch for a
+                        line-anchored ```codepilot fence.
+          'buffering' — ```codepilot fence detected: accumulate silently
+                        until generation finishes.
 
-        The completion block is intentionally NOT streamed here. It is emitted
-        by run() via on_stream() only AFTER _execute() completes, ensuring the
-        user sees the agent's summary only after tools have physically run.
+        Trailing text after the codepilot/payload blocks is NOT streamed
+        here. It is emitted by run() after _execute() completes, ensuring
+        the user sees the agent's summary only after tools have run.
 
-        A 13-character hold-back prevents premature emission when fence markers
+        A hold-back buffer prevents premature emission when fence markers
         are split across streaming chunks.
 
         Returns the complete response text for normal pipeline processing.
@@ -709,24 +752,25 @@ class AsyncRuntime:
             accumulated = "".join(chunks)
 
             if state == "streaming":
-                fence_pos = accumulated.find(self._CONTROL_FENCE)
-                if fence_pos == -1:
-                    # No control fence yet — emit but hold back to avoid
-                    # prematurely streaming a fence split across chunks.
+                # Look for a line-anchored ```codepilot fence
+                m = self._CONTROL_FENCE_RE.search(accumulated)
+                if m:
+                    ctrl_pos = m.start()
+                    # Flush everything before the fence to the user
+                    if ctrl_pos > pre_fence_emitted:
+                        self.hooks.emit(EventType.STREAM,
+                                        text=accumulated[pre_fence_emitted:ctrl_pos])
+                    state = "buffering"
+                else:
+                    # No fence yet — emit with hold-back
                     safe_end = len(accumulated) - self._HOLDBACK
                     if safe_end > pre_fence_emitted:
                         self.hooks.emit(EventType.STREAM,
                                         text=accumulated[pre_fence_emitted:safe_end])
                         pre_fence_emitted = safe_end
-                else:
-                    # Control fence found — flush remaining pre-fence text and go silent.
-                    if fence_pos > pre_fence_emitted:
-                        self.hooks.emit(EventType.STREAM,
-                                        text=accumulated[pre_fence_emitted:fence_pos])
-                    state = "buffering"
 
             # 'buffering' state: accumulate silently until generation finishes.
-            # Completion block content will be emitted by run() after _execute().
+            # Trailing text is emitted by run() after _execute().
 
         # ------------------------------------------------------------------ #
         # Final flush — only needed for pure conversational responses.       #
@@ -741,14 +785,22 @@ class AsyncRuntime:
 
         return accumulated
 
+    @classmethod
+    def _find_control_fence(cls, text: str) -> int:
+        """Find the character position of a line-anchored ```codepilot fence.
+
+        Returns the position of the opening ```, or -1 if not found.
+        """
+        m = cls._CONTROL_FENCE_RE.search(text)
+        return m.start() if m else -1
+
     def _emit_prefence_text(self, response_text: str):
         """Emit pre-fence text as STREAM events (non-streaming mode).
 
-        Completion block content is intentionally NOT emitted here — it is
-        emitted by run() after _execute() completes so the user sees the
-        agent's summary only once tools have physically run.
+        Trailing text after the codepilot/payload blocks is emitted by run()
+        after _execute() completes, not here.
         """
-        fence_pos = response_text.find(self._CONTROL_FENCE)
+        fence_pos = self._find_control_fence(response_text)
         if fence_pos > 0:
             pre_text = response_text[:fence_pos].strip()
             if pre_text:
@@ -761,7 +813,7 @@ class AsyncRuntime:
     def _format_parser_error(error: str) -> str:
         return (
             "PARSER ERROR: The previous assistant response was not executed because "
-            "it violated CodePilot's Markdown block protocol.\n\n"
+            "it violated CodePilot's block protocol.\n\n"
             f"Specific parser failure: {error}\n\n"
             "How to fix your next response:\n"
             "1. Emit exactly one ```codepilot fenced Control Block if you want tools to run.\n"
@@ -771,8 +823,8 @@ class AsyncRuntime:
             "corresponding write_file path, for example: ```python filename=src/app.py.\n"
             "4. Payload Blocks are consumed strictly in write_file call order. For mode='multi_edit', "
             "provide one Payload Block per tuple in edits=[...], in the same order as the tuples.\n"
-            "5. Do not include a ```completion block in the corrective response unless the corrected "
-            "operation has actually executed and its result has been observed.\n\n"
+            "5. Use task(finish=True) in the control block to signal task completion — do not "
+            "combine it with execute() or read_output() in the same step.\n\n"
             "No tool code from the previous response ran. Re-emit a corrected CodePilot response now."
         )
 

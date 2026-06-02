@@ -29,6 +29,8 @@ class CodeBlock:
     content: str             # raw block content, trailing newline stripped
     index: int               # 0-based position in the response
     filename: Optional[str] = field(default=None)  # parsed from filename= annotation
+    start_pos: int = field(default=0)   # character position of opening fence in source
+    end_pos: int = field(default=0)     # character position after closing fence in source
 
 
 class BlockParser:
@@ -48,7 +50,7 @@ class BlockParser:
 
     # Captures the full fence tag line (e.g. "python filename=routes/profile.py")
     # and the block content. Group 1 = tag, Group 2 = content.
-    _FENCE_RE = re.compile(r"```([^\n]*)\n(.*?)```", re.DOTALL)
+    _FENCE_RE = re.compile(r"^```([^\n]*)\n(.*?)^```\s*$", re.DOTALL | re.MULTILINE)
 
     # Extracts filename= from a fence tag. Supports quoted and bare values:
     #   filename=routes/profile.py   filename="routes/profile.py"
@@ -96,50 +98,59 @@ class BlockParser:
             # preserve any intentional blank lines inside the content.
             content = content.rstrip("\n")
             language, filename = cls._parse_fence_tag(tag)
-            blocks.append(CodeBlock(language=language, content=content, index=idx, filename=filename))
+            blocks.append(CodeBlock(
+                language=language, content=content, index=idx, filename=filename,
+                start_pos=match.start(), end_pos=match.end(),
+            ))
         return blocks
 
 
     @classmethod
-    def split(cls, text: str) -> Tuple[Optional[CodeBlock], List[CodeBlock], Optional[CodeBlock]]:
+    def split(cls, text: str) -> Tuple[Optional[CodeBlock], List[CodeBlock]]:
         """
-        Returns (control_block, payload_blocks, completion_block).
+        Returns (control_block, payload_blocks).
 
-        The control block is the first ```codepilot block.
-        The completion block is the ```completion block — its presence signals
-        the agentic loop to terminate after this step.
-        Payload blocks are every block after codepilot that isn't completion —
-        side-loaded by write_file() in order.
+        The control block is the FIRST ```codepilot block. If the model
+        accidentally generates a second ```codepilot block, it is ignored —
+        payload collection stops at that boundary.
+
+        Payload blocks are fenced blocks after codepilot that carry a
+        filename= annotation — side-loaded by write_file() in order.
 
         Raises ValueError if payload filename= annotations don't match
         the write_file() calls parsed from the control block.
 
-        If no ```codepilot block exists, returns (None, [], None) — the
-        response is a conversational reply with display-only code blocks.
+        If no ```codepilot block exists, returns (None, []) — the
+        response is a conversational reply.
         """
         blocks = cls.parse(text)
         if not blocks:
-            return None, [], None
+            return None, []
 
         for i, block in enumerate(blocks):
             if block.language == "codepilot":
                 remaining = blocks[i + 1:]
+                # Collect payloads until second codepilot block (if any).
                 # Only blocks with a filename= annotation are payload blocks.
-                # Display-only blocks (```python for explanation, etc.) never carry
-                # filename= so they pass through safely even if placed after the
-                # codepilot block, without triggering validation.
-                payload_blocks   = [b for b in remaining if b.language != "completion" and b.filename is not None]
-                unannotated_blocks = [b for b in remaining if b.language != "completion" and b.filename is None]
-                completion_list  = [b for b in remaining if b.language == "completion"]
-                completion_block = completion_list[0] if completion_list else None
+                # Display-only blocks (e.g. ```python for explanation) never
+                # carry filename= so they pass through safely.
+                payload_blocks: List[CodeBlock] = []
+                unannotated_blocks: List[CodeBlock] = []
+                for b in remaining:
+                    if b.language == "codepilot":
+                        break  # Second codepilot block — stop collecting
+                    if b.filename is not None:
+                        payload_blocks.append(b)
+                    else:
+                        unannotated_blocks.append(b)
 
                 # Validate filename= annotations before handing off to runtime
                 cls._validate_payload_filenames(block, payload_blocks, unannotated_blocks)
 
-                return block, payload_blocks, completion_block
+                return block, payload_blocks
 
         # No codepilot block → entire response is display/chat
-        return None, [], None
+        return None, []
 
 
     # ------------------------------------------------------------------

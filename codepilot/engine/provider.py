@@ -643,6 +643,11 @@ class DeepSeekProvider(LLMProvider):
             kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
         else:
             kwargs["temperature"] = temperature
+            # Must explicitly disable thinking — omitting the parameter defaults
+            # to thinking ON for deepseek-v4-flash and deepseek-v4-pro.
+            # Per DeepSeek API docs: pass {"thinking": {"type": "disabled"}} to
+            # ensure reasoning_content is None and no chain-of-thought is generated.
+            kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
 
         return kwargs
 

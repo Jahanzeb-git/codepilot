@@ -276,7 +276,13 @@ PROMPT_COMMAND="__cp_command_finished; $PROMPT_COMMAND"
             self._rcfile_path = f"/tmp/codepilot_bashrc_{pid}"
 
         # Reap bash automatically when it exits to avoid zombie processes.
-        signal.signal(signal.SIGCHLD, self._on_sigchld)
+        # This may fail with ValueError if called from a background thread
+        # (e.g. asyncio.to_thread). If it does, stop() will still reap the
+        # child via waitpid when the master_fd raises EIO.
+        try:
+            signal.signal(signal.SIGCHLD, self._on_sigchld)
+        except ValueError:
+            pass
 
         # Brief pause to let bash finish its startup sequence before any
         # client connects and sees stale initialization bytes.
