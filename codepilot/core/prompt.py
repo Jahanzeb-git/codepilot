@@ -83,6 +83,7 @@ class PromptManager:
         shell_info: str = "",
         step_info: str = "",
         context_stress: str = "",
+        sub_agent_status: str = "",
     ) -> SystemPromptParts:
         # Static half — only uses identity + tool definitions (never changes)
         static = self._static_tmpl.render(
@@ -101,6 +102,7 @@ class PromptManager:
             step_info=step_info,
             context_stress=context_stress,
             developer_prompt=developer_prompt,
+            sub_agent_status=sub_agent_status,
         )
 
         return SystemPromptParts(static=static, dynamic=dynamic)

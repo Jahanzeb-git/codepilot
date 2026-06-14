@@ -12,7 +12,7 @@ grepai lifecycle (verified against actual CLI behaviour):
   2. grepai watch --background  — fire-and-forget; daemon manages its own PID.
   3. Readiness: poll ~/.local/state/grepai/logs/grepai-watch.log for
      the line "[RUNNING] <work_dir> - steady".
-  4. grepai search "query" --json --compact --limit N  (cwd = work_dir).
+  4. grepai search "query" --json --limit N  (cwd = work_dir).
   5. Watcher runs indefinitely; we do NOT stop it on agent exit.
 
 State machine:
@@ -447,18 +447,40 @@ class SemanticTools:
                 label=f"Wrote grepai config → {config_path}",
             )
 
-        # 3. Check if daemon already running
+        # 3. Check if daemon already running AND index is healthy.
+        #    A "running" watcher with Files indexed: 0 is a zombie — the daemon
+        #    is alive but the index was wiped or never populated. Stop & restart.
         status_r = self._run(
             ["watch", "--status"],
             capture_output=True, text=True, timeout=10,
         )
         if "status: running" in status_r.stdout.lower():
-            self._set_state(_State.READY)
-            return
+            # Verify the index actually has data
+            index_r = self._run(
+                ["status", "--no-ui"],
+                capture_output=True, text=True, timeout=10,
+            )
+            index_ok = (
+                index_r.returncode == 0
+                and "Files indexed: 0" not in index_r.stdout
+            )
+            if index_ok:
+                self._set_state(_State.READY)
+                return
+            # Zombie watcher: running but index is empty. Restart it.
+            try:
+                self._run(
+                    ["watch", "--stop"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                time.sleep(1)
+            except Exception:
+                pass
 
         # 4. Start grepai watch --background (fire-and-forget via Popen).
         #    The daemon manages its own PID file and logs to the OS log dir.
-        #    We poll the log file for "[RUNNING]" to detect readiness.
+        #    We poll the status command for readiness (not log file — log entries
+        #    are historical and would match across sessions).
         self._set_state(_State.INDEXING)
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="semantic_search",
@@ -473,7 +495,7 @@ class SemanticTools:
             stderr=subprocess.DEVNULL,
             close_fds=True,
         )
-        # Do NOT wait. _check_ready() polls the log file for [RUNNING].
+        # Do NOT wait. _check_ready() polls via status --no-ui for [Files indexed > 0].
 
     def _set_state(self, new_state: _State):
         self._state       = new_state
@@ -484,43 +506,61 @@ class SemanticTools:
     # ------------------------------------------------------------------
 
     def _check_ready(self) -> bool:
-        """True when the log file shows [RUNNING] for this project.
+        """True when the index has files and the watcher is running.
 
-        Log line format (verified):
-          [grepai-watch] 2026/05/04 17:06:18 [RUNNING] /path/to/project - steady
-
-        Fallback: grepai status --no-ui with 'Files indexed: N' check.
+        Uses `grepai status --no-ui` as the primary readiness check —
+        'Files indexed: N' (N > 0) means the embedding model ran and the
+        index is populated. The log file is NOT used as primary because it
+        contains *historical* [RUNNING] entries that match across sessions
+        even after the watcher has died or the index has been wiped.
         """
         if self._state == _State.READY:
             return True
         if not self._binary_path:
             return False
 
-        # Primary: log file
-        log = self._log_file()
-        if log.exists():
-            try:
-                text = log.read_text(errors="replace")
-                if f"[RUNNING] {self._work_dir}" in text:
-                    self._set_state(_State.READY)
-                    return True
-                # Error on this project — don't mark ready
-                if f"[ERROR] {self._work_dir}" in text:
-                    return False
-            except OSError:
-                pass
-
-        # Fallback: status command (format verified: "Files indexed: N")
+        # Primary: status command — must show files indexed AND watcher running.
         try:
             r = self._run(
                 ["status", "--no-ui"],
                 capture_output=True, text=True, timeout=10,
             )
-            if r.returncode == 0 and "Files indexed: 0" not in r.stdout:
-                self._set_state(_State.READY)
-                return True
+            if r.returncode == 0:
+                stdout = r.stdout
+                has_files  = "Files indexed: 0" not in stdout and "Files indexed:" in stdout
+                is_running = "watcher: running" in stdout.lower()
+                if has_files and is_running:
+                    self._set_state(_State.READY)
+                    return True
         except Exception:
             pass
+
+        # Secondary: log file — scan only the TAIL (last 4 KB) for a recent
+        # [RUNNING] marker so we don't match stale historical entries.
+        log = self._log_file()
+        if log.exists():
+            try:
+                with open(log, "rb") as fh:
+                    fh.seek(0, 2)
+                    size = fh.tell()
+                    fh.seek(max(0, size - 4096))
+                    tail = fh.read().decode(errors="replace")
+                if f"[RUNNING] {self._work_dir}" in tail:
+                    # Confirm with status before trusting log tail
+                    try:
+                        sr = self._run(
+                            ["status", "--no-ui"],
+                            capture_output=True, text=True, timeout=10,
+                        )
+                        if sr.returncode == 0 and "Files indexed: 0" not in sr.stdout:
+                            self._set_state(_State.READY)
+                            return True
+                    except Exception:
+                        pass
+                if f"[ERROR] {self._work_dir}" in tail:
+                    return False
+            except OSError:
+                pass
 
         return False
 
@@ -576,6 +616,12 @@ class SemanticTools:
           - Describe intent: "error handling in API layer" > "try except"
 
         Use `top_k` to limit results (default 5).
+        Example:
+        <a>
+        ```codepilot
+        semantic_search(query="where is user authentication?", mode="search")
+        ```
+        </a>
         """
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="semantic_search",
@@ -595,7 +641,7 @@ class SemanticTools:
         max_chars   = tool_cfg.get("max_output_chars", 8000)
 
         if mode == "search":
-            cmd = ["search", query, "--json", "--compact", "--limit", str(max_results)]
+            cmd = ["search", query, "--json", "--limit", str(max_results)]
         elif mode == "trace_callers":
             cmd = ["trace", "callers", query]
         elif mode == "trace_callees":

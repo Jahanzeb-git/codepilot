@@ -48,6 +48,7 @@ from ..tools.filesystem import FilesystemTools
 from ..tools.interaction import InteractionTools
 from ..tools.registry import ToolRegistry
 from ..tools.search import SearchTools
+from ..tools.subagent import SubAgentTools, FILE_LOCK_COORDINATOR
 from ..tools.terminal import TerminalManager
 from ..tools.semantic import SemanticTools, SemanticConfigError
 
@@ -147,6 +148,8 @@ class AsyncRuntime:
         self._semantic_tools    = SemanticTools(self)
         self._search_tools      = SearchTools(self)
         self._context_tools     = ContextTools(self)
+        self._subagent_tools    = SubAgentTools(self, depth=0)
+        self._file_lock_coordinator = FILE_LOCK_COORDINATOR
 
         self.registry = ToolRegistry()
         self._register_enabled_tools()
@@ -207,6 +210,7 @@ class AsyncRuntime:
         extra = self.session.load_extra() if not self.session.is_async else {}
         if extra.get("memory_state"):
             self._memory.restore_state(extra["memory_state"])
+        self._raw_llm_generations: List[Dict[str, Any]] = list(extra.get("raw_llm_generations", []))
 
         # ------------------------------------------------------------------ #
         #  Task position counter                                               #
@@ -260,6 +264,7 @@ class AsyncRuntime:
             extra = await self.session.load_extra()
             if extra.get("memory_state"):
                 self._memory.restore_state(extra["memory_state"])
+            self._raw_llm_generations = list(extra.get("raw_llm_generations", []))
             self._task_counter = get_highest_task_position(self.messages)
             self._session_bootstrapped = True
 
@@ -306,11 +311,19 @@ class AsyncRuntime:
             # 2.9 Cancel any pending cache refresh timer before inference
             self._cancel_cache_timer()
 
+            force_thinking = False
+            if len(self.messages) == 1 and not self.config.model.thinking.enabled:
+                if self.config.model.provider.lower() == "deepseek":
+                    force_thinking = True
+
             # 3. LLM inference (streaming or blocking)
             try:
                 if self._stream:
+                    # _stream_inference handles thinking interception inline:
+                    # - thinking chunks → THINKING_STREAM (never STREAM)
+                    # - returned text has thinking stripped → BlockParser-safe
                     response_text = await self._stream_inference(
-                        system_prompt, messages=rendered_msgs
+                        system_prompt, messages=rendered_msgs, force_thinking=force_thinking
                     )
                 else:
                     response_text = await self.provider.chat(
@@ -318,9 +331,17 @@ class AsyncRuntime:
                         system=system_prompt,
                         temperature=self.config.model.temperature,
                         max_tokens=self.config.model.max_tokens,
+                        force_thinking=force_thinking,
                     )
-                    # Non-streaming: still emit pre-fence text as single event
+                    # Non-streaming: extract and emit thinking separately,
+                    # then strip it so BlockParser never sees it.
+                    import re as _re
+                    think_match = _re.search(r'<thinking>(.*?)</thinking>\n?', response_text, flags=_re.DOTALL)
+                    if think_match:
+                        self.hooks.emit(EventType.THINKING_STREAM, thinking=think_match.group(1))
+                        response_text = response_text[:think_match.start()] + response_text[think_match.end():]
                     self._emit_prefence_text(response_text)
+
             except Exception as exc:
                 error_msg = f"LLM provider error: {exc}"
                 self.hooks.emit(EventType.RUNTIME_ERROR, error=error_msg)
@@ -340,15 +361,17 @@ class AsyncRuntime:
                 self._append_execution_result(error_msg)
                 continue
 
-            # 4.5 Strip payload block contents from memory to save massive tokens
-            memory_text = response_text
-            if payload_blocks:
-                for pb in payload_blocks:
-                    placeholder = "# [Content successfully written to file on disk. Use read_file() to view line numbers. Note: This literal comment is a placeholder it's confirms the content exactly wrote as you write.]"
-                    memory_text = memory_text.replace(pb.content, placeholder)
+            # 4.5 Fire observability hook with the exact raw LLM generation
+            # BEFORE any execution side effects. This is the place in the pipeline
+            # where the full, unmodified response_text is available. The CLI
+            # uses this to write a faithful trace JSON for debugging.
+            self.hooks.emit(EventType.LLM_RESPONSE, step=step, response=response_text)
+            self._record_raw_llm_generation(step, response_text)
 
-            # LLM output → assistant role (using compressed text)
-            self.messages.append({"role": _ROLE_ASSISTANT, "content": memory_text})
+            # LLM output → assistant role. Keep the model's generation verbatim:
+            # reshaping prior assistant turns can deform the learned CodePilot
+            # block protocol on the next inference.
+            self.messages.append({"role": _ROLE_ASSISTANT, "content": response_text})
 
             # Schedule cache TTL refresh (Anthropic only)
             self._last_system_prompt = system_prompt
@@ -391,11 +414,13 @@ class AsyncRuntime:
             await self.session.save(self.messages)
             await self.session.save_extra({
                 "memory_state": self._memory.serialize_state(),
+                "raw_llm_generations": list(self._raw_llm_generations),
             })
         else:
             self.session.save(self.messages)
             self.session.save_extra({
                 "memory_state": self._memory.serialize_state(),
+                "raw_llm_generations": list(self._raw_llm_generations),
             })
 
         # Note: do NOT cancel the cache timer here.
@@ -415,6 +440,7 @@ class AsyncRuntime:
         """Wipe the entire conversation history and start fresh (sync sessions)."""
         self._cancel_cache_timer()
         self.messages = []
+        self._raw_llm_generations = []
         if not self.session.is_async:
             self.session.reset()
         self._session_bootstrapped = not self.session.is_async
@@ -426,6 +452,7 @@ class AsyncRuntime:
         """Wipe conversation history — use this when the session is async."""
         self._cancel_cache_timer()
         self.messages = []
+        self._raw_llm_generations = []
         if self.session.is_async:
             await self.session.reset()
         else:
@@ -434,6 +461,18 @@ class AsyncRuntime:
         self._terminal_manager.cleanup_all()
         self._terminal_manager.start_default_terminal()
         self.hooks.emit(EventType.SESSION_RESET)
+
+    def raw_llm_generations(self) -> List[Dict[str, Any]]:
+        """Return raw, uncompressed LLM generations captured for this session."""
+        return list(self._raw_llm_generations)
+
+    def _record_raw_llm_generation(self, step: int, response: str) -> None:
+        """Persist a faithful raw generation record for observability."""
+        self._raw_llm_generations.append({
+            "task_position": self._task_counter,
+            "step": step,
+            "response": response,
+        })
 
     def send_message(self, message: str):
         """
@@ -508,11 +547,12 @@ class AsyncRuntime:
         enabled = (
             {tc.name for tc in self.config.tools if tc.enabled}
             if self.config.tools
-            else {"write_file", "read_file", "execute", "read_output",
+            else {"file_editor", "write_file", "read_file", "execute", "read_output",
                   "send_input", "terminate_terminal", "ask_user", "find"}
         )
-        if "write_file"          in enabled: self.registry.register("write_file",          self._fs_tools.write_file)
-        if "read_file"           in enabled: self.registry.register("read_file",           self._fs_tools.read_file)
+        if "file_editor"        in enabled: self.registry.register("file_editor",        self._fs_tools.file_editor)
+        if "write_file"         in enabled: self.registry.register("write_file",          self._fs_tools.write_file)
+        if "read_file"          in enabled: self.registry.register("read_file",           self._fs_tools.read_file)
         if "execute"             in enabled: self.registry.register("execute",             self._terminal_manager.execute)
         if "read_output"         in enabled: self.registry.register("read_output",         self._terminal_manager.read_output)
         if "send_input"          in enabled: self.registry.register("send_input",          self._terminal_manager.send_input)
@@ -554,6 +594,11 @@ class AsyncRuntime:
         # Runtime control
         self.registry.register("task",                  self._task_control)
 
+        # Sub-agent tools — only registered when enabled in config
+        if self.config.sub_agents.enabled:
+            self.registry.register("spawn_subagent", self._subagent_tools.spawn_subagent)
+            self.registry.register("await_subagent",  self._subagent_tools.await_subagent)
+
     def _task_control(self, *, finish: bool = False):
         """Signal task lifecycle events.
 
@@ -568,6 +613,8 @@ class AsyncRuntime:
             self._append_execution("[task] No action taken (finish=False).")
 
     def _build_system_prompt(self, step: int = 0, max_steps: int = 0) -> SystemPromptParts:
+        # Build sub-agent status block (empty when none active)
+        sub_agent_status = self._subagent_tools.manager.build_status_block()
         return self.prompt_manager.render(
             agent_name=self.config.name,
             agent_role=self.config.role or "",
@@ -578,6 +625,7 @@ class AsyncRuntime:
             shell_info=self._terminal_manager.get_prompt_info(),
             step_info=self._build_step_info(step, max_steps),
             context_stress=self._memory.build_context_stress(self.messages),
+            sub_agent_status=sub_agent_status,
         )
 
     @staticmethod
@@ -718,59 +766,158 @@ class AsyncRuntime:
     _HOLDBACK = len("```codepilot")  # 12 chars
 
     async def _stream_inference(
-        self, system_prompt: Union[str, SystemPromptParts], messages: List[Dict] = None
+        self, system_prompt: Union[str, SystemPromptParts], messages: List[Dict] = None, force_thinking: bool = False
     ) -> str:
         """
-        Stream the LLM response token by token — 2-state machine:
+        Stream the LLM response token by token — 3-state machine:
 
-          'streaming' — emit text to the user in real time. Watch for a
-                        line-anchored ```codepilot fence.
-          'buffering' — ```codepilot fence detected: accumulate silently
-                        until generation finishes.
+          'streaming'   — emit text to the user in real time. Watch for a
+                          line-anchored ```codepilot fence OR <thinking> tag.
+          'thinking'    — inside <thinking>...</thinking>. Emit chunks to
+                          THINKING_STREAM only. Never forward to STREAM.
+                          Never include in the returned response text.
+          'buffering'   — ```codepilot fence detected: accumulate silently
+                          until generation finishes.
 
-        Trailing text after the codepilot/payload blocks is NOT streamed
-        here. It is emitted by run() after _execute() completes, ensuring
-        the user sees the agent's summary only after tools have run.
+        Returning accumulated WITHOUT the thinking block ensures BlockParser
+        never sees code fences inside chain-of-thought, eliminating the
+        payload-mismatch parser error on the first prompt.
 
-        A hold-back buffer prevents premature emission when fence markers
+        A hold-back buffer prevents premature emission when fence/tag markers
         are split across streaming chunks.
 
-        Returns the complete response text for normal pipeline processing.
+        Returns the complete response text (thinking stripped) for pipeline processing.
         """
         msgs = messages if messages is not None else self.messages
-        chunks:            list = []
+        chunks:            list = []   # full response chunks (thinking stripped)
         pre_fence_emitted: int  = 0
         state:             str  = "streaming"
+
+        # Holdback buffer for partial tag/fence detection
+        holdback: str = ""
 
         async for chunk in self.provider.chat_stream(
             messages=msgs,
             system=system_prompt,
             temperature=self.config.model.temperature,
             max_tokens=self.config.model.max_tokens,
+            force_thinking=force_thinking,
         ):
-            chunks.append(chunk)
-            accumulated = "".join(chunks)
+            holdback += chunk
 
-            if state == "streaming":
-                # Look for a line-anchored ```codepilot fence
-                m = self._CONTROL_FENCE_RE.search(accumulated)
-                if m:
-                    ctrl_pos = m.start()
-                    # Flush everything before the fence to the user
-                    if ctrl_pos > pre_fence_emitted:
-                        self.hooks.emit(EventType.STREAM,
-                                        text=accumulated[pre_fence_emitted:ctrl_pos])
-                    state = "buffering"
-                else:
-                    # No fence yet — emit with hold-back
-                    safe_end = len(accumulated) - self._HOLDBACK
-                    if safe_end > pre_fence_emitted:
-                        self.hooks.emit(EventType.STREAM,
-                                        text=accumulated[pre_fence_emitted:safe_end])
-                        pre_fence_emitted = safe_end
+            # Strip hallucinated <codepilot>/<\/codepilot> XML wrapper tags.
+            # Some models (e.g. deepseek-v4-flash) wrap their ```codepilot fence in
+            # XML tags despite the system prompt prohibiting it. We strip them here
+            # before the state machine runs so they never reach the STREAM event /
+            # user terminal. The tags carry no information — the fence itself is the
+            # signal the parser needs.
+            holdback = holdback.replace("<codepilot>", "").replace("</codepilot>", "")
 
-            # 'buffering' state: accumulate silently until generation finishes.
-            # Trailing text is emitted by run() after _execute().
+            while holdback:
+                if state == "thinking":
+                    end_idx = holdback.find("</thinking>")
+                    if end_idx != -1:
+                        # Emit whatever thinking text precedes the closing tag
+                        thinking_chunk = holdback[:end_idx]
+                        if thinking_chunk:
+                            self.hooks.emit(EventType.THINKING_STREAM, thinking=thinking_chunk)
+                        # Consume the closing tag and everything after
+                        holdback = holdback[end_idx + len("</thinking>"):]
+                        # Strip leading newline that follows </thinking>
+                        if holdback.startswith("\n"):
+                            holdback = holdback[1:]
+                        state = "streaming"
+                    else:
+                        # Check for a partial closing tag at the end of holdback
+                        # (e.g. holdback ends with "</think" — wait for more chunks)
+                        partial = "</thinking>"
+                        safe_end = len(holdback)
+                        for k in range(1, len(partial)):
+                            if holdback.endswith(partial[:k]):
+                                safe_end = len(holdback) - k
+                                break
+                        if safe_end > 0:
+                            self.hooks.emit(EventType.THINKING_STREAM, thinking=holdback[:safe_end])
+                        holdback = holdback[safe_end:]
+                        break
+
+                else:  # state == "streaming" or "buffering"
+                    # Check for <thinking> open tag first
+                    think_idx = holdback.find("<thinking>")
+                    if think_idx != -1:
+                        # Emit/buffer everything before the tag
+                        pre_think = holdback[:think_idx]
+                        if pre_think and state == "streaming":
+                            accumulated_so_far = "".join(chunks) + pre_think
+                            m = self._CONTROL_FENCE_RE.search(accumulated_so_far)
+                            if m:
+                                ctrl_pos = m.start()
+                                if ctrl_pos > pre_fence_emitted:
+                                    self.hooks.emit(EventType.STREAM,
+                                                    text=accumulated_so_far[pre_fence_emitted:ctrl_pos])
+                                state = "buffering"
+                                chunks.append(pre_think)
+                                pre_fence_emitted = len("".join(chunks))
+                            else:
+                                chunks.append(pre_think)
+                                accumulated_so_far = "".join(chunks)
+                                safe_end = len(accumulated_so_far) - self._HOLDBACK
+                                if safe_end > pre_fence_emitted:
+                                    self.hooks.emit(EventType.STREAM,
+                                                    text=accumulated_so_far[pre_fence_emitted:safe_end])
+                                    pre_fence_emitted = safe_end
+                        elif pre_think:
+                            chunks.append(pre_think)
+
+                        holdback = holdback[think_idx + len("<thinking>"):]
+                        # Strip leading newline inside thinking tag
+                        if holdback.startswith("\n"):
+                            holdback = holdback[1:]
+                        state = "thinking"
+                        continue
+
+                    # No <thinking> tag — process normally
+                    # Check for partial <thinking> at end of holdback
+                    tag = "<thinking>"
+                    safe_end_hold = len(holdback)
+                    for k in range(1, len(tag)):
+                        if holdback.endswith(tag[:k]):
+                            safe_end_hold = len(holdback) - k
+                            break
+
+                    to_process = holdback[:safe_end_hold]
+                    holdback = holdback[safe_end_hold:]
+
+                    if not to_process:
+                        break
+
+                    if state == "buffering":
+                        chunks.append(to_process)
+                        break
+
+                    # state == "streaming"
+                    chunks.append(to_process)
+                    accumulated = "".join(chunks)
+                    m = self._CONTROL_FENCE_RE.search(accumulated)
+                    if m:
+                        ctrl_pos = m.start()
+                        if ctrl_pos > pre_fence_emitted:
+                            self.hooks.emit(EventType.STREAM,
+                                            text=accumulated[pre_fence_emitted:ctrl_pos])
+                        state = "buffering"
+                    else:
+                        safe_end = len(accumulated) - self._HOLDBACK
+                        if safe_end > pre_fence_emitted:
+                            self.hooks.emit(EventType.STREAM,
+                                            text=accumulated[pre_fence_emitted:safe_end])
+                            pre_fence_emitted = safe_end
+                    break
+
+        # ------------------------------------------------------------------ #
+        # Flush holdback remainder                                            #
+        # ------------------------------------------------------------------ #
+        if holdback and state != "thinking":
+            chunks.append(holdback)
 
         # ------------------------------------------------------------------ #
         # Final flush — only needed for pure conversational responses.       #
@@ -862,6 +1009,10 @@ class AsyncRuntime:
             self.hooks.emit(EventType.RUNTIME_ERROR, error=error_text)
             self._append_execution(error_text)
             return
+            
+        has_tools = any(tool in code for tool in self.registry._tools)
+        if not has_tools:
+            self.hooks.emit(EventType.TOOL_CALL, tool="python", args={}, label="Executing raw python block...")
 
         try:
             exec(compiled, self._build_sandbox(captured_print=_captured_print))  # noqa: S102
@@ -874,6 +1025,9 @@ class AsyncRuntime:
         printed = "".join(_print_lines).strip()
         if printed:
             self._execution_buffer.insert(0, printed)
+            
+        if not has_tools:
+            self.hooks.emit(EventType.TOOL_RESULT, tool="python", result=printed)
 
     @staticmethod
     def _format_execution_error(exc: BaseException, traceback_text: str, ran_any_statements: bool) -> str:
@@ -928,57 +1082,57 @@ class AsyncRuntime:
 
 class Runtime:
     """
-    Thin synchronous wrapper over AsyncRuntime.
+    Synchronous wrapper over AsyncRuntime with a **persistent** event loop.
 
-    Suitable for CLI usage and scripts. Calls asyncio.run() internally so the
-    caller doesn't need to manage an event loop.
+    A dedicated daemon thread runs an asyncio event loop for the lifetime of
+    this Runtime instance.  All async operations (LLM inference, streaming,
+    cache timers, session persistence) execute on that loop — they survive
+    across multiple ``run()`` calls, fixing issues with ``asyncio.run()``
+    destroying the loop (and all its tasks/timers) after every invocation.
 
-    For web apps / FastAPI, use AsyncRuntime directly with ``await``.
+    Suitable for CLI usage and scripts. For web apps / FastAPI, use
+    AsyncRuntime directly with ``await``.
     """
 
     def __init__(self, agent_file: str, **kwargs):
         # ------------------------------------------------------------------ #
-        #  Guard: AsyncEngine is incompatible with the sync Runtime wrapper.  #
-        #                                                                      #
-        #  Runtime.run() calls asyncio.run() on every invocation which        #
-        #  creates and then CLOSES a new event loop each time. SQLAlchemy's   #
-        #  AsyncEngine binds its connection pool to the event loop that was   #
-        #  active when the first connection was made. After asyncio.run()     #
-        #  tears down that loop the pool connections are dead — the second    #
-        #  Runtime.run() call will crash with a cryptic asyncio error.        #
-        #                                                                      #
-        #  Fix: use AsyncRuntime with ``await runtime.run()``.                #
+        #  Persistent event loop on a daemon thread                            #
         # ------------------------------------------------------------------ #
-        _db = kwargs.get("db")
-        if _db is not None:
-            try:
-                from sqlalchemy.ext.asyncio import AsyncEngine
-                if isinstance(_db, AsyncEngine):
-                    raise ValueError(
-                        "Runtime (sync) does not support SQLAlchemy AsyncEngine.\n\n"
-                        "Reason: Runtime.run() calls asyncio.run() internally, which "
-                        "creates and destroys an event loop on every call. An AsyncEngine's "
-                        "connection pool is bound to a single event loop and will break "
-                        "after the first call.\n\n"
-                        "Fix: switch to AsyncRuntime and await your calls:\n\n"
-                        "    from codepilot import AsyncRuntime\n\n"
-                        "    runtime = AsyncRuntime('agent.yaml', db=engine)\n"
-                        "    result  = await runtime.run('your task')"
-                    )
-            except ImportError:
-                pass  # sqlalchemy.ext.asyncio not installed — nothing to guard
+        self._loop = asyncio.new_event_loop()
+        self._loop_thread = threading.Thread(
+            target=self._loop.run_forever,
+            name="codepilot-runtime-loop",
+            daemon=True,
+        )
+        self._loop_thread.start()
 
-        self._async = AsyncRuntime(agent_file, **kwargs)
+        # Create AsyncRuntime on the loop thread so any loop-bound resources
+        # (cache timers, etc.) bind to the correct loop.
+        async def _init_async():
+            return AsyncRuntime(agent_file, **kwargs)
+
+        future = asyncio.run_coroutine_threadsafe(_init_async(), self._loop)
+        self._async = future.result()
+
+    # ── internal helper ──────────────────────────────────────────────────────
+
+    def _run_coro(self, coro):
+        """Submit a coroutine to the persistent loop and block until done."""
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result()
 
     # ── public API mirrors AsyncRuntime ──────────────────────────────────────
 
     def run(self, task: str) -> Optional[str]:
         """Run a task synchronously. Blocks the calling thread until complete."""
-        return asyncio.run(self._async.run(task))
+        return self._run_coro(self._async.run(task))
 
     def reset(self):
         """Wipe the entire conversation history and start fresh."""
-        self._async.reset()
+        if self._async.session.is_async:
+            self._run_coro(self._async.areset())
+        else:
+            self._async.reset()
 
     def abort(self):
         """Stop the loop cleanly after the current step completes."""
@@ -987,6 +1141,10 @@ class Runtime:
     def send_message(self, message: str):
         """Inject a user message into the running loop from any thread."""
         self._async.send_message(message)
+
+    def raw_llm_generations(self) -> List[Dict[str, Any]]:
+        """Return raw, uncompressed LLM generations captured for this session."""
+        return self._async.raw_llm_generations()
 
     def register_tool(self, name: str, func, replace: bool = False):
         """Register a custom tool into the agent's sandbox."""

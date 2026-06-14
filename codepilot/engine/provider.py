@@ -106,6 +106,7 @@ class LLMProvider(ABC):
         system: Union[str, SystemPromptParts, None] = None,
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        **kwargs,
     ) -> str:
         ...
 
@@ -115,6 +116,7 @@ class LLMProvider(ABC):
         system: Union[str, SystemPromptParts, None] = None,
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        **kwargs,
     ) -> AsyncIterator[str]:
         """
         Stream LLM response token by token.
@@ -124,7 +126,7 @@ class LLMProvider(ABC):
         """
         yield await self.chat(
             messages=messages, system=system,
-            temperature=temperature, max_tokens=max_tokens,
+            temperature=temperature, max_tokens=max_tokens, **kwargs,
         )
 
     # ------------------------------------------------------------------ #
@@ -622,7 +624,7 @@ class DeepSeekProvider(LLMProvider):
     #  Internal helpers                                                    #
     # ------------------------------------------------------------------ #
 
-    def _build_kwargs(self, messages, system, temperature, max_tokens) -> dict:
+    def _build_kwargs(self, messages, system, temperature, max_tokens, force_thinking=False) -> dict:
         """Build the common kwargs dict for a chat completions call."""
         msgs = []
         sys_text = self._system_str(system)
@@ -636,7 +638,7 @@ class DeepSeekProvider(LLMProvider):
             max_tokens=max_tokens,
         )
 
-        if self.thinking_enabled:
+        if self.thinking_enabled or force_thinking:
             # temperature is silently ignored by DeepSeek in thinking mode
             # (per docs) — omit it to keep the request clean.
             kwargs["reasoning_effort"] = self.reasoning_effort
@@ -661,15 +663,17 @@ class DeepSeekProvider(LLMProvider):
         system: Union[str, SystemPromptParts, None] = None,
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        force_thinking: bool = False,
+        **kwargs,
     ) -> str:
-        kwargs = self._build_kwargs(messages, system, temperature, max_tokens)
-        response = await self.client.chat.completions.create(**kwargs)
+        kwargs_api = self._build_kwargs(messages, system, temperature, max_tokens, force_thinking=force_thinking)
+        response = await self.client.chat.completions.create(**kwargs_api)
 
         msg = response.choices[0].message
         content          = msg.content or ""
         reasoning_content = getattr(msg, "reasoning_content", None) or ""
 
-        if self.thinking_enabled and reasoning_content:
+        if (self.thinking_enabled or force_thinking) and reasoning_content:
             return f"<thinking>\n{reasoning_content}\n</thinking>\n{content}"
         return content
 
@@ -683,11 +687,13 @@ class DeepSeekProvider(LLMProvider):
         system: Union[str, SystemPromptParts, None] = None,
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        force_thinking: bool = False,
+        **kwargs,
     ) -> AsyncIterator[str]:
-        kwargs = self._build_kwargs(messages, system, temperature, max_tokens)
-        kwargs["stream"] = True
+        kwargs_api = self._build_kwargs(messages, system, temperature, max_tokens, force_thinking=force_thinking)
+        kwargs_api["stream"] = True
 
-        stream = await self.client.chat.completions.create(**kwargs)
+        stream = await self.client.chat.completions.create(**kwargs_api)
 
         in_thinking = False
 

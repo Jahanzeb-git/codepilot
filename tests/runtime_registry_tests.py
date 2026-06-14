@@ -226,6 +226,100 @@ two
         with self.assertRaisesRegex(ValueError, "invalid mode 'multi-edit'"):
             BlockParser.split(response)
 
+    def test_agentic_history_keeps_raw_generation_verbatim(self) -> None:
+        response = """I'll write it.
+
+```codepilot
+write_file("hello.py", mode="w")
+```
+
+```python filename=hello.py
+print("hello")
+```
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agent_file = root / "agent.yaml"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            agent_file.write_text(
+                f"""
+agent:
+  name: TestAgent
+  role: Test runtime raw history.
+  model:
+    provider: openai
+    name: test-model
+    api_key_env: TEST_API_KEY
+  runtime:
+    work_dir: {workspace}
+    max_steps: 1
+""",
+                encoding="utf-8",
+            )
+            provider = _ScriptedProvider([response])
+
+            with (
+                patch("codepilot.engine.runtime.get_provider", return_value=provider),
+                patch("codepilot.tools.terminal.TerminalManager.start_default_terminal"),
+                patch("codepilot.tools.terminal.TerminalManager.ensure_default_terminal"),
+            ):
+                runtime = AsyncRuntime(str(agent_file))
+                for event_type in EventType:
+                    runtime.hooks.clear(event_type)
+                asyncio.run(runtime.run("Create hello.py"))
+
+            self.assertEqual(response, runtime.messages[1]["content"])
+            self.assertEqual(response, runtime.raw_llm_generations()[0]["response"])
+            self.assertTrue((workspace / "hello.py").exists())
+
+    def test_final_agentic_step_stores_execution_result_before_final_text(self) -> None:
+        response = """I'll check that.
+
+```codepilot
+task(finish=True)
+```
+
+Done now."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agent_file = root / "agent.yaml"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            agent_file.write_text(
+                f"""
+agent:
+  name: TestAgent
+  role: Test runtime final history.
+  model:
+    provider: openai
+    name: test-model
+    api_key_env: TEST_API_KEY
+  runtime:
+    work_dir: {workspace}
+    max_steps: 2
+""",
+                encoding="utf-8",
+            )
+            provider = _ScriptedProvider([response])
+
+            with (
+                patch("codepilot.engine.runtime.get_provider", return_value=provider),
+                patch("codepilot.tools.terminal.TerminalManager.start_default_terminal"),
+                patch("codepilot.tools.terminal.TerminalManager.ensure_default_terminal"),
+            ):
+                runtime = AsyncRuntime(str(agent_file))
+                for event_type in EventType:
+                    runtime.hooks.clear(event_type)
+                summary = asyncio.run(runtime.run("Finish cleanly"))
+
+            self.assertEqual("Done now.", summary)
+            contents = [msg["content"] for msg in runtime.messages]
+            self.assertEqual(response, contents[1])
+            self.assertTrue(contents[2].startswith("[EXECUTION RESULT]\n[task] Task marked as complete."))
+            self.assertEqual(response, runtime.raw_llm_generations()[0]["response"])
+
     def test_write_file_rejects_invalid_mode_before_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             work_dir = Path(tmp)
@@ -255,6 +349,73 @@ two
             self.assertEqual(original, target.read_text(encoding="utf-8"))
             self.assertIn("outside 'hello.py'", runtime._execution_buffer[-1])
             self.assertIn("Call read_file('hello.py')", runtime._execution_buffer[-1])
+
+    def test_write_file_rejects_payload_filename_mismatch_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            target = work_dir / "hello.py"
+            target.write_text("original\n", encoding="utf-8")
+            runtime = _FilesystemRuntime(work_dir)
+            runtime.enqueue_payload("other.py", "replacement\n")
+            tool = FilesystemTools(runtime)
+
+            tool.write_file("hello.py", mode="edit", start_line=1, end_line=1)
+
+            self.assertEqual("original\n", target.read_text(encoding="utf-8"))
+            self.assertIn("filename mismatch", runtime._execution_buffer[-1])
+            self.assertIn("No file was changed", runtime._execution_buffer[-1])
+
+    def test_write_file_search_replace_applies_unique_patch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            target = work_dir / "hello.py"
+            target.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+            runtime = _FilesystemRuntime(work_dir)
+            runtime.enqueue_payload(
+                "hello.py",
+                "<<<<<<< SEARCH\nbeta\n=======\nBETA\n>>>>>>> REPLACE\n",
+            )
+            tool = FilesystemTools(runtime)
+
+            tool.write_file("hello.py", mode="search_replace")
+
+            self.assertEqual("alpha\nBETA\ngamma\n", target.read_text(encoding="utf-8"))
+            self.assertIn("applied 1 replacements", runtime._execution_buffer[-1])
+
+    def test_write_file_search_and_replace_alias_accepts_common_marker_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            target = work_dir / "hello.py"
+            target.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+            runtime = _FilesystemRuntime(work_dir)
+            runtime.enqueue_payload(
+                "hello.py",
+                "<<<<<<< ORIGINAL\nbeta\n=======\nBETA\n>>>>>>> UPDATED\n",
+            )
+            tool = FilesystemTools(runtime)
+
+            tool.write_file("hello.py", mode="search_and_replace")
+
+            self.assertEqual("alpha\nBETA\ngamma\n", target.read_text(encoding="utf-8"))
+            self.assertIn("edited via search_replace", runtime._execution_buffer[-1])
+
+    def test_write_file_search_replace_duplicate_match_does_not_mutate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            target = work_dir / "hello.py"
+            original = "beta\nbeta\n"
+            target.write_text(original, encoding="utf-8")
+            runtime = _FilesystemRuntime(work_dir)
+            runtime.enqueue_payload(
+                "hello.py",
+                "<<<<<<< SEARCH\nbeta\n=======\nBETA\n>>>>>>> REPLACE\n",
+            )
+            tool = FilesystemTools(runtime)
+
+            tool.write_file("hello.py", mode="search_replace")
+
+            self.assertEqual(original, target.read_text(encoding="utf-8"))
+            self.assertIn("matched 2 times", runtime._execution_buffer[-1])
 
     def test_read_file_reports_missing_file_as_tool_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

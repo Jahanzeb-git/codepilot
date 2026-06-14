@@ -32,7 +32,7 @@ Observable hooks
     runtime.run("Refactor the database module.")
 """
 
-__version__ = "0.9.4"
+__version__ = "0.9.5"
 __author__  = "CodePilot"
 
 # Core entry point
@@ -58,6 +58,7 @@ from .engine.hooks import (
     EventType,
     HookSystem,
     on_stream,
+    on_thinking_stream,
     on_tool_call,
     on_tool_result,
     on_ask_user,
@@ -65,6 +66,12 @@ from .engine.hooks import (
     on_finish,
     on_user_message_queued,
     on_user_message_injected,
+    on_runtime_error,
+    on_context_drop,
+    on_subagent_spawn,
+    on_subagent_message,
+    on_subagent_finish,
+    on_llm_response,
 )
 
 __all__ = [
@@ -85,6 +92,7 @@ __all__ = [
     "EventType",
     "HookSystem",
     "on_stream",
+    "on_thinking_stream",
     "on_tool_call",
     "on_tool_result",
     "on_ask_user",
@@ -92,4 +100,10 @@ __all__ = [
     "on_finish",
     "on_user_message_queued",
     "on_user_message_injected",
+    "on_runtime_error",
+    "on_context_drop",
+    "on_subagent_spawn",
+    "on_subagent_message",
+    "on_subagent_finish",
+    "on_llm_response",
 ]

@@ -19,6 +19,7 @@ Licensed under the MIT License.
 """
 
 import re
+import ast
 from typing import List, Optional, Tuple
 from dataclasses import dataclass, field
 
@@ -56,11 +57,15 @@ class BlockParser:
     #   filename=routes/profile.py   filename="routes/profile.py"
     _FILENAME_RE = re.compile(r'filename=(?:"([^"]+)"|\'([^\']+)\'|(\S+))')
     _WRITE_FILE_RE = re.compile(r'write_file\s*\(')
+    _FILE_EDITOR_RE = re.compile(r'file_editor\s*\(')
     _INLINE_CONTENT_ARG_RE = re.compile(
-        r'write_file\s*\([^)]*\b(content|payload|text|data)\s*=',
+        r'(?:write_file|file_editor)\s*\([^)]*\b(content|payload|text|data)\s*=',
         re.DOTALL,
     )
-    _VALID_WRITE_MODES = frozenset({"w", "a", "edit", "insert", "multi_edit"})
+    # Legacy write_file modes
+    _VALID_WRITE_MODES = frozenset({"w", "a", "edit", "insert", "multi_edit", "search_replace", "search_and_replace"})
+    # New file_editor modes (only create/edit/multi_edit produce payload blocks; view does not)
+    _VALID_EDITOR_MODES = frozenset({"view", "create", "edit", "multi_edit"})
 
 
     @classmethod
@@ -123,6 +128,24 @@ class BlockParser:
         If no ```codepilot block exists, returns (None, []) — the
         response is a conversational reply.
         """
+        # Defensive pre-processing: strip any <thinking>...</thinking> blocks
+        # before parsing. The runtime's streaming state machine already strips
+        # these, but this is belt-and-suspenders against any edge case where
+        # thinking content (which may contain filename= code fence examples
+        # from the docstrings) could otherwise trip the payload validator.
+        import re as _re
+        if "<thinking>" in text:
+            text = _re.sub(r"<thinking>.*?</thinking>\n?", "", text, flags=_re.DOTALL)
+            
+        # Strip out any docstring examples that the model might regurgitate.
+        # The tool docstrings wrap examples in tags like <a>, <b>, <c>, <example>.
+        # If a tag immediately contains a codepilot block, we strip the entire tag
+        # so the parser doesn't accidentally execute the example.
+        text = _re.sub(
+            r"<(a|b|c|d|e|example|tool_docs)>\s*```codepilot.*?.*?</\1>\n?",
+            "", text, flags=_re.DOTALL
+        )
+
         blocks = cls.parse(text)
         if not blocks:
             return None, []
@@ -157,78 +180,78 @@ class BlockParser:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _extract_write_file_calls(control_content: str) -> List[Tuple[str, int]]:
+    @classmethod
+    def _extract_write_file_calls(cls, control_content: str) -> Tuple[List[Tuple[str, int]], bool, bool]:
         """
-        Parse write_file() calls from control block source using a paren-balanced
-        scanner — regex alone can't handle nested structures like edits=[(a,b),(c,d)].
-
-        Returns list of (filepath, payload_count) in call order:
-          payload_count = 1  for all regular modes (create / edit / append)
-          payload_count = N  for multi_edit, where N = number of edit tuples
+        Parse file_editor() and legacy write_file() calls from the control block using AST.
+        Returns (write_calls, has_dynamic_path, has_syntax_error).
+        write_calls is a list of (filepath, payload_count) in call order.
         """
-        results: List[Tuple[str, int]] = []
+        class ToolCallVisitor(ast.NodeVisitor):
+            def __init__(self):
+                self.calls = []
+                self.has_dynamic = False
 
-        for start_match in re.finditer(r'write_file\s*\(', control_content):
-            # Walk forward from the opening paren, tracking depth
-            start = start_match.end() - 1  # position of '('
-            depth = 0
-            i = start
-            while i < len(control_content):
-                ch = control_content[i]
-                if ch == '(':
-                    depth += 1
-                elif ch == ')':
-                    depth -= 1
-                    if depth == 0:
-                        break
-                i += 1
+            def visit_Call(self, node):
+                self.generic_visit(node)
+                if isinstance(node.func, ast.Name) and node.func.id in ("file_editor", "write_file"):
+                    filepath = "<unknown>"
+                    if node.args:
+                        arg0 = node.args[0]
+                        if isinstance(arg0, ast.Constant):
+                            filepath = str(arg0.value)
+                        elif getattr(ast, 'Str', type(None)) is not type(None) and isinstance(arg0, getattr(ast, 'Str', type(None))):
+                            filepath = arg0.s
+                        else:
+                            self.has_dynamic = True
+                    else:
+                        self.has_dynamic = True
 
-            call_args = control_content[start + 1 : i]  # content inside outer parens
+                    if filepath != "<unknown>":
+                        mode = "view" if node.func.id == "file_editor" else "w"
+                        for kw in node.keywords:
+                            if kw.arg == "mode":
+                                if isinstance(kw.value, ast.Constant):
+                                    mode = str(kw.value.value)
+                                elif getattr(ast, 'Str', type(None)) is not type(None) and isinstance(kw.value, getattr(ast, 'Str', type(None))):
+                                    mode = kw.value.s
+                        
+                        if node.func.id == "file_editor":
+                            if mode not in BlockParser._VALID_EDITOR_MODES:
+                                valid = "', '".join(sorted(BlockParser._VALID_EDITOR_MODES))
+                                raise ValueError(
+                                    f"file_editor() for '{filepath}' uses unknown mode '{mode}'. "
+                                    f"Valid modes are '{valid}'."
+                                )
+                        else:
+                            if mode not in BlockParser._VALID_WRITE_MODES:
+                                valid = "', '".join(sorted(BlockParser._VALID_WRITE_MODES))
+                                raise ValueError(
+                                    f"write_file() for '{filepath}' uses invalid mode '{mode}'. "
+                                    f"Valid modes are '{valid}'."
+                                )
+                        
+                        payload_count = 1
+                        if mode == "view":
+                            payload_count = 0
+                        elif mode == "multi_edit":
+                            for kw in node.keywords:
+                                if kw.arg in ("search", "edits") and isinstance(kw.value, ast.List):
+                                    payload_count = max(len(kw.value.elts), 1)
+                                    break
+                                    
+                        self.calls.append((node.lineno, node.col_offset, filepath, payload_count))
 
-            # First positional arg is the filepath string
-            path_match = re.match(r'\s*["\']([^"\']+)["\']', call_args)
-            if not path_match:
-                continue
-            filepath = path_match.group(1)
+        try:
+            tree = ast.parse(control_content)
+        except SyntaxError:
+            return [], False, True
 
-            mode_match = re.search(r'mode\s*=\s*["\']([^"\']+)["\']', call_args)
-            if mode_match:
-                mode = mode_match.group(1)
-                if mode not in BlockParser._VALID_WRITE_MODES:
-                    valid = "', '".join(sorted(BlockParser._VALID_WRITE_MODES))
-                    raise ValueError(
-                        f"write_file() for '{filepath}' uses invalid mode '{mode}'. "
-                        f"Valid modes are '{valid}'. Use mode='a' for append and "
-                        "mode='multi_edit' for multiple non-contiguous edits."
-                    )
-
-            # Detect multi_edit and count its tuples
-            is_multi_edit = bool(re.search(r'mode\s*=\s*["\']multi_edit["\']', call_args))
-            if is_multi_edit:
-                edits_match = re.search(r'edits\s*=\s*\[', call_args)
-                if edits_match:
-                    # Walk to the matching ] to isolate the edits list
-                    edits_start = edits_match.end()
-                    depth2 = 1
-                    j = edits_start
-                    while j < len(call_args) and depth2 > 0:
-                        if call_args[j] == '[':
-                            depth2 += 1
-                        elif call_args[j] == ']':
-                            depth2 -= 1
-                        j += 1
-                    edits_content = call_args[edits_start : j - 1]
-                    # Each tuple starts with '(' — count them
-                    payload_count = edits_content.count('(')
-                else:
-                    payload_count = 1
-            else:
-                payload_count = 1
-
-            results.append((filepath, payload_count))
-
-        return results
+        visitor = ToolCallVisitor()
+        visitor.visit(tree)
+        visitor.calls.sort()
+        results = [(fp, cnt) for _, _, fp, cnt in visitor.calls]
+        return results, visitor.has_dynamic, False
 
 
     @classmethod
@@ -239,33 +262,39 @@ class BlockParser:
         unannotated_blocks: List[CodeBlock],
     ) -> None:
         """
-        Cross-checks payload block filename= annotations against the write_file()
-        calls parsed from the control block.
+        Cross-checks payload block filename= annotations against file_editor() and
+        legacy write_file() calls parsed from the control block.
 
         Raises ValueError with a precise, human-readable (and LLM-readable) message
         describing exactly what went wrong and what was expected.
 
         Three failure modes:
-          1. Payload count doesn't match total expected across all write_file() calls
+          1. Payload count doesn't match total expected across all tool calls
           2. A payload block is missing its filename= annotation
-          3. A payload block's filename= doesn't match the corresponding write_file() target
+          3. A payload block's filename= doesn't match the corresponding tool call target
         """
         if cls._INLINE_CONTENT_ARG_RE.search(control_block.content):
             raise ValueError(
-                "write_file() was called with an inline content-like argument "
-                "(content=, payload=, text=, or data=). write_file() never accepts "
-                "file content as a Python argument. Put the file content in a "
+                "file_editor() / write_file() was called with an inline content-like "
+                "argument (content=, payload=, text=, or data=). These tools never "
+                "accept file content as a Python argument. Put the file content in a "
                 "Payload Block immediately after the ```codepilot block, annotated "
                 "with filename=<same path>."
             )
 
-        write_calls = cls._extract_write_file_calls(control_block.content)
+        write_calls, has_dynamic, has_syntax_error = cls._extract_write_file_calls(control_block.content)
 
-        if not write_calls and cls._WRITE_FILE_RE.search(control_block.content):
+        # If there's a SyntaxError, bypass payload validation so the execution engine
+        # can crash and feed the real SyntaxError back to the LLM.
+        if has_syntax_error:
+            return
+
+        # Guard: fire only when a tool call exists with a non-literal (dynamic) path.
+        if not write_calls and has_dynamic:
             raise ValueError(
-                "write_file() call found, but its first argument was not a literal "
-                "quoted path. Payload-backed write_file() calls must use a literal "
-                "path like write_file(\"src/app.py\", mode=\"w\") so the runtime can "
+                "file_editor() / write_file() call found, but its first argument was "
+                "not a literal quoted path. These tools must use a literal path like "
+                'file_editor("src/app.py", mode="edit", ...) so the runtime can '
                 "validate Payload Block filename= annotations. For computed content "
                 "or dynamic paths, use Python native file I/O with WORK_DIR instead."
             )

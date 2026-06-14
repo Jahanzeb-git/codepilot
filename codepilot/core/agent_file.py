@@ -70,6 +70,18 @@ class MemoryConfigModel(BaseModel):
     global_summary_max_tokens: int = Field(default=500, gt=0)
 
 
+class SubAgentsConfig(BaseModel):
+    """Configuration for the sub-agent spawning feature."""
+    enabled: bool = Field(
+        default=False,
+        description="Enable spawn_subagent / await_subagent tools on this runtime."
+    )
+    max_steps: int = Field(
+        default=20, gt=0,
+        description="Max agentic steps allowed per sub-agent."
+    )
+
+
 class AgentConfig(BaseModel):
     """
     Mirrors the top-level 'agent:' block in an AgentFile YAML.
@@ -84,6 +96,7 @@ class AgentConfig(BaseModel):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     memory: MemoryConfigModel = Field(default_factory=MemoryConfigModel)
     tools: List[ToolConfig] = Field(default_factory=list)
+    sub_agents: SubAgentsConfig = Field(default_factory=SubAgentsConfig)
 
     # Internal: set by AgentConfig.load(), not from YAML directly.
     _yaml_dir: str = ""
@@ -119,6 +132,20 @@ class AgentConfig(BaseModel):
             # Pydantic models are normally immutable; use object.__setattr__ trick
             # on the nested model:
             object.__setattr__(self.runtime, "work_dir", str(resolved))
+
+        # --- auto-adjust max_context_tokens if it is the default ---
+        if self.memory.max_context_tokens == 120_000:
+            model_name = self.model.name.lower()
+            new_max = 120_000
+            if "deepseek" in model_name:
+                new_max = 64_000
+            elif "claude-3" in model_name:
+                new_max = 200_000
+            elif "gpt-4" in model_name or "qwen" in model_name:
+                new_max = 128_000
+            
+            if new_max != 120_000:
+                object.__setattr__(self.memory, "max_context_tokens", new_max)
 
     # ------------------------------------------------------------------
     # Class-level factory

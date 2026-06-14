@@ -114,6 +114,14 @@ class ContextTools:
                     f"Use reveal_context({pos}) to restore it first."
                 )
 
+        from ..core.memory import count_tokens
+        sys_tokens = 0
+        sys_prompt = self.runtime._last_system_prompt
+        if sys_prompt:
+            sys_tokens = count_tokens(sys_prompt.full, provider)
+
+        old_total = count_messages_tokens(messages, provider) + sys_tokens
+
         # Process from highest position first so message indices don't shift
         total_saved = 0
         for pos, summ in sorted(
@@ -125,9 +133,8 @@ class ContextTools:
             # Store originals in archive
             memory.archive.archive(pos, original_msgs)
 
-            # Count tokens saved
-            saved = count_messages_tokens(original_msgs, provider)
-            total_saved += saved
+            # Count gross tokens saved
+            gross_saved = count_messages_tokens(original_msgs, provider)
 
             # Replace with single archived message
             archived_msg = {
@@ -136,20 +143,38 @@ class ContextTools:
             }
             messages[start:end] = [archived_msg]
 
+            # Calculate net savings
+            net_saved = gross_saved - count_messages_tokens([archived_msg], provider)
+            total_saved += net_saved
+
             # Rebuild task map after modification for next iteration
             tmap = find_task_map(messages)
 
         # Report result
-        new_total = count_messages_tokens(messages, provider)
+        new_total = count_messages_tokens(messages, provider) + sys_tokens
         max_tok = memory.config.max_context_tokens
         new_pct = round(new_total / max_tok * 100) if max_tok else 0
 
+        before_pct = round(old_total / max_tok * 100) if max_tok else 0
+
         archived_str = ", ".join(str(p) for p in sorted(positions))
-        return (
+        result_msg = (
             f"Archived Task(s) {archived_str}. "
             f"Context reduced by ~{total_saved:,} tokens. "
             f"({new_total:,} / {max_tok:,} — {new_pct}%)"
         )
+
+        # Emit CONTEXT_DROP event so CLI/UI can render a progress message
+        from ..engine.hooks import EventType
+        self.runtime.hooks.emit(
+            EventType.CONTEXT_DROP,
+            before_pct=before_pct,
+            after_pct=new_pct,
+            tokens_saved=total_saved,
+            tasks_archived=sorted(positions),
+        )
+
+        return result_msg
 
     def reveal_context(self, position: int) -> str:
         """Read a previously archived task's full context as text.

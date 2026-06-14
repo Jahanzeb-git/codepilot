@@ -52,4 +52,14 @@ Active sessions (use session IDs with terminal tools):
 
 {{ developer_prompt }}
 {% endif %}
+
+{% if sub_agent_status %}
+---
+## ACTIVE SUB-AGENTS
+
+The following worker agents are running in parallel. Monitor their progress and
+respond to any [Sub-Agent #N →] questions that appear in your conversation.
+
+{{ sub_agent_status }}
+{% endif %}
 {# -------------------- END OF THE DYNAMIC INSTRUCTIONS -------------------- #}

@@ -23,7 +23,7 @@ CodePilot is a Python library for embedding autonomous software-engineering agen
 
 It is intentionally **not** a hosted chatbot UI. The package gives applications a runtime: model inference, tool execution, file editing, terminal control, persistence, hooks, and completion semantics. You bring the product surface, auth model, sandbox, database, and deployment strategy.
 
-**Version:** `0.9.4`
+**Version:** `0.9.5`
 
 Full user documentation lives at: **https://Jahanzeb-git.github.io/codepilot/**
 
@@ -179,19 +179,15 @@ Line-based edit:
 
 ````markdown
 ```codepilot
-read_file("config.py")
-```
-````
-
-After observing exact line numbers:
-
-````markdown
-```codepilot
-write_file("config.py", mode="edit", start_line=1, end_line=1)
+file_editor("config.py", mode="edit")
 ```
 
 ```python filename=config.py
+<<<<<<< SEARCH
+TIMEOUT = 30
+=======
 TIMEOUT = 60
+>>>>>>> REPLACE
 ```
 ````
 
@@ -199,23 +195,32 @@ Multiple non-contiguous edits in one file:
 
 ````markdown
 ```codepilot
-write_file("routes/profile.py", mode="multi_edit", edits=[(42, 48), (55, 55)])
+file_editor("routes/profile.py", mode="edit")
 ```
 
 ```python filename=routes/profile.py
-# replacement for lines 42-48
-```
-
-```python filename=routes/profile.py
-# replacement for line 55
+<<<<<<< SEARCH
+def get_profile():
+    return {}
+=======
+def get_profile():
+    return {"status": "ok"}
+>>>>>>> REPLACE
+<<<<<<< SEARCH
+def update_profile():
+    pass
+=======
+def update_profile(data):
+    save(data)
+>>>>>>> REPLACE
 ```
 ````
 
 Safety properties:
 
 - Paths are constrained to `runtime.work_dir` unless `unsafe_mode: true`.
-- Edits are line-numbered and validated before mutation.
-- Multiple edits to the same file are constrained to prevent line drift.
+- Edits are validated using exact block matching before mutation.
+- Multiple edits to the same file are processed sequentially.
 - Tool results are appended back into the conversation as ground truth.
 
 ## How Terminal Tools Work

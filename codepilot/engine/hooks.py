@@ -23,6 +23,7 @@ class EventType(Enum):
     START                 = "start"                  # Agent loop begins
     STEP                  = "step"                   # A new agentic step is starting
     STREAM                = "stream"                 # Pre-block reasoning text (streamed)
+    THINKING_STREAM       = "thinking_stream"        # Internal chain-of-thought tokens (never in STREAM)
     TOOL_CALL             = "tool_call"              # A tool is about to be invoked
     TOOL_RESULT           = "tool_result"            # A tool returned a result
     ASK_USER              = "ask_user"               # Agent is asking the user a question
@@ -34,6 +35,11 @@ class EventType(Enum):
     USER_MESSAGE_QUEUED   = "user_message_queued"    # send_message() was called
     USER_MESSAGE_INJECTED = "user_message_injected"  # Message inserted into context
     SESSION_RESET         = "session_reset"          # reset() was called
+    CONTEXT_DROP          = "context_drop"           # archive_context reduced context size
+    SUBAGENT_SPAWN        = "subagent_spawn"         # A sub-agent was spawned
+    SUBAGENT_MESSAGE      = "subagent_message"       # Sub-agent sent a message to main
+    SUBAGENT_FINISH       = "subagent_finish"        # A sub-agent completed its task
+    LLM_RESPONSE          = "llm_response"           # Raw LLM generation before history compression (observability)
 
 
 class HookSystem:
@@ -195,5 +201,91 @@ def on_user_message_injected(runtime_instance):
     """Decorator: fires when a queued message is inserted into LLM context."""
     def decorator(func: Callable):
         runtime_instance.hooks.register(EventType.USER_MESSAGE_INJECTED, func)
+        return func
+    return decorator
+
+
+def on_runtime_error(runtime_instance):
+    """Decorator: register a handler for RUNTIME_ERROR events (parser errors, etc.)."""
+    def decorator(func: Callable):
+        runtime_instance.hooks.clear(EventType.RUNTIME_ERROR)
+        runtime_instance.hooks.register(EventType.RUNTIME_ERROR, func)
+        return func
+    return decorator
+
+
+def on_thinking_stream(runtime_instance):
+    """Decorator: register a handler for THINKING_STREAM events.
+
+    Fires with thinking=<str> for each chunk of model chain-of-thought.
+    These are NEVER emitted on the STREAM event — kept completely separate
+    so the CLI can render them without polluting the main text stream.
+    Handler receives: thinking (str).
+    """
+    def decorator(func: Callable):
+        runtime_instance.hooks.clear(EventType.THINKING_STREAM)
+        runtime_instance.hooks.register(EventType.THINKING_STREAM, func)
+        return func
+    return decorator
+
+
+def on_context_drop(runtime_instance):
+    """Decorator: fires when archive_context reduces context size.
+
+    Handler receives: before_pct (int), after_pct (int), tokens_saved (int),
+    tasks_archived (list[int]).
+    """
+    def decorator(func: Callable):
+        runtime_instance.hooks.register(EventType.CONTEXT_DROP, func)
+        return func
+    return decorator
+
+
+def on_subagent_spawn(runtime_instance):
+    """Decorator: fires when main agent spawns a sub-agent.
+
+    Handler receives: agent_id (int), task_summary (str).
+    """
+    def decorator(func: Callable):
+        runtime_instance.hooks.register(EventType.SUBAGENT_SPAWN, func)
+        return func
+    return decorator
+
+
+def on_subagent_message(runtime_instance):
+    """Decorator: fires when a sub-agent sends a message to the main agent.
+
+    Handler receives: agent_id (int), message (str).
+    Returns: reply string to unblock the sub-agent, or None to leave blocked.
+    """
+    def decorator(func: Callable):
+        runtime_instance.hooks.register(EventType.SUBAGENT_MESSAGE, func)
+        return func
+    return decorator
+
+
+def on_subagent_finish(runtime_instance):
+    """Decorator: fires when a sub-agent completes its task.
+
+    Handler receives: agent_id (int), summary (str), files_written (list[str]),
+    elapsed_seconds (float), error (str|None).
+    """
+    def decorator(func: Callable):
+        runtime_instance.hooks.register(EventType.SUBAGENT_FINISH, func)
+        return func
+    return decorator
+
+
+def on_llm_response(runtime_instance):
+    """Decorator: fires with the raw, uncompressed LLM generation text.
+
+    Fires immediately after inference and before history compression or
+    execution. Use this for observability / trace logging — the payload
+    is the exact string the model produced, including all fenced blocks.
+
+    Handler receives: step (int), response (str).
+    """
+    def decorator(func: Callable):
+        runtime_instance.hooks.register(EventType.LLM_RESPONSE, func)
         return func
     return decorator

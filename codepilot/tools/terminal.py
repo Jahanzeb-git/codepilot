@@ -395,6 +395,7 @@ class TerminalSession:
         self.last_used: float = time.time()
         self.cwd: str = work_dir
         self._bytes_fed: int = 0   # total raw chars fed to VT screen this command
+        self._startup_time: float = time.time()  # grace period for bash init
         
         import threading
         self._lock = threading.Lock()
@@ -402,7 +403,14 @@ class TerminalSession:
         self._bg_thread.start()
 
     def _bg_listener(self):
-        """Background thread to read socket when agent is idle and detect human commands."""
+        """Background thread to read socket when agent is idle and detect human commands.
+
+        Grace period: ignores the first 3 seconds after session creation to
+        skip bash startup noise (rcfile sourcing, PS1/PROMPT_COMMAND setup,
+        OSC 633 shell integration init). Without this, the initial
+        __cp_command_finished() from PROMPT_COMMAND fires a false
+        'user ran a command' notification.
+        """
         import time
         while True:
             if not self._backend.is_alive():
@@ -417,7 +425,12 @@ class TerminalSession:
                         if getattr(self._screen, 'command_finished', False):
                             self.cwd = self._screen.cwd or self.cwd
                             self._screen.command_finished = False
-                            if self.on_user_command:
+                            # Skip notifications during startup grace period —
+                            # bash init (rcfile, PROMPT_COMMAND) fires OSC 633;D
+                            # which looks like a completed command.
+                            if time.time() - self._startup_time < 3.0:
+                                self._screen.reset_delta()
+                            elif self.on_user_command:
                                 output = self._screen.delta_snapshot().strip()
                                 if output:
                                     self.on_user_command(self.session_id, output)
@@ -743,7 +756,12 @@ class TerminalManager:
             def _on_user(sid, output):
                 msg = f"[Environment Detection Notification] User just ran a command in terminal {sid}:\n{output}"
                 self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="execute", result=msg)
-                self.runtime._append_execution(msg)
+                # Queue as a user message for the next inference cycle rather
+                # than appending to _execution_buffer. _append_execution()
+                # pollutes the current step's result even when no task is
+                # running, causing the LLM to hallucinate about phantom
+                # commands on the next run() call.
+                self.runtime.send_message(msg)
                 
             session = TerminalSession("main", work_dir, on_user_command=_on_user)
             session.owner = "agent"
@@ -812,8 +830,12 @@ class TerminalManager:
         For a new terminal session: set new_terminal=True with a unique session_id.
         Optional shell parameter (only used with new_terminal=True): 'bash' (default
         on Linux/macOS), 'powershell' (default on Windows), or 'cmd'.
-        Write commands in the syntax of the active shell shown in the session list.
-        Never import subprocess or os — always use this tool.
+        Example:
+        <a>
+        ```codepilot
+        execute("main", "pytest test/test_profile.py -v", 10)
+        ```
+        </a>
         """
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="execute",
@@ -948,6 +970,12 @@ class TerminalManager:
         New output available: returns only new content (non-overlapping).
         No new output (command already done): returns complete output and
         clears previous outputs from context to save tokens.
+        Example:
+        <a>
+        ```codepilot
+        read_output("main", 10)
+        ```
+        </a>
         """
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="read_output",
@@ -1033,6 +1061,22 @@ class TerminalManager:
             label=f"Sending input to console [{session_id}]",
         )
 
+        # ---- Permission gate ----
+        tool_cfg = self.runtime._tool_config("send_input")
+        if tool_cfg.get("require_permission", False):
+            perm = self.runtime.hooks.emit(
+                EventType.PERMISSION_REQUEST, tool="send_input",
+                description=f"Send input to session {session_id}: {text!r}",
+            )
+            approved = bool(perm) if perm is not None else (
+                input(f"\n[Permission] Send input: {text!r}\nApprove? [y/N]: ").strip().lower() in ("y", "yes")
+            )
+            if not approved:
+                result = f"[terminal:{session_id}] Permission denied: {text!r}"
+                self.runtime._append_execution(result)
+                self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="send_input", result=result)
+                return result
+
         session = self._sessions.get(session_id)
         if session is None:
             result = f"[terminal:{session_id}] Error: session not found."
@@ -1092,9 +1136,7 @@ class TerminalManager:
     def terminate_terminal(self, session_id: str) -> str:
         """
         Destroy a terminal session entirely. Kills the process and removes it.
-        Use this as a last resort when a process is unresponsive to Ctrl+C
-        (send_input with "\\x03"). This is a hard kill — the session becomes
-        unusable after this call.
+        This is a hard kill — the session becomes unusable after this call.
         """
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="terminate_terminal",
