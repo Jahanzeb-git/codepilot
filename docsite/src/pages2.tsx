@@ -23,7 +23,7 @@ export function PageHowItWorks() {
           headers={["Block", "Syntax", "Purpose"]}
           rows={[
             [<strong>Control Block</strong>, <code>{"`"}``codepilot{"`"}``</code>, "The only block the runtime executes. Regular python blocks are display-only markdown."],
-            [<strong>Payload Blocks</strong>, <code>{"`"}``python filename=…{"`"}``</code>, "File content consumed by write_file() in order. Never executed."],
+            [<strong>Payload Blocks</strong>, <code>{"`"}``python filename=…{"`"}``</code>, "File content consumed by file_editor() in order. Never executed."],
             [<strong>Completion Block</strong>, <code>{"`"}``completion{"`"}``</code>, "Natural text that streams to the user. Its presence marks the task complete."],
           ]}
         />
@@ -43,15 +43,19 @@ read_file("routes/profile.py", start_line=35, end_line=65)
 
 \`\`\`codepilot
 # Simple single-line edit, no read needed.
-write_file("config.py", start_line=12, end_line=12, mode="edit")
+file_editor("config.py", mode="edit")
 \`\`\`
 
 \`\`\`python filename=config.py
+<<<<<<< SEARCH
 TIMEOUT = 30
+=======
+TIMEOUT = 60
+>>>>>>> REPLACE
 \`\`\`
 
 \`\`\`completion
-Done. Updated TIMEOUT to 30s in config.py on line 12.
+Done. Updated TIMEOUT to 30s in config.py.
 \`\`\``}</Code>
       </Section>
 
@@ -219,7 +223,7 @@ export function PageCodeAsInterface() {
           When a tool accepts file content as a string argument within a JSON structure, the model must escape quotes, backslashes, and control characters:
         </p>
         <Code lang="json">{`{
-  "name": "write_file",
+  "name": "file_editor",
   "arguments": {
     "path": "app.py",
     "content": "def main():\\n    print(\\"Hello World!\\")\\n    # Nested quotes require \\\\\\" escaping"
@@ -237,7 +241,7 @@ export function PageCodeAsInterface() {
           Instead of passing file contents as escaped arguments inside the tool call, the agent issues a clean Python command:
         </p>
         <Code lang="python">{`# The model issues this clean tool call - no nested content argument:
-write_file("app.py", mode="write")`}</Code>
+file_editor("app.py", mode="create")`}</Code>
         <p>
           Then, it writes the raw, unescaped content inside a separate, natural **Payload Markdown Block** directly following the code block:
         </p>

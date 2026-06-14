@@ -114,7 +114,7 @@ export function PagePermissionGating() {
     <>
       <PageHeader
         title="Permission Gating"
-        subtitle="The execute tool (and optionally write_file) supports require_permission: true in the AgentFile. A PERMISSION_REQUEST hook fires before the tool runs."
+        subtitle="The execute tool (and optionally file_editor) supports require_permission: true in the AgentFile. A PERMISSION_REQUEST hook fires before the tool runs."
       />
 
       <Section>
@@ -127,7 +127,7 @@ runtime = Runtime("agent.yaml")
 @on_permission_request(runtime)
 def gate(tool: str, description: str, **_) -> bool:
     """
-    tool: "write_file" | "execute"
+    tool: "file_editor" | "execute"
     description: human-readable description of the specific operation
     Return True to approve, False to deny.
     """
@@ -141,7 +141,7 @@ runtime.run("Deploy the application")`}</Code>
       <Section title="Programmatic approval (e.g. in a web app)">
         <Code lang="python">{`@on_permission_request(runtime)
 def auto_gate(tool: str, description: str, **_) -> bool:
-    if tool == "write_file" and "config.py" in description:
+    if tool == "file_editor" and "config.py" in description:
         return True
     if tool == "execute" and "pytest" in description:
         return True
@@ -201,15 +201,15 @@ export function PageMultiOperation() {
 
       <Section title="Multiple file writes">
         <p>
-          Up to <strong>5 <code>write_file()</code> calls</strong> with <code>mode='w'</code> or{" "}
+          Up to <strong>5 <code>file_editor()</code> calls</strong> with <code>mode='create'</code> or{" "}
           <code>mode='a'</code> per step. Each call consumes the next payload block in order.
         </p>
         <Code lang="text">{`Alright, both files are independent so I'll write them together.
 
 \`\`\`codepilot
-# Two new files — order of write_file() matches order of payload blocks below.
-write_file("config.py")
-write_file("utils.py")
+# Two new files — order of file_editor() matches order of payload blocks below.
+file_editor("config.py", mode="create")
+file_editor("utils.py", mode="create")
 \`\`\`
 
 \`\`\`python filename=config.py
@@ -236,7 +236,7 @@ def slugify(text: str) -> str:
         </p>
         <Code lang="text">{`\`\`\`codepilot
 # Fix L42-48 (error handling) and L55 (regex) in one step — no drift
-write_file("routes/profile.py", mode="multi_edit", edits=[(42, 48), (55, 55)])
+file_editor("routes/profile.py", mode="edit")
 \`\`\`
 
 \`\`\`python filename=routes/profile.py

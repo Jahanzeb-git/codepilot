@@ -60,25 +60,20 @@ runtime.registry           # ToolRegistry - inspect registered tools`}</Code>
         </p>
       </Section>
 
-      <Section title="write_file()">
-        <Code lang="python">{`write_file(path, start_line=None, end_line=None, after_line=None, mode='w', edits=None)`}</Code>
+      <Section title="file_editor()">
+        <Code lang="python">{`file_editor(path, mode='view', start_line=None, end_line=None)`}</Code>
         <Table
           headers={["mode", "Behaviour", "Limit"]}
           rows={[
-            [<code>'w'</code>, "Create or overwrite the whole file", "5 per step"],
-            [<code>'a'</code>, "Append to end of file", "5 per step (shared with 'w')"],
-            [<code>'edit'</code>, "Replace lines start_line to end_line", "1 per file per step"],
-            [<code>'insert'</code>, "Insert after after_line (0 = top of file)", "1 per file per step"],
-            [<code>'multi_edit'</code>, "edits=[(s1,e1),(s2,e2)]. Runtime applies bottom-to-top.", "1 per file per step"],
+            [<code>'view'</code>, "Read lines start_line to end_line", "Multiple per step"],
+            [<code>'create'</code>, "Create a new file", "5 per step"],
+            [<code>'edit'</code>, "Search & replace blocks", "1 per file per step"],
           ]}
         />
-        <p style={{ marginTop: 12 }}>Content always comes from the next payload block; never pass it as a string argument.</p>
+        <p style={{ marginTop: 12 }}>For <code>create</code> and <code>edit</code> modes, content always comes from the next payload block; never pass it as a string argument.</p>
       </Section>
 
-      <Section title="read_file()">
-        <Code lang="python">{`read_file(path, start_line=1, end_line=None)`}</Code>
-        <p>Returns file content with 1-indexed line numbers. Multiple calls per step are allowed.</p>
-      </Section>
+
 
       <Section title="execute()">
         <Code lang="python">{`execute(session_id, command, timeout=10, new_terminal=False, shell=None)`}</Code>

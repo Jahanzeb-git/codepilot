@@ -131,7 +131,7 @@ export const sections: DocSection[] = [
       "The AgentFile is a YAML contract for model choice, working directory, tool enablement, permission gates, memory settings, and runtime limits. Relative paths resolve from the YAML file location, not the shell CWD.",
     icon: Boxes,
     code:
-      "agent:\n  name: CodePilot\n  role: Autonomous software engineering agent.\n  model:\n    provider: anthropic\n    name: claude-sonnet-4-5\n    api_key_env: ANTHROPIC_API_KEY\n  runtime:\n    work_dir: ./workspace\n    max_steps: 20\n    unsafe_mode: false\n  tools:\n    - name: read_file\n      enabled: true\n    - name: write_file\n      enabled: true\n      config:\n        require_permission: false\n    - name: execute\n      enabled: true\n      config:\n        require_permission: true",
+      "agent:\n  name: CodePilot\n  role: Autonomous software engineering agent.\n  model:\n    provider: anthropic\n    name: claude-sonnet-4-5\n    api_key_env: ANTHROPIC_API_KEY\n  runtime:\n    work_dir: ./workspace\n    max_steps: 20\n    unsafe_mode: false\n  tools:\n    - name: file_editor\n      enabled: true\n      config:\n        require_permission: false\n    - name: execute\n      enabled: true\n      config:\n        require_permission: true",
   },
   {
     id: "runtime",
@@ -158,13 +158,13 @@ export const sections: DocSection[] = [
       "File and terminal tools emit events before and after work so a UI can render exactly what the agent is doing. Built-ins cover file edits, terminal sessions, user questions, text search, and context memory.",
     icon: FileCode2,
     points: [
-      "write_file consumes side-loaded payload blocks instead of fragile inline strings.",
+      "file_editor consumes side-loaded payload blocks instead of fragile inline strings.",
       "read_file returns 1-indexed line numbers so edits can target precise ranges.",
       "execute, read_output, send_input, and terminate_terminal work over persistent terminal sessions.",
       "find gives clean ripgrep-backed search results without forcing the model through shell composition.",
     ],
     code:
-      "read_file('config.py')\nwrite_file('config.py', mode='edit', start_line=12, end_line=12)\nexecute('main', 'pytest -q', timeout=30)",
+      "file_editor('config.py', mode='view')\nfile_editor('config.py', mode='edit')\nexecute('main', 'pytest -q', timeout=30)",
   },
   {
     id: "streaming",
@@ -266,10 +266,10 @@ export const sections: DocSection[] = [
     title: "Risky operations can require approval.",
     eyebrow: "Permission Gating",
     description:
-      "The execute tool and optionally write_file can ask for permission before running. If no handler is registered, CodePilot falls back to a CLI yes/no prompt.",
+      "The execute tool and optionally file_editor can ask for permission before running. If no handler is registered, CodePilot falls back to a CLI yes/no prompt.",
     icon: CheckCircle2,
     points: [
-      "Enable require_permission in the AgentFile for execute or write_file.",
+      "Enable require_permission in the AgentFile for execute or file_editor.",
       "Return True to approve and False to deny.",
       "Use this for local tools, hosted demos, or enterprise approval workflows.",
     ],

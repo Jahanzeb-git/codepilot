@@ -296,7 +296,7 @@ export function PageQuickStart() {
   tools:
     - name: "read_file"
       enabled: true
-    - name: "write_file"
+    - name: "file_editor"
       enabled: true
     - name: "execute"
       enabled: true
@@ -376,7 +376,7 @@ agent:
     unsafe_mode: false              # true = allow writes outside work_dir
 
   tools:
-    - name: "write_file"
+    - name: "file_editor"
       enabled: true
       config:
         require_permission: false   # true = ask user before every file write

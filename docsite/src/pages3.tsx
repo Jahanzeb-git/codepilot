@@ -127,7 +127,7 @@ All tests pass. You're good to go.
         <Code lang="text">{`Updating the timeout value.
 
 \`\`\`codepilot
-write_file("config.py", start_line=12, end_line=12, mode="edit")
+file_editor("config.py", mode="edit")
 \`\`\`
 
 \`\`\`python filename=config.py
