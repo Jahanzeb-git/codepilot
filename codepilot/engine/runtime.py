@@ -547,12 +547,12 @@ class AsyncRuntime:
         enabled = (
             {tc.name for tc in self.config.tools if tc.enabled}
             if self.config.tools
-            else {"file_editor", "write_file", "read_file", "execute", "read_output",
+            else {"view_file", "write_file", "edit_file", "execute", "read_output",
                   "send_input", "terminate_terminal", "ask_user", "find"}
         )
-        if "file_editor"        in enabled: self.registry.register("file_editor",        self._fs_tools.file_editor)
+        if "view_file"          in enabled: self.registry.register("view_file",           self._fs_tools.view_file)
         if "write_file"         in enabled: self.registry.register("write_file",          self._fs_tools.write_file)
-        if "read_file"          in enabled: self.registry.register("read_file",           self._fs_tools.read_file)
+        if "edit_file"          in enabled: self.registry.register("edit_file",           self._fs_tools.edit_file)
         if "execute"             in enabled: self.registry.register("execute",             self._terminal_manager.execute)
         if "read_output"         in enabled: self.registry.register("read_output",         self._terminal_manager.read_output)
         if "send_input"          in enabled: self.registry.register("send_input",          self._terminal_manager.send_input)
@@ -702,13 +702,14 @@ class AsyncRuntime:
         The internal [Task N] prefix is stripped — the XML tag replaces it.
         """
         tmap = find_task_map(self.messages)
+        active_pos = max(tmap.keys()) if tmap else None
 
         # Build fast lookups: which message indices open/close a task?
         opens:  Dict[int, int] = {}   # msg_idx → task_position
         closes: Dict[int, int] = {}   # msg_idx → task_position
 
         for pos, (start, end, is_archived) in tmap.items():
-            if not is_archived:
+            if not is_archived and pos != active_pos:
                 opens[start] = pos
                 closes[end - 1] = pos
 
@@ -716,11 +717,11 @@ class AsyncRuntime:
         for i, msg in enumerate(self.messages):
             content = msg.get("content", "")
 
-            # Strip the internal [Task N] prefix — XML tag replaces it
+            # Always strip the internal [Task N] prefix from the final output
             if self._TASK_PREFIX_RE.match(content):
                 content = self._TASK_PREFIX_RE.sub("", content, count=1)
 
-            # Add opening XML tag
+            # If this message is the start of an older task, add XML wrapping
             if i in opens:
                 content = f"<task_{opens[i]}>\n{content}"
 

@@ -89,6 +89,7 @@ class PromptManager:
         static = self._static_tmpl.render(
             agent_name=agent_name,
             agent_role=agent_role or "a skilled software engineering assistant",
+            developer_prompt=developer_prompt,
             tool_definitions=tool_definitions,
         )
 
@@ -101,7 +102,6 @@ class PromptManager:
             shell_info=shell_info,
             step_info=step_info,
             context_stress=context_stress,
-            developer_prompt=developer_prompt,
             sub_agent_status=sub_agent_status,
         )
 

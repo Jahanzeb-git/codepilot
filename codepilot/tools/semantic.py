@@ -606,22 +606,24 @@ class SemanticTools:
         — so you land on exactly the right file and line without grepping.
 
         Modes:
-          'search'        — find code matching a natural language concept.
-          'trace_callers' — find every call-site of a function/method.
-          'trace_callees' — find everything a function/method calls.
-          'trace_graph'   — full dependency tree up to `depth` levels deep.
+          'search'        — find code matching a natural language concept. (query = concept)
+          'trace_callers' — find every call-site of a function/method. (query = function name)
+          'trace_callees' — find everything a function/method calls. (query = function name)
+          'trace_graph'   — full dependency tree up to `depth` levels deep. (query = function name)
 
         Tips:
-          - Be descriptive: "user login validation" > "login"
-          - Describe intent: "error handling in API layer" > "try except"
+          - For 'search', be descriptive: "user login validation" > "login"
+          - For 'search', describe intent: "error handling in API layer" > "try except"
 
         Use `top_k` to limit results (default 5).
-        Example:
-        <a>
+        
+        Examples:
         ```codepilot
         semantic_search(query="where is user authentication?", mode="search")
+        semantic_search(query="process_payment", mode="trace_callers")
+        semantic_search(query="initialize_app", mode="trace_callees")
+        semantic_search(query="calculate_total", mode="trace_graph", depth=3)
         ```
-        </a>
         """
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="semantic_search",

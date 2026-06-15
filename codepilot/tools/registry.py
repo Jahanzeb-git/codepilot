@@ -79,28 +79,62 @@ class ToolRegistry:
     def get_definitions(self) -> str:
         """
         Returns a human-readable tool reference block for the system prompt.
-
-        Format per tool:
-            tool_name(param: type = default, ...) -> ...
-                Full docstring (indented).
+        Groups tools by category and prioritizes critical tools first to exploit
+        the primacy effect, mitigating LLM "Lost in the Middle" syndrome.
         """
+        categories = {
+            "### 📁 Filesystem & Workspace Tools": ["view_file", "write_file", "edit_file", "find", "semantic_search"],
+            "### 💻 Terminal & Execution Tools": ["execute", "read_output", "send_input", "terminate_terminal"],
+            "### 🧠 Context & Memory Management": ["archive_context", "reveal_context", "list_archived_context"],
+            "### 🤖 Sub-Agent Delegation": ["spawn_subagent", "await_subagent"],
+            "### ⚙️ Runtime Control & Interaction": ["ask_user", "task"],
+        }
+        
         lines = []
-        for name, func in sorted(self._tools.items()):
-            try:
-                sig = inspect.signature(func)
-            except (ValueError, TypeError):
-                sig = ""
+        registered_names = set(self._tools.keys())
+        
+        for category_header, tool_names in categories.items():
+            active_tools_in_cat = [n for n in tool_names if n in registered_names]
+            if active_tools_in_cat:
+                lines.append(category_header)
+                for name in active_tools_in_cat:
+                    registered_names.remove(name)
+                    func = self._tools[name]
+                    try:
+                        sig = inspect.signature(func)
+                    except (ValueError, TypeError):
+                        sig = ""
 
-            doc = inspect.getdoc(func) or "No description."
-            # Indent every line of the docstring so it visually nests under
-            # the tool signature — keeps the prompt scannable.
-            indented = "\n".join(
-                f"    {line}" if line.strip() else ""
-                for line in doc.splitlines()
-            )
+                    doc = inspect.getdoc(func) or "No description."
+                    # Indent every line of the docstring so it visually nests under
+                    # the tool signature — keeps the prompt scannable.
+                    indented = "\n".join(
+                        f"    {line}" if line.strip() else ""
+                        for line in doc.splitlines()
+                    )
 
-            lines.append(f"• {name}{sig}")
-            lines.append(indented)
-            lines.append("")
+                    lines.append(f"• {name}{sig}")
+                    lines.append(indented)
+                    lines.append("")
+                    
+        # Catch any remaining uncategorized tools
+        if registered_names:
+            lines.append("### 🔧 Other Tools")
+            for name in sorted(registered_names):
+                func = self._tools[name]
+                try:
+                    sig = inspect.signature(func)
+                except (ValueError, TypeError):
+                    sig = ""
+
+                doc = inspect.getdoc(func) or "No description."
+                indented = "\n".join(
+                    f"    {line}" if line.strip() else ""
+                    for line in doc.splitlines()
+                )
+
+                lines.append(f"• {name}{sig}")
+                lines.append(indented)
+                lines.append("")
 
         return "\n".join(lines).strip()

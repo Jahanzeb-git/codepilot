@@ -8,10 +8,9 @@
 
   Architectural Notes:
   Contains the runtime environment state: working directory, OS, current time,
-  active terminal sessions, context stress, codebase snapshot, and optional
-  developer-supplied sub-system instructions. This content changes every
-  agentic step and is NEVER cached. Rendered fresh by PromptManager on each
-  call to render().
+  active terminal sessions, context stress, codebase snapshot, and active
+  sub-agents. This content changes every agentic step and is NEVER cached. 
+  Rendered fresh by PromptManager on each call to render().
 
   Copyright (c) 2026 Jahanzeb Ahmed.
   Licensed under the MIT License.
@@ -28,13 +27,9 @@ Directory: `{{ work_dir }}` — OS: `{{ os_info }}` — Time: `{{ current_time }
 **EXECUTION PROTOCOL (ACI vs HCI):**
 1. **VISUAL/CONTINUOUS (TUIs/Pagers/Editors):** AVOID. Human-centric interfaces pollute context. Only use when genuinely needed.
 2. **INTERACTIVE PROMPTS (Installers/Auth):** MINIMIZE. You can use CLI's if needed but not overly.
+
 Active sessions (use session IDs with terminal tools):
 {{ shell_info }}
-
-- **execute()**: Runs a command and returns the terminal snapshot. If status is `running` (timeout hit), use `read_output()` to wait for more. Use `new_terminal=True` when needed — optional `shell` parameter: `"bash"` (Linux/macOS default), `"powershell"` (Windows default), or `"cmd"`. **Always write commands matching the shell shown in the session list above** (e.g., `ls` for bash, `Get-ChildItem` for powershell, `dir` for cmd).
-- **send_input()**: Sends raw input — **no newline is appended**, include `\n` explicitly for text answers (e.g. `"answer\n"` - "\n" is important: it literally means “press Enter”.). For TUI navigation: `"\x1b[B"` = Down Arrow, `"\x1b[B" * 20` = 20 lines at once (fast scroll), `"\x1b[A"` = Up Arrow, `"\x03"` = Ctrl+C, `"\x04"` = Ctrl+D (EOF/exit REPL), `"\x1b"` = Escape. All work cross-platform.
-- **read_output()**: Returns delta output if running. If `completed`, it returns a full snapshot and cleanly collapses older redundant terminal frames to save context tokens.
-- **terminate_terminal()**: Hard-kills a terminal session. Use only as a last resort when Ctrl+C (`send_input(session_id, "\x03")`) fails.
 
 ---
 
@@ -45,13 +40,6 @@ Active sessions (use session IDs with terminal tools):
 ```json
 {{ codebase_snapshot }}
 ```
-
-{% if developer_prompt %}
----
-## SUB-SYSTEM INSTRUCTIONS (always take account for higher-level instructions - NEVER override low-level runtime instructions above!)
-
-{{ developer_prompt }}
-{% endif %}
 
 {% if sub_agent_status %}
 ---

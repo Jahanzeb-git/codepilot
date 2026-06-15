@@ -56,16 +56,10 @@ class BlockParser:
     # Extracts filename= from a fence tag. Supports quoted and bare values:
     #   filename=routes/profile.py   filename="routes/profile.py"
     _FILENAME_RE = re.compile(r'filename=(?:"([^"]+)"|\'([^\']+)\'|(\S+))')
-    _WRITE_FILE_RE = re.compile(r'write_file\s*\(')
-    _FILE_EDITOR_RE = re.compile(r'file_editor\s*\(')
     _INLINE_CONTENT_ARG_RE = re.compile(
-        r'(?:write_file|file_editor)\s*\([^)]*\b(content|payload|text|data)\s*=',
+        r'(?:write_file|edit_file|view_file)\s*\([^)]*\b(content|payload|text|data)\s*=',
         re.DOTALL,
     )
-    # Legacy write_file modes
-    _VALID_WRITE_MODES = frozenset({"w", "a", "edit", "insert", "multi_edit", "search_replace", "search_and_replace"})
-    # New file_editor modes (only create/edit/multi_edit produce payload blocks; view does not)
-    _VALID_EDITOR_MODES = frozenset({"view", "create", "edit", "multi_edit"})
 
 
     @classmethod
@@ -183,7 +177,7 @@ class BlockParser:
     @classmethod
     def _extract_write_file_calls(cls, control_content: str) -> Tuple[List[Tuple[str, int]], bool, bool]:
         """
-        Parse file_editor() and legacy write_file() calls from the control block using AST.
+        Parse view_file, write_file, edit_file calls from the control block using AST.
         Returns (write_calls, has_dynamic_path, has_syntax_error).
         write_calls is a list of (filepath, payload_count) in call order.
         """
@@ -194,7 +188,7 @@ class BlockParser:
 
             def visit_Call(self, node):
                 self.generic_visit(node)
-                if isinstance(node.func, ast.Name) and node.func.id in ("file_editor", "write_file"):
+                if isinstance(node.func, ast.Name) and node.func.id in ("view_file", "write_file", "edit_file"):
                     filepath = "<unknown>"
                     if node.args:
                         arg0 = node.args[0]
@@ -208,38 +202,7 @@ class BlockParser:
                         self.has_dynamic = True
 
                     if filepath != "<unknown>":
-                        mode = "view" if node.func.id == "file_editor" else "w"
-                        for kw in node.keywords:
-                            if kw.arg == "mode":
-                                if isinstance(kw.value, ast.Constant):
-                                    mode = str(kw.value.value)
-                                elif getattr(ast, 'Str', type(None)) is not type(None) and isinstance(kw.value, getattr(ast, 'Str', type(None))):
-                                    mode = kw.value.s
-                        
-                        if node.func.id == "file_editor":
-                            if mode not in BlockParser._VALID_EDITOR_MODES:
-                                valid = "', '".join(sorted(BlockParser._VALID_EDITOR_MODES))
-                                raise ValueError(
-                                    f"file_editor() for '{filepath}' uses unknown mode '{mode}'. "
-                                    f"Valid modes are '{valid}'."
-                                )
-                        else:
-                            if mode not in BlockParser._VALID_WRITE_MODES:
-                                valid = "', '".join(sorted(BlockParser._VALID_WRITE_MODES))
-                                raise ValueError(
-                                    f"write_file() for '{filepath}' uses invalid mode '{mode}'. "
-                                    f"Valid modes are '{valid}'."
-                                )
-                        
-                        payload_count = 1
-                        if mode == "view":
-                            payload_count = 0
-                        elif mode == "multi_edit":
-                            for kw in node.keywords:
-                                if kw.arg in ("search", "edits") and isinstance(kw.value, ast.List):
-                                    payload_count = max(len(kw.value.elts), 1)
-                                    break
-                                    
+                        payload_count = 1 if node.func.id in ("write_file", "edit_file") else 0
                         self.calls.append((node.lineno, node.col_offset, filepath, payload_count))
 
         try:
@@ -275,7 +238,7 @@ class BlockParser:
         """
         if cls._INLINE_CONTENT_ARG_RE.search(control_block.content):
             raise ValueError(
-                "file_editor() / write_file() was called with an inline content-like "
+                "write_file() / edit_file() was called with an inline content-like "
                 "argument (content=, payload=, text=, or data=). These tools never "
                 "accept file content as a Python argument. Put the file content in a "
                 "Payload Block immediately after the ```codepilot block, annotated "
@@ -292,9 +255,9 @@ class BlockParser:
         # Guard: fire only when a tool call exists with a non-literal (dynamic) path.
         if not write_calls and has_dynamic:
             raise ValueError(
-                "file_editor() / write_file() call found, but its first argument was "
+                "view_file() / write_file() / edit_file() call found, but its first argument was "
                 "not a literal quoted path. These tools must use a literal path like "
-                'file_editor("src/app.py", mode="edit", ...) so the runtime can '
+                'edit_file("src/app.py", ...) so the runtime can '
                 "validate Payload Block filename= annotations. For computed content "
                 "or dynamic paths, use Python native file I/O with WORK_DIR instead."
             )
@@ -323,10 +286,10 @@ class BlockParser:
                     f"Payload Block(s) after the ```codepilot block are missing filename= "
                     f"annotations (block number(s): {block_numbers}). Found "
                     f"{len(payload_blocks)} annotated payload block(s), expected "
-                    f"{len(expected)} (write_file calls in order: "
+                    f"{len(expected)} (tool calls requiring payloads in order: "
                     f"{', '.join(f'{fp} ×{n}' if n > 1 else fp for fp, n in write_calls)}). "
-                    "Every write_file() payload must be fenced like "
-                    "```python filename=path/from/write_file.py."
+                    "Every payload must be fenced like "
+                    "```python filename=path/to/file.py."
                 )
             summary = ", ".join(
                 f"{fp} ×{n}" if n > 1 else fp for fp, n in write_calls
@@ -334,7 +297,7 @@ class BlockParser:
             raise ValueError(
                 f"Payload count mismatch: {len(payload_blocks)} payload block(s) found, "
                 f"expected {len(expected)} "
-                f"(write_file calls in order: {summary})."
+                f"(tool calls requiring payloads in order: {summary})."
             )
 
         # --- Failure modes 2 & 3: per-block annotation check ---
@@ -352,6 +315,6 @@ class BlockParser:
                 raise ValueError(
                     f"Payload block {i + 1} filename mismatch: "
                     f"annotated as 'filename={block.filename}' "
-                    f"but write_file() call {i + 1} targets '{exp_path}'. "
-                    f"Payload blocks must appear in the same order as write_file() calls."
+                    f"but tool call {i + 1} targets '{exp_path}'. "
+                    f"Payload blocks must appear in the same order as tool calls."
                 )

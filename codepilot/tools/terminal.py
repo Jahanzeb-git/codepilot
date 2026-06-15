@@ -824,18 +824,26 @@ class TerminalManager:
         shell: str = None,
     ) -> str:
         """
-        Run a command on a terminal session. Captures output up to timeout seconds.
+        Runs a shell command in a persistent virtual terminal. Captures output up to timeout seconds.
         Returns output with status: 'completed' (has return_code) or 'running'
         (timed out — use read_output() to wait more, send_input() for prompts).
-        For a new terminal session: set new_terminal=True with a unique session_id.
-        Optional shell parameter (only used with new_terminal=True): 'bash' (default
-        on Linux/macOS), 'powershell' (default on Windows), or 'cmd'.
-        Example:
-        <a>
+        
+        For a new terminal session: set new_terminal=True with a unique new session_id.
+        Optional shell parameter: 'bash' (default on Linux/macOS), 'powershell' (default on Windows), or 'cmd'.
+        
+        [CRITICAL CONSTRAINT]
+        AVOID using VISUAL/CONTINUOUS tools (TUIs, Pagers, interactive Editors like nano/vim) 
+        as they pollute context and freeze the terminal.
+        Only use them when genuinely necessary.
+
+        Example 1:
         ```codepilot
         execute("main", "pytest test/test_profile.py -v", 10)
         ```
-        </a>
+        Example 2:
+        ```codepilot
+        execute("new_1", "uvicorn main:app --reload", 10, new_terminal=True)
+        ```
         """
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="execute",
@@ -970,12 +978,9 @@ class TerminalManager:
         New output available: returns only new content (non-overlapping).
         No new output (command already done): returns complete output and
         clears previous outputs from context to save tokens.
-        Example:
-        <a>
-        ```codepilot
-        read_output("main", 10)
-        ```
-        </a>
+        
+        [CRITICAL CONSTRAINT]
+        DO NOT call this on a completed session repeatedly unless you expect new output.
         """
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="read_output",
@@ -1135,8 +1140,11 @@ class TerminalManager:
 
     def terminate_terminal(self, session_id: str) -> str:
         """
-        Destroy a terminal session entirely. Kills the process and removes it.
-        This is a hard kill — the session becomes unusable after this call.
+        Hard-kills a terminal session. Use only as a last resort when 
+        Ctrl+C (`send_input(session_id, "\\x03")`) fails.
+        
+        [CRITICAL CONSTRAINT]
+        This destroys the session entirely. The session_id becomes unusable.
         """
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="terminate_terminal",
