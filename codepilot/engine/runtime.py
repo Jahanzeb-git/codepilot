@@ -35,7 +35,7 @@ from ..core.agent_file import AgentConfig
 from ..core.block_parser import BlockParser, CodeBlock
 from ..core.context import ContextManager
 from ..core.memory import (
-    MemoryManager, MemoryConfig, find_task_map,
+    MemoryManager, MemoryConfig,
     get_highest_task_position, TAG_USER_INPUT,
 )
 from ..core.prompt import PromptManager
@@ -97,7 +97,7 @@ class AsyncRuntime:
 
     Multi-file writes
     -----------------
-    Up to 5 ``write_file()`` calls per step (mode='w' / 'a').
+    Any number of ``write_file()`` calls per step (mode='w' / 'a').
     Edits and inserts: one per step to prevent line-number drift.
     Each ``write_file()`` consumes the next Payload Block in order.
 
@@ -138,6 +138,12 @@ class AsyncRuntime:
         self._execution_buffer: List[str]       = []
         self._step_write_count:  int = 0
         self._step_edited_files: set[str] = set()
+
+        # Payload cache: populated at parse-time (before execution) so OS-level
+        # failures or parser salvage can offer from_cache=True recovery.
+        # Keys are target file paths (write_file argument), values are content strings.
+        # Entries are evicted on successful write/edit to prevent stale reuse.
+        self._payload_cache: dict[str, str] = {}
 
         self.context_manager = ContextManager(self.config.runtime.work_dir)
         self.prompt_manager  = PromptManager()
@@ -353,10 +359,29 @@ class AsyncRuntime:
             # assistant response in history, then feed back a protocol-level
             # correction message so the next inference can fix its block shape.
             try:
-                control_block, payload_blocks = BlockParser.split(response_text)
+                control_block, payload_blocks, protocol_warning = BlockParser.split(response_text)
             except ValueError as exc:
                 self.messages.append({"role": _ROLE_ASSISTANT, "content": response_text})
                 error_msg = self._format_parser_error(str(exc))
+                # Attempt to salvage payload content by position even though
+                # the response had protocol violations. This allows the LLM to
+                # retry failed writes using from_cache=True without regenerating.
+                salvaged = BlockParser.salvage_payloads_for_cache(response_text)
+                if salvaged:
+                    for target_path, content in salvaged:
+                        self._payload_cache[target_path] = content
+                    salvage_lines = [f"  - '{p}'" for p, _ in salvaged]
+                    system_msg = (
+                        "\n\n[SYSTEM] Despite the error, file content was salvaged by "
+                        "positional matching and cached:\n"
+                        + "\n".join(salvage_lines)
+                        + "\n\nIn the next step, retry WITHOUT payload blocks — "
+                        "content will be loaded from cache:\n"
+                        "```codepilot\n"
+                        + "\n".join(f'write_file("{p}", from_cache=True)' for p, _ in salvaged)
+                        + "\n```"
+                    )
+                    error_msg = error_msg + system_msg
                 self.hooks.emit(EventType.RUNTIME_ERROR, error=error_msg)
                 self._append_execution_result(error_msg)
                 continue
@@ -368,10 +393,14 @@ class AsyncRuntime:
             self.hooks.emit(EventType.LLM_RESPONSE, step=step, response=response_text)
             self._record_raw_llm_generation(step, response_text)
 
-            # LLM output → assistant role. Keep the model's generation verbatim:
-            # reshaping prior assistant turns can deform the learned CodePilot
-            # block protocol on the next inference.
-            self.messages.append({"role": _ROLE_ASSISTANT, "content": response_text})
+            # LLM output → assistant role. Strip any hallucinated </task_N> closing
+            # tags before storing. The model sees <task_N>...</task_N> wrappers for
+            # completed tasks in the rendered context and pattern-matches by emitting
+            # a spurious </task_N> to "close" the current (unwrapped) active task.
+            # These tags are never valid in an assistant turn — strip them so the
+            # model does not reinforce the pattern on the next inference step.
+            stored_response = re.sub(r"\s*</task_\d+>", "", response_text).rstrip()
+            self.messages.append({"role": _ROLE_ASSISTANT, "content": stored_response})
 
             # Schedule cache TTL refresh (Anthropic only)
             self._last_system_prompt = system_prompt
@@ -382,15 +411,62 @@ class AsyncRuntime:
                 # display ```python blocks). Already streamed to user.
                 break
 
-            # 5. Execute
+            # 5. Populate payload cache BEFORE execution.
+            # This ensures content is cached even if the OS rejects the write.
+            # Cache keys are the target paths extracted by the AST parser (not
+            # the annotation filenames), matched positionally to payload blocks.
+            # Only calls with payload_count==1 are cached (from_cache=True calls
+            # have payload_count==0 and are excluded).
+            try:
+                write_calls, _, _ = BlockParser._extract_write_file_calls(control_block.content)
+                cache_targets = [fp for fp, cnt in write_calls if cnt == 1]
+                for target, block in zip(cache_targets, payload_blocks):
+                    self._payload_cache[target] = block.content
+            except Exception:
+                pass  # Cache population is best-effort; never block execution
+
+            # 6. Execute
+            cache_keys_before = set(self._payload_cache.keys())
             self._payload_queue    = list(payload_blocks)
             self._execution_buffer = []
             await self._execute(control_block.content)
 
-            # 6. Assemble execution result and feed back as next user turn
+            # 5.5 If surplus payload blocks were detected, the warning is appended
+            # AFTER the tool outputs in its own [PROTOCOL WARNING] section so
+            # the model can clearly distinguish factual tool results from
+            # meta-feedback about its own generation quality.
+            # The warning explicitly states the operation succeeded so the
+            # model does NOT attempt to redo the step.
+
+            # 7. Assemble execution result and feed back as next user turn
             execution_result = "\n\n".join(self._execution_buffer).strip()
             if not execution_result:
                 execution_result = "[Control block executed with no output.]"
+            if protocol_warning:
+                self.hooks.emit(EventType.RUNTIME_ERROR, error=protocol_warning)
+                execution_result = (
+                    f"{execution_result}\n\n"
+                    f"[PROTOCOL WARNING]\n{protocol_warning}"
+                )
+            # If the execution left new entries in the payload cache (i.e. some
+            # write/edit tools caught an OS error and cached their content),
+            # append a [SYSTEM] notice so the LLM knows it can retry from cache.
+            newly_cached = set(self._payload_cache.keys()) - cache_keys_before
+            if newly_cached:
+                retry_lines = "\n".join(
+                    f'write_file("{p}", from_cache=True)' for p in sorted(newly_cached)
+                )
+                os_system_msg = (
+                    "\n\n[SYSTEM] The following file write(s) failed and their content "
+                    "has been cached:\n"
+                    + "\n".join(f"  - '{p}'" for p in sorted(newly_cached))
+                    + "\n\nTo retry, fix the underlying issue AND call write_file() "
+                    "with from_cache=True in the SAME step:\n"
+                    "```codepilot\n"
+                    + retry_lines
+                    + "\n```\nNo payload blocks needed."
+                )
+                execution_result = execution_result + os_system_msg
             self._append_execution_result(execution_result)
 
             # 7. task(finish=True) was called during execution → loop terminates.
@@ -683,55 +759,27 @@ class AsyncRuntime:
         self._cache_timer = asyncio.create_task(_refresh_task())
 
     # ------------------------------------------------------------------ #
-    #  XML task wrappers for LLM visibility                                #
+    #  Task prefix rendering for LLM visibility                            #
     # ------------------------------------------------------------------ #
 
-    _TASK_PREFIX_RE = re.compile(r"^\[Task \d+\]")
 
     def _render_messages_for_llm(self) -> List[Dict]:
         """
-        Create a copy of messages with XML task wrappers added.
+        Create a copy of messages for LLM inference.
 
-        Non-archived tasks are wrapped:
-            <task_N>
-            [USER INPUT]
-            ...messages...
-            </task_N>
+        The internal [Task N] prefix on each task's first user message is
+        preserved as-is. This gives the model clear task boundary markers
+        and the numeric position it needs for archive_context(position=N)
+        without introducing any XML open/close structure that the model
+        would pattern-match and attempt to close in its own responses.
 
-        Archived tasks remain as-is (single [ARCHIVED TASK N] message).
-        The internal [Task N] prefix is stripped — the XML tag replaces it.
+        Archived tasks remain as a single [ARCHIVED TASK N] message.
         """
-        tmap = find_task_map(self.messages)
-        active_pos = max(tmap.keys()) if tmap else None
-
-        # Build fast lookups: which message indices open/close a task?
-        opens:  Dict[int, int] = {}   # msg_idx → task_position
-        closes: Dict[int, int] = {}   # msg_idx → task_position
-
-        for pos, (start, end, is_archived) in tmap.items():
-            if not is_archived and pos != active_pos:
-                opens[start] = pos
-                closes[end - 1] = pos
-
         rendered = []
-        for i, msg in enumerate(self.messages):
-            content = msg.get("content", "")
-
-            # Always strip the internal [Task N] prefix from the final output
-            if self._TASK_PREFIX_RE.match(content):
-                content = self._TASK_PREFIX_RE.sub("", content, count=1)
-
-            # If this message is the start of an older task, add XML wrapping
-            if i in opens:
-                content = f"<task_{opens[i]}>\n{content}"
-
-            # Add closing XML tag
-            if i in closes:
-                content = f"{content}\n</task_{closes[i]}>"
-
-            rendered.append({**msg, "content": content})
-
+        for msg in self.messages:
+            rendered.append(dict(msg))
         return rendered
+
 
     # ------------------------------------------------------------------ #
     #  Streaming inference                                                 #

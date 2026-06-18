@@ -70,7 +70,7 @@ def _apply_str_replace(file_content: str, search: str, replacement: str) -> _Sea
         return _SearchResult(
             ok=False,
             error=(
-                "search= is blank or whitespace-only. Provide 2-4 unique, "
+                "search= is blank or whitespace-only. Provide unique, "
                 "non-blank lines from the file that uniquely identify the region "
                 "to replace."
             ),
@@ -315,22 +315,28 @@ class FilesystemTools:
     # Tool: write_file
     # ------------------------------------------------------------------
 
-    def write_file(self, path: str) -> None:
+    def write_file(self, path: str, from_cache: bool = False) -> None:
         """
         Write or overwrite a file completely. Creates parent directories automatically.
-        
+
         [CRITICAL CONSTRAINT]
         You CAN provide ONE payload block immediately after your ```codepilot block,
         annotated as filename=<path> OR MULTIPLE payload blocks ordered per write_file() call in ```codepilot block.
-        
-        Example 1:
+
+        If the previous write failed (OS error, permission denied) the runtime
+        will have cached the content. In that case call:
+            write_file("path", from_cache=True)
+        No payload block is needed — content is loaded from the internal cache.
+        Always fix the underlying issue (e.g. permissions) in the SAME step.
+
+        Example 1 (normal write):
         ```codepilot
         write_file("app.py")
         ```
         ```python filename=app.py
         # full file content here
         ```
-        Example 2:
+        Example 2 (multiple files):
         ```codepilot
         write_file("file.txt")
         write_file("example.py")
@@ -341,6 +347,11 @@ class FilesystemTools:
         ```python filename=example.py
         # content for example.py
         ```
+        Example 3 (retry from cache after failure):
+        ```codepilot
+        run_command("chmod 755 scripts/")
+        write_file("scripts/deploy.sh", from_cache=True)
+        ```
         """
         ui_status = f"Creating {path}..."
         self.runtime.hooks.emit(
@@ -348,31 +359,43 @@ class FilesystemTools:
             args={"path": path, "ui_status": ui_status},
         )
 
-        # Enforce write budget
-        if self.runtime._step_write_count >= 5:
-            self._emit_error(
-                "write_file",
-                f"Maximum 5 file writes per step exceeded. "
-                f"Skipped '{path}'. Continue in the next agentic step.",
-            )
-            return
         self.runtime._step_write_count += 1
 
-        # Consume payload block BEFORE any error that might short-circuit
-        payload = self.runtime.pop_next_payload_block()
-        if payload is None:
-            self._emit_error(
-                "write_file",
-                f"No Payload Block found for '{path}'. Provide exactly one fenced "
-                "Payload Block immediately after the ```codepilot block, annotated "
-                f"as filename={path}. Never pass file content as a function argument.",
-            )
-            return
+        # ------------------------------------------------------------------ #
+        # Resolve content: from cache or from the next payload block
+        # ------------------------------------------------------------------ #
+        if from_cache:
+            cache = getattr(self.runtime, "_payload_cache", {})
+            content = cache.get(path)
+            if content is None:
+                available = list(cache.keys())
+                hint = (
+                    f" Available cache keys: {available}." if available
+                    else " The cache is empty — no prior failed write was recorded."
+                )
+                self._emit_error(
+                    "write_file",
+                    f"from_cache=True was set for '{path}' but no cached content exists "
+                    f"for that path.{hint}",
+                )
+                return
+        else:
+            # Consume payload block BEFORE any error that might short-circuit
+            payload = self.runtime.pop_next_payload_block()
+            if payload is None:
+                self._emit_error(
+                    "write_file",
+                    f"No Payload Block found for '{path}'. Provide exactly one fenced "
+                    "Payload Block immediately after the ```codepilot block, annotated "
+                    f"as filename={path}. Never pass file content as a function argument.",
+                )
+                return
 
-        err = self._payload_filename_error(path, [payload])
-        if err:
-            self._emit_error("write_file", err)
-            return
+            err = self._payload_filename_error(path, [payload])
+            if err:
+                self._emit_error("write_file", err)
+                return
+            content = payload.content
 
         # Permission gate
         tool_cfg = self.runtime._tool_config("write_file")
@@ -387,39 +410,54 @@ class FilesystemTools:
         try:
             abs_path = self._safe_path(path)
             Path(abs_path).parent.mkdir(parents=True, exist_ok=True)
-            content = payload.content
             with open(abs_path, "w", encoding="utf-8") as f:
                 f.write(content)
             line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
+            cache_note = " (from cache)" if from_cache else ""
             result = (
-                f"[write_file] '{path}' created "
+                f"[write_file] '{path}' created{cache_note} "
                 f"({len(content)} bytes, {line_count} lines)."
             )
             self._emit_result("write_file", result)
+            # Success — evict cache entry so stale content isn't reused
+            if hasattr(self.runtime, "_payload_cache"):
+                self.runtime._payload_cache.pop(path, None)
             if hasattr(self.runtime, "_watcher"):
                 try:
                     self.runtime._watcher.register(self._safe_path(path))
                 except Exception:
                     pass
         except Exception as exc:
+            # Cache the content on OS-level failure so the LLM can retry
+            # without regenerating the payload block
+            if not from_cache and hasattr(self.runtime, "_payload_cache"):
+                self.runtime._payload_cache[path] = content
+            cache_msg = (
+                f" Content cached — retry with write_file('{path}', from_cache=True) "
+                "after fixing the underlying issue in the SAME step."
+            ) if not from_cache else ""
             self._emit_error(
                 "write_file",
-                f"Failed to write '{path}': {exc} No file was changed unless the "
-                "error occurred during a low-level OS write.",
+                f"Failed to write '{path}': {exc}.{cache_msg}",
             )
 
     # ------------------------------------------------------------------
     # Tool: edit_file
     # ------------------------------------------------------------------
 
-    def edit_file(self, path: str) -> None:
+    def edit_file(self, path: str, from_cache: bool = False) -> None:
         """
         Search-and-replace regions of text. You can include multiple SEARCH chunks in the Payload Block.
-        
+
         [CRITICAL CONSTRAINT]
         You MUST provide exactly ONE payload block immediately after your ```codepilot block,
         annotated as filename=<path>.
-        
+
+        If the previous edit failed (OS error, permission denied) the runtime
+        will have cached the SEARCH/REPLACE payload. In that case call:
+            edit_file("path", from_cache=True)
+        No payload block is needed. Always fix the underlying issue in the SAME step.
+
         Inside the Payload Block, use Git conflict markers EXACTLY like this:
         <<<<<<< SEARCH
         def process(self):
@@ -477,29 +515,48 @@ class FilesystemTools:
             return
         edited_files.add(path)
 
-        # Consume payload
-        payload = self.runtime.pop_next_payload_block()
-        if payload is None:
-            self._emit_error(
-                "edit_file",
-                f"No Payload Block found for '{path}'. Provide exactly one fenced "
-                "Payload Block immediately after the ```codepilot block, annotated "
-                f"as filename={path}.",
-            )
-            return
+        # ------------------------------------------------------------------ #
+        # Resolve payload content: from cache or from the next payload block
+        # ------------------------------------------------------------------ #
+        if from_cache:
+            cache = getattr(self.runtime, "_payload_cache", {})
+            raw_content = cache.get(path)
+            if raw_content is None:
+                available = list(cache.keys())
+                hint = (
+                    f" Available cache keys: {available}." if available
+                    else " The cache is empty — no prior failed edit was recorded."
+                )
+                self._emit_error(
+                    "edit_file",
+                    f"from_cache=True was set for '{path}' but no cached content exists "
+                    f"for that path.{hint}",
+                )
+                return
+        else:
+            payload = self.runtime.pop_next_payload_block()
+            if payload is None:
+                self._emit_error(
+                    "edit_file",
+                    f"No Payload Block found for '{path}'. Provide exactly one fenced "
+                    "Payload Block immediately after the ```codepilot block, annotated "
+                    f"as filename={path}.",
+                )
+                return
 
-        err = self._payload_filename_error(path, [payload])
-        if err:
-            self._emit_error("edit_file", err)
-            return
+            err = self._payload_filename_error(path, [payload])
+            if err:
+                self._emit_error("edit_file", err)
+                return
+            raw_content = payload.content
 
-        # Parse chunks
+        # Parse SEARCH/REPLACE chunks from raw_content
         chunks = []
-        lines = payload.content.splitlines(keepends=True)
+        lines = raw_content.splitlines(keepends=True)
         state = "OUTSIDE"
         search_lines = []
         replace_lines = []
-        
+
         for line in lines:
             stripped = line.strip()
             if stripped.startswith("<<<<<<< SEARCH"):
@@ -516,7 +573,7 @@ class FilesystemTools:
                 state = "REPLACE"
             elif stripped.startswith(">>>>>>> REPLACE"):
                 if state != "REPLACE":
-                    self._emit_error("edit_file", f"Malformed payload for '{path}': >>>>>>> REPLACE found without preceding =======.")
+                    self._emit_error("edit_file", f"Malformed payload for '{path}': >>>>>>> REPLACE found without preceding ======= .")
                     return
                 state = "OUTSIDE"
                 chunks.append(("".join(search_lines), "".join(replace_lines)))
@@ -525,7 +582,7 @@ class FilesystemTools:
                     search_lines.append(line)
                 elif state == "REPLACE":
                     replace_lines.append(line)
-        
+
         if state != "OUTSIDE":
             self._emit_error("edit_file", f"Malformed payload for '{path}': Incomplete SEARCH/REPLACE chunk. Missing >>>>>>> REPLACE.")
             return
@@ -565,14 +622,14 @@ class FilesystemTools:
                 if sr.ok:
                     current_content = sr.new_content
                     delta = sr.new_line_count - sr.old_line_count
-                    delta_str = f"Δ{delta:+d}" if delta != 0 else "Δ0"
+                    delta_str = f"\u0394{delta:+d}" if delta != 0 else "\u03940"
                     edit_results.append(
-                        f"  ✓ edit {idx}: replaced {sr.old_line_count}-line region "
+                        f"  \u2713 edit {idx}: replaced {sr.old_line_count}-line region "
                         f"with {sr.new_line_count} lines ({delta_str})"
                     )
                     succeeded += 1
                 else:
-                    edit_results.append(f"  ✗ edit {idx}: {sr.error}")
+                    edit_results.append(f"  \u2717 edit {idx}: {sr.error}")
                     failed += 1
 
             if succeeded > 0:
@@ -588,7 +645,8 @@ class FilesystemTools:
                 1 if current_content and not current_content.endswith("\n") else 0
             )
 
-            status = f"{succeeded}/{len(chunks)} edits applied"
+            cache_note = " (from cache)" if from_cache else ""
+            status = f"{succeeded}/{len(chunks)} edits applied{cache_note}"
             if failed:
                 status += f" ({failed} failed)"
             detail = "\n".join(edit_results)
@@ -598,9 +656,20 @@ class FilesystemTools:
                 f"File now has {total_lines} lines."
             )
             self._emit_result("edit_file", result)
+            # Success — evict cache entry
+            if hasattr(self.runtime, "_payload_cache"):
+                self.runtime._payload_cache.pop(path, None)
 
         except Exception as exc:
+            # Cache raw_content on OS-level failure so the LLM can retry without
+            # regenerating the payload block
+            if not from_cache and hasattr(self.runtime, "_payload_cache"):
+                self.runtime._payload_cache[path] = raw_content
+            cache_msg = (
+                f" Content cached \u2014 retry with edit_file('{path}', from_cache=True) "
+                "after fixing the underlying issue in the SAME step."
+            ) if not from_cache else ""
             self._emit_error(
                 "edit_file",
-                f"Failed while editing '{path}': {exc}",
+                f"Failed while editing '{path}': {exc}.{cache_msg}",
             )

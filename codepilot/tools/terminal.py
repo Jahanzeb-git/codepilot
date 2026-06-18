@@ -833,7 +833,7 @@ class TerminalManager:
         
         [CRITICAL CONSTRAINT]
         AVOID using VISUAL/CONTINUOUS tools (TUIs, Pagers, interactive Editors like nano/vim) 
-        as they pollute context and freeze the terminal.
+        as they pollute context.
         Only use them when genuinely necessary.
 
         Example 1:
