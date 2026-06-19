@@ -105,43 +105,15 @@ class BlockParser:
 
 
     @classmethod
+    @classmethod
     def split(cls, text: str) -> Tuple[Optional[CodeBlock], List[CodeBlock], Optional[str]]:
         """
         Returns (control_block, payload_blocks, protocol_warning).
-
-        The control block is the FIRST ```codepilot block. If the model
-        accidentally generates a second ```codepilot block, it is ignored —
-        payload collection stops at that boundary.
-
-        Payload blocks are fenced blocks after codepilot that carry a
-        filename= annotation — side-loaded by write_file() in order.
-
-        Raises ValueError if payload filename= annotations don't match
-        the write_file() calls parsed from the control block (wrong filename,
-        inline content= argument, or missing annotation on a required payload).
-
-        Surplus payload blocks beside tools that don't consume them (e.g.
-        view_file, execute) are silently trimmed from the returned list and
-        a descriptive protocol_warning string is returned instead of raising.
-        The warning is injected into the execution result so the model sees an
-        accurate correction signal on the next agentic step.
-
-        If no ```codepilot block exists, returns (None, [], None) — the
-        response is a conversational reply.
         """
-        # Defensive pre-processing: strip any <thinking>...</thinking> blocks
-        # before parsing. The runtime's streaming state machine already strips
-        # these, but this is belt-and-suspenders against any edge case where
-        # thinking content (which may contain filename= code fence examples
-        # from the docstrings) could otherwise trip the payload validator.
         import re as _re
         if "<thinking>" in text:
             text = _re.sub(r"<thinking>.*?</thinking>\n?", "", text, flags=_re.DOTALL)
 
-        # Strip out any docstring examples that the model might regurgitate.
-        # The tool docstrings wrap examples in tags like <a>, <b>, <c>, <example>.
-        # If a tag immediately contains a codepilot block, we strip the entire tag
-        # so the parser doesn't accidentally execute the example.
         text = _re.sub(
             r"<(a|b|c|d|e|example|tool_docs)>\s*```codepilot.*?.*?</\1>\n?",
             "", text, flags=_re.DOTALL
@@ -151,34 +123,85 @@ class BlockParser:
         if not blocks:
             return None, [], None
 
-        for i, block in enumerate(blocks):
-            if block.language == "codepilot":
-                remaining = blocks[i + 1:]
-                # Collect payloads until second codepilot block (if any).
-                # Only blocks with a filename= annotation are payload blocks.
-                # Display-only blocks (e.g. ```python for explanation) never
-                # carry filename= so they pass through safely.
-                payload_blocks: List[CodeBlock] = []
-                unannotated_blocks: List[CodeBlock] = []
-                for b in remaining:
-                    if b.language == "codepilot":
-                        break  # Second codepilot block — stop collecting
-                    if b.filename is not None:
-                        payload_blocks.append(b)
+        control_block = next((b for b in blocks if b.language == "codepilot"), None)
+        if not control_block:
+            return None, [], None
+
+        # Determine the text bounds for payload scanning
+        # Stop at the second codepilot block, if any
+        control_idx = blocks.index(control_block)
+        second_control = next((b for b in blocks[control_idx+1:] if b.language == "codepilot"), None)
+        
+        start_pos = control_block.end_pos
+        end_pos = second_control.start_pos if second_control else len(text)
+        
+        remaining_text = text[start_pos:end_pos]
+        
+        # Regex to find filename headers, bypassing standard _FENCE_RE which breaks on nested backticks
+        header_re = _re.compile(r"^[ \t]*```([a-zA-Z0-9_-]*)[ \t]+(?:filename=([^\n]+))", _re.MULTILINE)
+        headers = list(header_re.finditer(remaining_text))
+        
+        payload_blocks: List[CodeBlock] = []
+        content_re = _re.compile(r"<{5,9}\s*CONTENT\s*\n(.*?)\n>{5,9}\s*CONTENT", _re.DOTALL)
+        search_re = _re.compile(r"<{5,9}\s*SEARCH\s*\n")
+        replace_re = _re.compile(r"\n>{5,9}\s*REPLACE")
+        
+        for i, h_match in enumerate(headers):
+            language = h_match.group(1) or "text"
+            filename_raw = h_match.group(2).strip()
+            if filename_raw.startswith('"') and filename_raw.endswith('"'):
+                filename = filename_raw[1:-1]
+            elif filename_raw.startswith("'") and filename_raw.endswith("'"):
+                filename = filename_raw[1:-1]
+            else:
+                filename = filename_raw
+                
+            block_start = start_pos + h_match.start()
+            limit = end_pos
+            if i + 1 < len(headers):
+                limit = start_pos + headers[i+1].start()
+                
+            search_chunk = text[block_start:limit]
+            
+            c_match = content_re.search(search_chunk)
+            if c_match:
+                content = c_match.group(1)
+            else:
+                s_match = search_re.search(search_chunk)
+                r_matches = list(replace_re.finditer(search_chunk))
+                if s_match and r_matches:
+                    r_match = r_matches[-1]
+                    content = search_chunk[s_match.start():r_match.end()].strip()
+                else:
+                    # Fallback to _FENCE_RE
+                    fb_match = cls._FENCE_RE.search(search_chunk)
+                    if fb_match:
+                        content = fb_match.group(3).rstrip('\n')
                     else:
-                        unannotated_blocks.append(b)
+                        content = ""
+                        
+            payload_blocks.append(CodeBlock(
+                language=language,
+                content=content,
+                index=i+1, # arbitrary index
+                filename=filename,
+                start_pos=block_start,
+                end_pos=limit
+            ))
 
-                # Validate payload annotations. May raise ValueError for genuine
-                # protocol violations, or return a non-None warning string for
-                # recoverable surplus-payload deviations.
-                valid_payloads, warning = cls._validate_payload_filenames(
-                    block, payload_blocks, unannotated_blocks
-                )
+        # We must also detect unannotated blocks to maintain original error messaging
+        # Unannotated blocks are fences in remaining_text that lack filename=
+        # But we only care if we have fewer payloads than expected.
+        unannotated_blocks = []
+        # Fallback _FENCE_RE on remaining_text to find blocks without filename
+        for b in cls.parse(remaining_text):
+            if b.filename is None and b.language != "codepilot":
+                unannotated_blocks.append(b)
 
-                return block, valid_payloads, warning
-
-        # No codepilot block → entire response is display/chat
-        return None, [], None
+        valid_payloads, warning = cls._validate_payload_filenames(
+            control_block, payload_blocks, unannotated_blocks
+        )
+        return control_block, valid_payloads, warning
 
 
     # ------------------------------------------------------------------
@@ -242,54 +265,63 @@ class BlockParser:
 
 
     @classmethod
+    @classmethod
     def salvage_payloads_for_cache(
         cls, text: str
     ) -> List[Tuple[str, str]]:
-        """
-        Best-effort extraction of (target_path, content) pairs from a raw LLM
-        response that failed validation. Used to populate the payload cache even
-        when BlockParser.split() raises a ValueError, so the LLM can retry using
-        write_file(path, from_cache=True) without re-emitting content.
-
-        Strategy:
-          1. Find the first ```codepilot block and extract tool call target paths
-             in order using the AST (same as _extract_write_file_calls).
-          2. Find all annotated payload blocks (filename= present) in document order.
-          3. Match targets to payloads positionally — annotation errors are ignored
-             because we trust the AST-extracted call order, not the wrong annotation.
-          4. Return only (target_path, content) pairs we can confidently match.
-        """
         blocks = cls.parse(text)
         if not blocks:
             return []
 
-        # Find first codepilot block
         control = next((b for b in blocks if b.language == "codepilot"), None)
         if control is None:
             return []
 
-        # Extract ordered target paths from AST (ignoring from_cache calls — no payload)
         write_calls, _, has_syntax_error = cls._extract_write_file_calls(control.content)
         if has_syntax_error:
             return []
 
-        # Only calls that expect a payload (count == 1)
         targets = [fp for fp, cnt in write_calls if cnt == 1]
         if not targets:
             return []
 
-        # Collect all blocks after the codepilot block that have a filename annotation
-        # OR no annotation (we'll try to match by position regardless)
-        ctrl_idx = next(i for i, b in enumerate(blocks) if b is control)
-        candidate_blocks: List[CodeBlock] = []
-        for b in blocks[ctrl_idx + 1:]:
-            if b.language == "codepilot":
-                break  # Stop at second codepilot block
-            # Include blocks with OR without filename annotation —
-            # position-based matching doesn't require a correct annotation
-            candidate_blocks.append(b)
+        # Find second codepilot
+        control_idx = blocks.index(control)
+        second_control = next((b for b in blocks[control_idx+1:] if b.language == "codepilot"), None)
+        
+        start_pos = control.end_pos
+        end_pos = second_control.start_pos if second_control else len(text)
+        
+        remaining_text = text[start_pos:end_pos]
+        
+        # In salvage, we accept ALL blocks in remaining_text, both annotated and unannotated,
+        # but we use the explicit marker extraction for the annotated ones if possible.
+        # Actually, since we're salvaging, let's just use cls.parse on remaining_text
+        # and then apply the marker extraction to each chunk between blocks.
+        import re as _re
+        candidate_blocks = cls.parse(remaining_text)
+        
+        content_re = _re.compile(r"<{5,9}\s*CONTENT\s*\n(.*?)\n>{5,9}\s*CONTENT", _re.DOTALL)
+        search_re = _re.compile(r"<{5,9}\s*SEARCH\s*\n")
+        replace_re = _re.compile(r"\n>{5,9}\s*REPLACE")
+        
+        for j, c_block in enumerate(candidate_blocks):
+            limit = len(remaining_text)
+            if j + 1 < len(candidate_blocks):
+                limit = candidate_blocks[j + 1].start_pos
+                
+            search_chunk = remaining_text[c_block.start_pos:limit]
+            
+            c_match = content_re.search(search_chunk)
+            if c_match:
+                c_block.content = c_match.group(1)
+            else:
+                s_match = search_re.search(search_chunk)
+                r_matches = list(replace_re.finditer(search_chunk))
+                if s_match and r_matches:
+                    r_match = r_matches[-1]
+                    c_block.content = search_chunk[s_match.start():r_match.end()].strip()
 
-        # Match positionally: target[i] ↔ candidate_blocks[i]
         pairs: List[Tuple[str, str]] = []
         for target, block in zip(targets, candidate_blocks):
             pairs.append((target, block.content))

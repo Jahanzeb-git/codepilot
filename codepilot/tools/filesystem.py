@@ -334,7 +334,9 @@ class FilesystemTools:
         write_file("app.py")
         ```
         ```python filename=app.py
+        <<<<<<< CONTENT
         # full file content here
+        >>>>>>> CONTENT
         ```
         Example 2 (multiple files):
         ```codepilot
@@ -342,10 +344,14 @@ class FilesystemTools:
         write_file("example.py")
         ```
         ```text filename=file.txt
+        <<<<<<< CONTENT
         content for file.txt
+        >>>>>>> CONTENT
         ```
         ```python filename=example.py
+        <<<<<<< CONTENT
         # content for example.py
+        >>>>>>> CONTENT
         ```
         Example 3 (retry from cache after failure):
         ```codepilot
