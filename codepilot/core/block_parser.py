@@ -50,8 +50,8 @@ class BlockParser:
     """
 
     # Captures the full fence tag line (e.g. "python filename=routes/profile.py")
-    # and the block content. Group 1 = tag, Group 2 = content.
-    _FENCE_RE = re.compile(r"^```([^\n]*)\n(.*?)^```\s*$", re.DOTALL | re.MULTILINE)
+    # and the block content. Group 1 = opening backticks, Group 2 = tag, Group 3 = content, Group 4 = closing backticks.
+    _FENCE_RE = re.compile(r"^(```+)([^\n]*)\n(.*?)^(\1)\s*$", re.DOTALL | re.MULTILINE)
 
     # Extracts filename= from a fence tag. Supports quoted and bare values:
     #   filename=routes/profile.py   filename="routes/profile.py"
@@ -91,8 +91,8 @@ class BlockParser:
     def parse(cls, text: str) -> List[CodeBlock]:
         blocks: List[CodeBlock] = []
         for idx, match in enumerate(cls._FENCE_RE.finditer(text)):
-            tag = match.group(1)
-            content = match.group(2)
+            tag = match.group(2)
+            content = match.group(3)
             # Strip the single trailing newline the fence introduces, but
             # preserve any intentional blank lines inside the content.
             content = content.rstrip("\n")

@@ -50,6 +50,7 @@ Conversational reply (no action needed) — just write natural Markdown, no code
    - ` ```lang filename=<path> ` blocks are **EXCLUSIVELY** payload blocks that pair with a `write_file()` or `edit_file()` call. 
    - NEVER use ` filename= ` to label or display file contents, command outputs, or `view_file()` outputs. Doing so triggers a parser error.
    - The payload blocks MUST appear sequentially matching the exact order of the tool calls in your Control Block.
+   - If the file content itself contains triple backticks (```), you MUST wrap the payload block in four backticks (````) to avoid premature termination.
 3. **STEP**: Any step you take can be either agentic or only conversational, for conversational just respond in natural markdown without any tool call or task(finish=True), For agentic step use task(finish=True) to exiting agentic loop once task complete.
 
 ---
