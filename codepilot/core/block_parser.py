@@ -240,14 +240,14 @@ class BlockParser:
                         self.has_dynamic = True
 
                     if filepath != "<unknown>":
-                        # Check for from_cache=True keyword — if present, no payload block needed
-                        from_cache = False
+                        # Check for from_cache_id=<int> keyword — if present, no payload block needed
+                        has_cache_id = False
                         for kw in node.keywords:
-                            if kw.arg == "from_cache" and isinstance(kw.value, ast.Constant) and kw.value.value:
-                                from_cache = True
+                            if kw.arg == "from_cache_id" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, int):
+                                has_cache_id = True
                                 break
                         if node.func.id in ("write_file", "edit_file"):
-                            payload_count = 0 if from_cache else 1
+                            payload_count = 0 if has_cache_id else 1
                         else:
                             payload_count = 0
                         self.calls.append((node.lineno, node.col_offset, filepath, payload_count))
@@ -488,14 +488,14 @@ class BlockParser:
                     else:
                         if tool in _WRITE_TOOLS:
                             self.has_dynamic = True
-                # from_cache=True means no payload block needed for this call
-                from_cache = False
+                # from_cache_id=<int> means no payload block needed for this call
+                has_cache_id = False
                 if tool in _WRITE_TOOLS:
                     for kw in node.keywords:
-                        if kw.arg == "from_cache" and isinstance(kw.value, ast.Constant) and kw.value.value:
-                            from_cache = True
+                        if kw.arg == "from_cache_id" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, int):
+                            has_cache_id = True
                             break
-                needs_payload = (1 if tool in _WRITE_TOOLS else 0) if not from_cache else 0
+                needs_payload = (1 if tool in _WRITE_TOOLS else 0) if not has_cache_id else 0
                 self.calls.append((node.lineno, node.col_offset, tool, filepath, needs_payload))
 
         try:

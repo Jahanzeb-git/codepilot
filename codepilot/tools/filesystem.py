@@ -315,7 +315,7 @@ class FilesystemTools:
     # Tool: write_file
     # ------------------------------------------------------------------
 
-    def write_file(self, path: str, from_cache: bool = False) -> None:
+    def write_file(self, path: str, from_cache_id: int = None) -> None:
         """
         Write or overwrite a file completely. Creates parent directories automatically.
 
@@ -323,10 +323,11 @@ class FilesystemTools:
         You CAN provide ONE payload block immediately after your ```codepilot block,
         annotated as filename=<path> OR MULTIPLE payload blocks ordered per write_file() call in ```codepilot block.
 
-        If the previous write failed (OS error, permission denied) the runtime
-        will have cached the content. In that case call:
-            write_file("path", from_cache=True)
+        If the previous write failed (OS error, permission denied, wrong path) the runtime
+        will have cached the content with a numeric ID. In that case call:
+            write_file("correct_path", from_cache_id=<N>)
         No payload block is needed — content is loaded from the internal cache.
+        The path can be DIFFERENT from the original failed call.
         Always fix the underlying issue (e.g. permissions) in the SAME step.
 
         Example 1 (normal write):
@@ -356,7 +357,7 @@ class FilesystemTools:
         Example 3 (retry from cache after failure):
         ```codepilot
         run_command("chmod 755 scripts/")
-        write_file("scripts/deploy.sh", from_cache=True)
+        write_file("scripts/deploy.sh", from_cache_id=1)
         ```
         """
         ui_status = f"Creating {path}..."
@@ -370,19 +371,19 @@ class FilesystemTools:
         # ------------------------------------------------------------------ #
         # Resolve content: from cache or from the next payload block
         # ------------------------------------------------------------------ #
-        if from_cache:
+        if from_cache_id is not None:
             cache = getattr(self.runtime, "_payload_cache", {})
-            content = cache.get(path)
+            content = cache.get(from_cache_id)
             if content is None:
                 available = list(cache.keys())
                 hint = (
-                    f" Available cache keys: {available}." if available
+                    f" Available cache IDs: {available}." if available
                     else " The cache is empty — no prior failed write was recorded."
                 )
                 self._emit_error(
                     "write_file",
-                    f"from_cache=True was set for '{path}' but no cached content exists "
-                    f"for that path.{hint}",
+                    f"from_cache_id={from_cache_id} not found.{hint} "
+                    "Use a valid cache_id or provide a new payload block without from_cache_id.",
                 )
                 return
         else:
@@ -419,29 +420,24 @@ class FilesystemTools:
             with open(abs_path, "w", encoding="utf-8") as f:
                 f.write(content)
             line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
-            cache_note = " (from cache)" if from_cache else ""
+            cache_note = " (from cache)" if from_cache_id is not None else ""
             result = (
                 f"[write_file] '{path}' created{cache_note} "
                 f"({len(content)} bytes, {line_count} lines)."
             )
             self._emit_result("write_file", result)
             # Success — evict cache entry so stale content isn't reused
-            if hasattr(self.runtime, "_payload_cache"):
-                self.runtime._payload_cache.pop(path, None)
+            if from_cache_id is not None and hasattr(self.runtime, "_payload_cache"):
+                self.runtime._payload_cache.pop(from_cache_id, None)
             if hasattr(self.runtime, "_watcher"):
                 try:
                     self.runtime._watcher.register(self._safe_path(path))
                 except Exception:
                     pass
         except Exception as exc:
-            # Cache the content on OS-level failure so the LLM can retry
-            # without regenerating the payload block
-            if not from_cache and hasattr(self.runtime, "_payload_cache"):
-                self.runtime._payload_cache[path] = content
-            cache_msg = (
-                f" Content cached — retry with write_file('{path}', from_cache=True) "
-                "after fixing the underlying issue in the SAME step."
-            ) if not from_cache else ""
+            cache_msg = self._build_cache_error(
+                "write_file", path, exc, content, from_cache_id
+            )
             self._emit_error(
                 "write_file",
                 f"Failed to write '{path}': {exc}.{cache_msg}",
@@ -451,7 +447,7 @@ class FilesystemTools:
     # Tool: edit_file
     # ------------------------------------------------------------------
 
-    def edit_file(self, path: str, from_cache: bool = False) -> None:
+    def edit_file(self, path: str, from_cache_id: int = None) -> None:
         """
         Search-and-replace regions of text. You can include multiple SEARCH chunks in the Payload Block.
 
@@ -459,10 +455,11 @@ class FilesystemTools:
         You MUST provide exactly ONE payload block immediately after your ```codepilot block,
         annotated as filename=<path>.
 
-        If the previous edit failed (OS error, permission denied) the runtime
-        will have cached the SEARCH/REPLACE payload. In that case call:
-            edit_file("path", from_cache=True)
-        No payload block is needed. Always fix the underlying issue in the SAME step.
+        If the previous edit failed (OS error, permission denied, wrong path) the runtime
+        will have cached the SEARCH/REPLACE payload with a numeric ID. In that case call:
+            edit_file("correct_path", from_cache_id=<N>)
+        No payload block is needed. The path can be DIFFERENT from the original failed call.
+        Always fix the underlying issue in the SAME step.
 
         Inside the Payload Block, use Git conflict markers EXACTLY like this:
         <<<<<<< SEARCH
@@ -524,19 +521,19 @@ class FilesystemTools:
         # ------------------------------------------------------------------ #
         # Resolve payload content: from cache or from the next payload block
         # ------------------------------------------------------------------ #
-        if from_cache:
+        if from_cache_id is not None:
             cache = getattr(self.runtime, "_payload_cache", {})
-            raw_content = cache.get(path)
+            raw_content = cache.get(from_cache_id)
             if raw_content is None:
                 available = list(cache.keys())
                 hint = (
-                    f" Available cache keys: {available}." if available
+                    f" Available cache IDs: {available}." if available
                     else " The cache is empty — no prior failed edit was recorded."
                 )
                 self._emit_error(
                     "edit_file",
-                    f"from_cache=True was set for '{path}' but no cached content exists "
-                    f"for that path.{hint}",
+                    f"from_cache_id={from_cache_id} not found.{hint} "
+                    "Use a valid cache_id or provide a new payload block without from_cache_id.",
                 )
                 return
         else:
@@ -651,7 +648,7 @@ class FilesystemTools:
                 1 if current_content and not current_content.endswith("\n") else 0
             )
 
-            cache_note = " (from cache)" if from_cache else ""
+            cache_note = " (from cache)" if from_cache_id is not None else ""
             status = f"{succeeded}/{len(chunks)} edits applied{cache_note}"
             if failed:
                 status += f" ({failed} failed)"
@@ -663,19 +660,81 @@ class FilesystemTools:
             )
             self._emit_result("edit_file", result)
             # Success — evict cache entry
-            if hasattr(self.runtime, "_payload_cache"):
-                self.runtime._payload_cache.pop(path, None)
+            if from_cache_id is not None and hasattr(self.runtime, "_payload_cache"):
+                self.runtime._payload_cache.pop(from_cache_id, None)
 
         except Exception as exc:
-            # Cache raw_content on OS-level failure so the LLM can retry without
-            # regenerating the payload block
-            if not from_cache and hasattr(self.runtime, "_payload_cache"):
-                self.runtime._payload_cache[path] = raw_content
-            cache_msg = (
-                f" Content cached \u2014 retry with edit_file('{path}', from_cache=True) "
-                "after fixing the underlying issue in the SAME step."
-            ) if not from_cache else ""
+            cache_msg = self._build_cache_error(
+                "edit_file", path, exc, raw_content, from_cache_id
+            )
             self._emit_error(
                 "edit_file",
                 f"Failed while editing '{path}': {exc}.{cache_msg}",
             )
+
+    # ------------------------------------------------------------------
+    # Cache error message builder (failure-type-aware)
+    # ------------------------------------------------------------------
+
+    def _build_cache_error(
+        self, tool: str, path: str, exc: Exception,
+        content: str, from_cache_id: int = None,
+    ) -> str:
+        """
+        Build a precise, LLM-steering error message for cached failures.
+
+        Classifies the exception to generate failure-type-specific recovery
+        instructions that prevent hallucination and steer the LLM correctly.
+        """
+        # If content was already from cache, it's already stored — find its ID
+        if from_cache_id is not None:
+            cache_id = from_cache_id
+        else:
+            # Cache the content and get a new ID
+            if hasattr(self.runtime, "_payload_cache"):
+                cache_id = self.runtime._cache_payload(content)
+            else:
+                return ""  # No cache available
+
+        no_payload_instruction = (
+            f"Important: DO NOT regenerate file content. No payload block(s) needed \u2014 "
+            f"call {tool}() directly in control block without associating payload block."
+        )
+
+        if isinstance(exc, FileNotFoundError):
+            # PATH is wrong — LLM must fix it
+            return (
+                f"\nContent cached (cache_id={cache_id}) \u2014 the file path is WRONG. "
+                f"Retry with the CORRECT path:\n"
+                f"  {tool}(\"<correct_path>\", from_cache_id={cache_id})\n"
+                f"Do NOT reuse the path '{path}'. {no_payload_instruction}"
+            )
+
+        if isinstance(exc, PermissionError):
+            exc_str = str(exc).lower()
+            if "outside workspace" in exc_str or "outside" in exc_str:
+                # Path outside workspace
+                return (
+                    f"\nContent cached (cache_id={cache_id}) \u2014 the path is OUTSIDE the workspace. "
+                    f"Ask user to enable unsafe_mode in AgentFile to allow writing outside "
+                    f"working directory if needed, otherwise retry with a path inside WORK_DIR:\n"
+                    f"  {tool}(\"<path_inside_workspace>\", from_cache_id={cache_id})\n"
+                    f"{no_payload_instruction}"
+                )
+            else:
+                # Permission denied — path is correct, fix permissions
+                return (
+                    f"\nContent cached (cache_id={cache_id}) \u2014 the path is correct but "
+                    f"permissions block the write. Fix permissions first, then retry in the SAME step:\n"
+                    f"  execute(\"main\", \"chmod 755 {Path(path).parent or '.'}/\")\n"
+                    f"  {tool}(\"{path}\", from_cache_id={cache_id})\n"
+                    f"{no_payload_instruction}"
+                )
+
+        # Generic OS error — path might be correct
+        return (
+            f"\nContent cached (cache_id={cache_id}) \u2014 an OS error prevented the write. "
+            f"Fix the issue, then retry in the SAME step:\n"
+            f"  {tool}(\"{path}\", from_cache_id={cache_id})\n"
+            f"{no_payload_instruction}"
+        )

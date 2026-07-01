@@ -140,10 +140,12 @@ class AsyncRuntime:
         self._step_edited_files: set[str] = set()
 
         # Payload cache: populated at parse-time (before execution) so OS-level
-        # failures or parser salvage can offer from_cache=True recovery.
-        # Keys are target file paths (write_file argument), values are content strings.
+        # failures can offer from_cache_id=<N> recovery.
+        # Keys are auto-incrementing integer IDs, values are content strings.
+        # Decoupled from file paths so the LLM can retry with a corrected path.
         # Entries are evicted on successful write/edit to prevent stale reuse.
-        self._payload_cache: dict[str, str] = {}
+        self._payload_cache: dict[int, str] = {}
+        self._payload_cache_counter: int = 0
 
         self.context_manager = ContextManager(self.config.runtime.work_dir)
         self.prompt_manager  = PromptManager()
@@ -365,12 +367,15 @@ class AsyncRuntime:
                 error_msg = self._format_parser_error(str(exc))
                 # Attempt to salvage payload content by position even though
                 # the response had protocol violations. This allows the LLM to
-                # retry failed writes using from_cache=True without regenerating.
+                # retry failed writes using from_cache_id=<N> without regenerating.
                 salvaged = BlockParser.salvage_payloads_for_cache(response_text)
                 if salvaged:
+                    salvage_lines = []
+                    retry_lines = []
                     for target_path, content in salvaged:
-                        self._payload_cache[target_path] = content
-                    salvage_lines = [f"  - '{p}'" for p, _ in salvaged]
+                        cache_id = self._cache_payload(content)
+                        salvage_lines.append(f"  - '{target_path}' → cache_id={cache_id}")
+                        retry_lines.append(f'write_file("{target_path}", from_cache_id={cache_id})')
                     system_msg = (
                         "\n\n[SYSTEM] Despite the error, file content was salvaged by "
                         "positional matching and cached:\n"
@@ -378,8 +383,10 @@ class AsyncRuntime:
                         + "\n\nIn the next step, retry WITHOUT payload blocks — "
                         "content will be loaded from cache:\n"
                         "```codepilot\n"
-                        + "\n".join(f'write_file("{p}", from_cache=True)' for p, _ in salvaged)
-                        + "\n```"
+                        + "\n".join(retry_lines)
+                        + "\n```\n"
+                        "Important: DO NOT regenerate file content. No payload block(s) needed — "
+                        "call write_file() directly in control block without associating payload block."
                     )
                     error_msg = error_msg + system_msg
                 self.hooks.emit(EventType.RUNTIME_ERROR, error=error_msg)
@@ -413,20 +420,22 @@ class AsyncRuntime:
 
             # 5. Populate payload cache BEFORE execution.
             # This ensures content is cached even if the OS rejects the write.
-            # Cache keys are the target paths extracted by the AST parser (not
-            # the annotation filenames), matched positionally to payload blocks.
-            # Only calls with payload_count==1 are cached (from_cache=True calls
+            # Cache IDs are auto-assigned; the mapping from tool-call position
+            # to cache ID is stored so filesystem tools can look up by ID.
+            # Only calls with payload_count==1 are cached (from_cache_id calls
             # have payload_count==0 and are excluded).
             try:
                 write_calls, _, _ = BlockParser._extract_write_file_calls(control_block.content)
                 cache_targets = [fp for fp, cnt in write_calls if cnt == 1]
+                self._step_precache_ids: dict[str, int] = {}
                 for target, block in zip(cache_targets, payload_blocks):
-                    self._payload_cache[target] = block.content
+                    cache_id = self._cache_payload(block.content)
+                    self._step_precache_ids[target] = cache_id
             except Exception:
                 pass  # Cache population is best-effort; never block execution
 
             # 6. Execute
-            cache_keys_before = set(self._payload_cache.keys())
+            # (Post-execution [SYSTEM] cache notice removed — now inline in tools)
             self._payload_queue    = list(payload_blocks)
             self._execution_buffer = []
             await self._execute(control_block.content)
@@ -448,25 +457,9 @@ class AsyncRuntime:
                     f"{execution_result}\n\n"
                     f"[PROTOCOL WARNING]\n{protocol_warning}"
                 )
-            # If the execution left new entries in the payload cache (i.e. some
-            # write/edit tools caught an OS error and cached their content),
-            # append a [SYSTEM] notice so the LLM knows it can retry from cache.
-            newly_cached = set(self._payload_cache.keys()) - cache_keys_before
-            if newly_cached:
-                retry_lines = "\n".join(
-                    f'write_file("{p}", from_cache=True)' for p in sorted(newly_cached)
-                )
-                os_system_msg = (
-                    "\n\n[SYSTEM] The following file write(s) failed and their content "
-                    "has been cached:\n"
-                    + "\n".join(f"  - '{p}'" for p in sorted(newly_cached))
-                    + "\n\nTo retry, fix the underlying issue AND call write_file() "
-                    "with from_cache=True in the SAME step:\n"
-                    "```codepilot\n"
-                    + retry_lines
-                    + "\n```\nNo payload blocks needed."
-                )
-                execution_result = execution_result + os_system_msg
+            # Note: [SYSTEM] retry notices for cached content are now emitted
+            # inline by the filesystem tools (write_file/edit_file) themselves
+            # with failure-type-specific guidance. No global notice needed here.
             self._append_execution_result(execution_result)
 
             # 7. task(finish=True) was called during execution → loop terminates.
@@ -591,6 +584,13 @@ class AsyncRuntime:
 
     def _append_execution(self, text: str):
         self._execution_buffer.append(text)
+
+    def _cache_payload(self, content: str) -> int:
+        """Store content in the payload cache and return its unique ID."""
+        self._payload_cache_counter += 1
+        cache_id = self._payload_cache_counter
+        self._payload_cache[cache_id] = content
+        return cache_id
 
     def _tool_config(self, tool_name: str) -> dict:
         for tc in self.config.tools:
