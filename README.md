@@ -23,7 +23,7 @@ CodePilot is a Python library for embedding autonomous software-engineering agen
 
 It is intentionally **not** a hosted chatbot UI. The package gives applications a runtime: model inference, tool execution, file editing, terminal control, persistence, hooks, and completion semantics. You bring the product surface, auth model, sandbox, database, and deployment strategy.
 
-**Version:** `0.9.9`
+**Version:** `0.9.12`
 
 Full user documentation lives at: **https://Jahanzeb-git.github.io/codepilot/**
 
@@ -63,6 +63,16 @@ agent:
       enabled: true
     - name: find
       enabled: true
+```
+
+Gemini can be configured with a Gemini API key from Google AI Studio:
+
+```yaml
+agent:
+  model:
+    provider: gemini
+    name: gemini-3.5-flash
+    api_key_env: GEMINI_API_KEY
 ```
 
 Run the agent:
@@ -117,15 +127,15 @@ For hosted web IDE deployments, the intended shape is a small control plane plus
 
 ```mermaid
 flowchart LR
-    Browser --> FlyProxy[Fly Proxy]
-    FlyProxy --> CodeServer[code-server :8080]
-    CodeServer --> Extension[Custom code-server extension]
-    Extension --> RuntimeSock[/run/codepilot/runtime.sock]
-    RuntimeSock --> Daemon[CodePilot runtime daemon]
-    Daemon --> TerminalSock[/tmp/codepilot_main.sock]
-    Daemon --> Postgres[(Postgres / Neon)]
-    Daemon --> ObjectStore[(Backblaze B2 snapshots)]
-    Daemon --> Workspace[Workspace files]
+    Browser --> FlyProxy["Fly Proxy"]
+    FlyProxy --> CodeServer["code-server :8080"]
+    CodeServer --> Extension["Custom code-server extension"]
+    Extension --> RuntimeSock["/run/codepilot/runtime.sock"]
+    RuntimeSock --> Daemon["CodePilot runtime daemon"]
+    Daemon --> TerminalSock["/tmp/codepilot_main.sock"]
+    Daemon --> Postgres[("Postgres / Neon")]
+    Daemon --> ObjectStore[("Backblaze B2 snapshots")]
+    Daemon --> Workspace["Workspace files"]
 ```
 
 ## Why Code-as-Interface

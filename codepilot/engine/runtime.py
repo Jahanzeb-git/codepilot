@@ -279,6 +279,11 @@ class AsyncRuntime:
         # Safety-net: global summarization if context is dangerously high
         self.messages = await self._memory.process(self.messages)
 
+        # Few-Shot Bootstrap: If history is empty, inject a perfect interaction
+        # to teach the LLM Markdown protocol syntax and terminal usage.
+        if not self.messages:
+            self._inject_few_shot_bootstrap()
+
         # Assign a stable task position and append the new task
         self._task_counter += 1
         task_pos = self._task_counter
@@ -406,7 +411,13 @@ class AsyncRuntime:
             # a spurious </task_N> to "close" the current (unwrapped) active task.
             # These tags are never valid in an assistant turn — strip them so the
             # model does not reinforce the pattern on the next inference step.
-            stored_response = re.sub(r"\s*</task_\d+>", "", response_text).rstrip()
+            stored_response = re.sub(r"\s*</task_\d+>", "", response_text)
+            
+            # Self-Correcting History: If the LLM glued the fence to the previous sentence
+            # or used only one newline, auto-correct it to \n\n before saving to history.
+            # This ensures the LLM learns the perfect pattern for future turns.
+            stored_response = re.sub(r"([^\n])\s*(```codepilot\b)", r"\1\n\n\2", stored_response).strip()
+            
             self.messages.append({"role": _ROLE_ASSISTANT, "content": stored_response})
 
             # Schedule cache TTL refresh (Anthropic only)
@@ -572,6 +583,66 @@ class AsyncRuntime:
                 f"Tool '{name}' is already registered. Pass replace=True to override."
             )
         self.registry.register(name, func)
+
+    def _inject_few_shot_bootstrap(self):
+        """
+        Inject a synthetic 'Pre-Flight Diagnostic' sequence into an empty session.
+        This provides the LLM with real environment context (OS, Python) while
+        serving as a flawless few-shot example of:
+        1. Emitting perfectly fenced ```codepilot blocks (with blank lines).
+        2. Chaining terminal commands with '&&' instead of raw newlines.
+        3. Properly closing a task with task(finish=True).
+        """
+        import platform
+        import sys
+        
+        is_windows = platform.system() == "Windows"
+        cmd = "python --version && ver" if is_windows else "python3 --version && uname -s -r -m"
+        
+        py_ver = sys.version.split()[0]
+        os_info = f"{platform.system()} {platform.release()} {platform.machine()}"
+        
+        output_body = (
+            f"Python {py_ver}\n"
+            f"{os_info}\n"
+            f"[status: completed | return_code: 0 | pid: 9999 | cwd: {self.config.runtime.work_dir}]"
+        )
+
+        self.messages.extend([
+            {
+                "role": _ROLE_USER,
+                "content": "[SYSTEM] Agent sandbox initialized. Please verify the environment context before proceeding."
+            },
+            {
+                "role": _ROLE_ASSISTANT,
+                "content": (
+                    "I will check the operating system and Python environment to ensure I have the correct context before proceeding.\n\n"
+                    "```codepilot\n"
+                    f'execute("main", "{cmd}", timeout=5)\n'
+                    "```"
+                )
+            },
+            {
+                "role": _ROLE_USER,
+                "content": f"[EXECUTION RESULT]\n[terminal:main:cmd1] $ {cmd}\n{output_body}"
+            },
+            {
+                "role": _ROLE_ASSISTANT,
+                "content": (
+                    "Environment verified successfully. I am standing by for the user's first task.\n\n"
+                    "```codepilot\n"
+                    "task(finish=True)\n"
+                    "```"
+                )
+            },
+            {
+                "role": _ROLE_USER,
+                "content": "[EXECUTION RESULT]\n[task] Task marked as complete."
+            }
+        ])
+        
+        # Reset task counter so the user's first actual prompt becomes [Task 1]
+        self._task_counter = 0
 
     # ====================================================================== #
     #  Internal helpers — used by tool classes                                #
@@ -809,7 +880,7 @@ class AsyncRuntime:
     #  Streaming inference                                                 #
     # ------------------------------------------------------------------ #
 
-    _CONTROL_FENCE_RE = re.compile(r"^```codepilot\s*$", re.MULTILINE)
+    _CONTROL_FENCE_RE = re.compile(r"```codepilot\n")
     # Hold-back: buffer enough chars to avoid prematurely emitting a
     # partial fence marker split across streaming chunks.
     _HOLDBACK = len("```codepilot")  # 12 chars

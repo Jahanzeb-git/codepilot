@@ -119,6 +119,10 @@ class BlockParser:
             "", text, flags=_re.DOTALL
         )
 
+        # Force a newline before any fenced block that is glued to previous text
+        # (e.g. "Fixing bug.```codepilot" -> "Fixing bug.\n```codepilot")
+        text = _re.sub(r"([^\n])(```[a-zA-Z0-9_-]*)", r"\1\n\2", text)
+
         blocks = cls.parse(text)
         if not blocks:
             return None, [], None

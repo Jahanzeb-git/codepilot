@@ -74,7 +74,7 @@ class _PosixPtyBackend:
         # pre-skipping the echoed bytes in TerminalSession._bytes_fed.
         self._process = pexpect.spawn(
             "/bin/bash", ["--norc", "--noprofile"],
-            cwd=work_dir, encoding="utf-8", echo=True,
+            cwd=work_dir, encoding="utf-8", codec_errors="replace", echo=True,
             timeout=30, maxread=65536,
         )
         self._process.setwinsize(rows, cols)
@@ -167,6 +167,7 @@ class _SocketPtyBackend:
         self._process = pexpect.fdpexpect.fdspawn(
             self._sock.fileno(),
             encoding="utf-8",
+            codec_errors="replace",
             timeout=30,
             maxread=65536,
         )

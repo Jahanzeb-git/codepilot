@@ -168,6 +168,7 @@ class OpenAIProvider(LLMProvider):
         system: Union[str, SystemPromptParts, None] = None,
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        **kwargs,
     ) -> str:
         msgs = []
         sys_text = self._system_str(system)
@@ -175,7 +176,7 @@ class OpenAIProvider(LLMProvider):
             msgs.append({"role": "system", "content": sys_text})
         msgs.extend(messages)
 
-        kwargs = dict(
+        kwargs_api = dict(
             model=self.model,
             messages=msgs,
             max_tokens=max_tokens,
@@ -184,11 +185,11 @@ class OpenAIProvider(LLMProvider):
         if self.thinking_enabled:
             # temperature is unsupported for reasoning models.
             # Map 'max' (DeepSeek-specific) to 'high' for OpenAI.
-            kwargs["reasoning_effort"] = "high" if self.reasoning_effort == "max" else self.reasoning_effort
+            kwargs_api["reasoning_effort"] = "high" if self.reasoning_effort == "max" else self.reasoning_effort
         else:
-            kwargs["temperature"] = temperature
+            kwargs_api["temperature"] = temperature
 
-        response = await self.client.chat.completions.create(**kwargs)
+        response = await self.client.chat.completions.create(**kwargs_api)
         return response.choices[0].message.content
 
     async def chat_stream(
@@ -197,6 +198,7 @@ class OpenAIProvider(LLMProvider):
         system: Union[str, SystemPromptParts, None] = None,
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        **kwargs,
     ) -> AsyncIterator[str]:
         msgs = []
         sys_text = self._system_str(system)
@@ -365,6 +367,7 @@ class AnthropicProvider(LLMProvider):
         system: Union[str, SystemPromptParts, None] = None,
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        **kwargs,
     ) -> str:
         kwargs = dict(
             model=self.model,
@@ -413,6 +416,7 @@ class AnthropicProvider(LLMProvider):
         system: Union[str, SystemPromptParts, None] = None,
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        **kwargs,
     ) -> AsyncIterator[str]:
         kwargs = dict(
             model=self.model,
@@ -493,7 +497,7 @@ class AlibabaProvider(LLMProvider):
 
     @classmethod
     def _add_rolling_breakpoint(cls, messages: List[Dict]) -> List[Dict]:
-        return _insert_cache_breakpoints(messages, ttl=300)
+        return _insert_cache_breakpoints(messages, ttl=None)
 
     def _build_kwargs(self, messages, system, temperature, max_tokens) -> dict:
         msgs = []
@@ -521,6 +525,7 @@ class AlibabaProvider(LLMProvider):
         system: Union[str, SystemPromptParts, None] = None,
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        **kwargs,
     ) -> str:
         kwargs = self._build_kwargs(messages, system, temperature, max_tokens)
         response = await self.client.chat.completions.create(**kwargs)
@@ -539,6 +544,7 @@ class AlibabaProvider(LLMProvider):
         system: Union[str, SystemPromptParts, None] = None,
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        **kwargs,
     ) -> AsyncIterator[str]:
         kwargs = self._build_kwargs(messages, system, temperature, max_tokens)
         kwargs["stream"] = True
