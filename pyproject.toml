@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codepilot-ai"
-version = "0.9.14"
+version = "0.9.15"
 description = "A code-native agentic framework for embedding robust agentic runtime into software components."
 readme = "README.md"
 authors = [
@@ -17,7 +17,7 @@ classifiers = [
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows :: Windows 10",
     "Intended Audience :: Developers",
-    "Topic :: Software Development :: Libraries :: Python Modules :: AI Agent"
+    "Topic :: Software Development :: Libraries :: Python Modules"
 ]
 requires-python = ">=3.9"
 dependencies = [
