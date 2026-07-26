@@ -170,3 +170,4 @@ rdpge_trace_*.json
 # AI assistant config — never push
 .agents/
 .gemini/
+.antigravitycli/

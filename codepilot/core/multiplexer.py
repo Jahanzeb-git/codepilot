@@ -262,8 +262,14 @@ PROMPT_COMMAND="__cp_command_finished; $PROMPT_COMMAND"
                 except OSError as e:
                     _log.error("Could not write rcfile: %s", e)
 
-            os.execv(self._shell, self._shell_args)
-            # os.execv() never returns on success. If it does, bail.
+            SENSITIVES = {"MACHINE_SECRET", "CONTROL_PLANE_URL", "DASHSCOPE_API_KEY", "ALIBABA_API_KEY", "VOYAGE_API_KEY", "TAVILY_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"}
+
+            clean_env = {
+                k: v for k, v in os.environ.items()
+                if k not in SENSITIVES
+            }
+            os.execve(self._shell, self._shell_args, clean_env)
+            # os.execve() never returns on success. If it does, bail.
             sys.exit(127)
 
         # ── Parent process: hold master_fd ──────────────────────────────
