@@ -118,10 +118,14 @@ class MuxServer:
         self._work_dir: str = work_dir or os.getcwd()
 
         self._master_fd: Optional[int] = None
-        self._bash_pid: Optional[int] = None
+        self._clients: List[socket.socket] = []
         self._server: Optional[socket.socket] = None
         self._sel: Optional[selectors.DefaultSelector] = None
-        self._clients: list = []
+
+        self._scrollback: bytes = b""
+        self._max_scrollback = 16384  # 16KB
+
+        self._bash_pid: Optional[int] = None
         self._running: bool = False
         self._rcfile_path: Optional[str] = None
 
@@ -349,6 +353,8 @@ PROMPT_COMMAND="__cp_command_finished; $PROMPT_COMMAND"
 
         try:
             client_sock.sendall(handshake.encode())
+            if self._scrollback:
+                client_sock.sendall(self._scrollback)
         except OSError:
             client_sock.close()
             return
@@ -378,6 +384,9 @@ PROMPT_COMMAND="__cp_command_finished; $PROMPT_COMMAND"
                 _log.error("Unexpected error reading master_fd: %s", exc)
             self._running = False
             return False
+
+        # Update scrollback buffer
+        self._scrollback = (self._scrollback + data)[-self._max_scrollback:]
 
         for client in self._clients[:]:
             try:
