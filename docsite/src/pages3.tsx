@@ -416,7 +416,7 @@ export function PageMcpSupport() {
             ["Client Name", <code>codepilot_mcp_client:v1</code>],
             ["Client Version", <code>1.0.0</code>],
             ["JSON-RPC Version", <code>2.0</code>],
-            ["Protocol Versions", <code>2025-06-18</code> (Modern) with auto-downgrade to <code>2024-11-05</code> (Legacy)],
+            ["Protocol Versions", <><code>2025-06-18</code> (Modern) with auto-downgrade to <code>2024-11-05</code> (Legacy)</>],
           ]}
         />
         
