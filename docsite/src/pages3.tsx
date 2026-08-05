@@ -390,3 +390,90 @@ ask_user("Should I use PostgreSQL or SQLite for the testing database configurati
     </>
   );
 }
+
+export function PageMcpSupport() {
+  return (
+    <>
+      <PageHeader
+        title="Model Context Protocol (MCP)"
+        subtitle="CodePilot natively supports connecting to external MCP servers to massively expand its toolset without polluting the LLM's context window."
+      />
+
+      <Section title="What is MCP?">
+        <p>
+          The <a href="https://modelcontextprotocol.io/" target="_blank" rel="noreferrer">Model Context Protocol (MCP)</a> is an open standard developed by Anthropic that standardises how AI models access data and tools. 
+          It allows you to securely expose local databases, external APIs (like GitHub or Slack), and file systems to CodePilot using a universal JSON-RPC 2.0 protocol.
+        </p>
+      </Section>
+
+      <Section title="Client Specifications">
+        <p>
+          CodePilot implements a robust, universal MCP client architecture under the hood. 
+        </p>
+        <Table
+          headers={["Specification", "Value"]}
+          rows={[
+            ["Client Name", <code>codepilot_mcp_client:v1</code>],
+            ["Client Version", <code>1.0.0</code>],
+            ["JSON-RPC Version", <code>2.0</code>],
+            ["Protocol Versions", <code>2025-06-18</code> (Modern) with auto-downgrade to <code>2024-11-05</code> (Legacy)],
+          ]}
+        />
+        
+        <h4 style={{ color: "var(--text)", marginTop: 16 }}>Universal HTTP Transport</h4>
+        <p>
+          While the JSON-RPC messages are standardised, different MCP servers use different HTTP transport architectures. CodePilot automatically negotiates and supports both major HTTP transport modes transparently:
+        </p>
+        <ul style={{ paddingLeft: 20, color: "var(--text-soft)", lineHeight: 1.6 }}>
+          <li>
+            <strong>Streamable HTTP (Modern)</strong>: Used by platforms like Tavily. Every request is a simple, synchronous <code>POST</code> direct to the main endpoint, returning the JSON-RPC result in the response body or as a short-lived SSE stream.
+          </li>
+          <li>
+            <strong>Legacy True SSE</strong>: Used by strict servers like the official GitHub Copilot MCP. CodePilot automatically opens an asynchronous, permanent <code>GET</code> stream, waits for an <code>endpoint</code> routing event, and handles bi-directional JSON-RPC mapping via background <code>asyncio</code> tasks.
+          </li>
+        </ul>
+        <Callout>
+          You don't need to configure transport types manually! CodePilot automatically detects if the server requires True SSE or Streamable HTTP during the initialization handshake.
+        </Callout>
+      </Section>
+
+      <Section title="Embedding MCP: Solving the Context Window">
+        <p>
+          A major flaw in naive MCP implementations is that they inject the schemas for <em>every</em> discovered tool directly into the LLM's system prompt. If you connect to an enterprise MCP server exposing 500 internal APIs, your agent will immediately run out of context tokens before it even starts working.
+        </p>
+        <p>
+          <strong>CodePilot solves this using Embedding MCP.</strong>
+        </p>
+        <p>
+          During the initialization handshake, CodePilot fetches all available tools from your configured MCP servers and securely embeds their schemas into a local vector database using Voyage AI (e.g. <code>voyage-code-3</code>).
+        </p>
+        <p>
+          Instead of injecting 500 tools into the system prompt, CodePilot injects exactly <strong>two</strong> meta-tools:
+        </p>
+        <ul style={{ paddingLeft: 20, color: "var(--text-soft)", lineHeight: 1.6 }}>
+          <li><code>mcp_discover</code>: Allows the LLM to semantically search for external tools based on its current task (e.g. <em>"Get the latest PR"</em>).</li>
+          <li><code>mcp_invoke</code>: Allows the LLM to call the external tool once it has discovered its exact JSON schema.</li>
+        </ul>
+      </Section>
+
+      <Section title="Configuration Example">
+        <p>
+          You can configure multiple remote MCP servers in your <code>agent.yaml</code>. CodePilot seamlessly routes authentication tokens to either HTTP Headers (for strings like <code>Authorization</code>) or Query Parameters based entirely on the <code>api_key_param</code> you specify.
+        </p>
+        <Code lang="yaml">{`tools:
+  - name: "mcp"
+    enabled: true
+    config:
+      embedding_model: "voyage-code-3"
+      embedding_api_key_env: "VOYAGE_API_KEY"
+      embedding_base_url: "https://api.voyageai.com/v1"
+      top_k: 3
+      servers:
+        - name: "github-cloud"
+          url: "https://api.githubcopilot.com/mcp/"
+          api_key_env: "GITHUB_PAT"
+          api_key_param: "Authorization" # Routed securely as a Bearer Token HTTP Header`}</Code>
+      </Section>
+    </>
+  );
+}

@@ -82,6 +82,34 @@ class SubAgentsConfig(BaseModel):
     )
 
 
+class MCPServerConfig(BaseModel):
+    """
+    A single MCP server entry inside the 'mcp' tool config block.
+
+    Example agent.yaml fragment::
+
+        tools:
+          - name: mcp
+            enabled: true
+            config:
+              servers:
+                - name: tavily
+                  url: https://mcp.tavily.com/mcp/?tavilyApiKey=...
+                  api_key_env: TAVILY_API_KEY   # optional env-var name
+                  api_key_param: tavilyApiKey   # optional query-param or header
+    """
+    name:          str = Field(..., description="Logical server name, e.g. 'tavily'.")
+    url:           str = Field(..., description="Full MCP server endpoint URL.")
+    api_key_env:   Optional[str] = Field(
+        default=None,
+        description="Name of the env var holding the API key (never put the key literal here)."
+    )
+    api_key_param: Optional[str] = Field(
+        default=None,
+        description="Query-parameter or header name the server expects the key in."
+    )
+
+
 class AgentConfig(BaseModel):
     """
     Mirrors the top-level 'agent:' block in an AgentFile YAML.

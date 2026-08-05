@@ -10,7 +10,7 @@ export function PageIntroduction({ nav }: { nav: (p: PageId) => void }) {
         <div className="hero-flex">
           {/* ── Left: text content ── */}
           <div className="hero-content">
-            <div className="hero-eyebrow">CodePilot v0.9.9</div>
+            <div className="hero-eyebrow">CodePilot v0.9.18</div>
             <h1 className="hero-title">Embeddable Autonomous<br />Agent Framework</h1>
             <p className="hero-desc">
               CodePilot is an <strong>Embeddable Autonomous Agent (EAA)</strong> framework for software engineering tasks.
@@ -414,7 +414,27 @@ agent:
         provider: "openai"
         max_results: 5
         timeout: 60
-        max_output_chars: 8000`}</Code>
+        max_output_chars: 8000
+        
+    - name: "mcp"
+      enabled: true
+      config:
+        embedding_model: "voyage-code-3"
+        embedding_api_key_env: "VOYAGE_API_KEY"
+        embedding_base_url: "https://api.voyageai.com/v1"
+        top_k: 3
+        servers:
+          - name: "tavily-mcp"
+            url: "https://mcp.tavily.com/mcp/?tavilyApiKey=..."
+            # For query parameter keys
+            api_key_env: "TAVILY_API_KEY"
+            api_key_param: "tavilyApiKey"
+            
+          - name: "github-cloud"
+            url: "https://api.githubcopilot.com/mcp/"
+            # For header tokens (automatically adds 'Bearer ' prefix if needed)
+            api_key_env: "GITHUB_PAT"
+            api_key_param: "Authorization"`}</Code>
       </Section>
 
       <Callout>

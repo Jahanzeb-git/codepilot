@@ -23,6 +23,7 @@ export type PageId =
   | "terminal-tools"
   | "context-archiving"
   | "user-interaction"
+  | "mcp-support"
   | "completion-block"
   | "workspace-changes"
   | "chat-mode"
@@ -69,6 +70,7 @@ export const navGroups: NavGroup[] = [
       { id: "terminal-tools", label: "Terminal Tools" },
       { id: "context-archiving", label: "Context Archiving" },
       { id: "user-interaction", label: "User Interaction" },
+      { id: "mcp-support", label: "MCP Support" },
     ],
   },
   {

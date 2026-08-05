@@ -51,6 +51,7 @@ from ..tools.search import SearchTools
 from ..tools.subagent import SubAgentTools, FILE_LOCK_COORDINATOR
 from ..tools.terminal import TerminalManager
 from ..tools.semantic import SemanticTools, SemanticConfigError
+from ..tools.mcp_tool import MCPTools
 
 
 _ROLE_USER      = "user"
@@ -158,6 +159,8 @@ class AsyncRuntime:
         self._context_tools     = ContextTools(self)
         self._subagent_tools    = SubAgentTools(self, depth=0)
         self._file_lock_coordinator = FILE_LOCK_COORDINATOR
+        self._mcp_tools         = MCPTools(self) if self._mcp_enabled() else None
+        self._mcp_setup_done    = False
 
         self.registry = ToolRegistry()
         self._register_enabled_tools()
@@ -278,6 +281,12 @@ class AsyncRuntime:
 
         # Safety-net: global summarization if context is dangerously high
         self.messages = await self._memory.process(self.messages)
+
+        # MCP setup: connect servers and index tools on the very first run().
+        # Deferred from __init__ because setup() is async.
+        if self._mcp_tools is not None and not self._mcp_setup_done:
+            await self._mcp_tools.setup()
+            self._mcp_setup_done = True
 
         # Few-Shot Bootstrap: If history is empty, inject a perfect interaction
         # to teach the LLM Markdown protocol syntax and terminal usage.
@@ -669,6 +678,13 @@ class AsyncRuntime:
                 return tc.config
         return {}
 
+    def _mcp_enabled(self) -> bool:
+        """Return True if the 'mcp' tool is explicitly enabled in agent.yaml."""
+        for tc in self.config.tools:
+            if tc.name == "mcp" and tc.enabled:
+                return True
+        return False
+
     # ====================================================================== #
     #  Private implementation                                                 #
     # ====================================================================== #
@@ -707,6 +723,8 @@ class AsyncRuntime:
         if "ask_user"            in enabled: self.registry.register("ask_user",            self._interaction_tools.ask_user)
         if "semantic_search"     in enabled: self.registry.register("semantic_search",     self._semantic_tools.semantic_search)
         if "find"                in enabled: self.registry.register("find",                self._search_tools.find)
+        if "mcp"                 in enabled and self._mcp_tools is not None:
+            self.registry.register("mcp", self._mcp_tools.mcp)
 
     def _validate_semantic_config(self):
         """Pre-flight check for semantic_search when it is explicitly enabled.
@@ -762,10 +780,26 @@ class AsyncRuntime:
     def _build_system_prompt(self, step: int = 0, max_steps: int = 0) -> SystemPromptParts:
         # Build sub-agent status block (empty when none active)
         sub_agent_status = self._subagent_tools.manager.build_status_block()
+
+        # Build MCP server block (empty string when MCP not configured)
+        mcp_server_block = (
+            self._mcp_tools.build_server_block()
+            if self._mcp_tools is not None and self._mcp_setup_done
+            else ""
+        )
+
+        # Append MCP server block to developer_prompt so it appears in the
+        # static (cacheable) half of the system prompt, right after the
+        # developer's own instructions.  It is token-cheap (server names
+        # only) so caching it is safe.
+        developer_prompt = self.config.system_prompt
+        if mcp_server_block:
+            developer_prompt = developer_prompt + "\n\n" + mcp_server_block
+
         return self.prompt_manager.render(
             agent_name=self.config.name,
             agent_role=self.config.role or "",
-            developer_prompt=self.config.system_prompt,
+            developer_prompt=developer_prompt,
             tool_definitions=self.registry.get_definitions(),
             work_dir=self.config.runtime.work_dir,
             codebase_snapshot=self.context_manager.get_formatted_snapshot(),

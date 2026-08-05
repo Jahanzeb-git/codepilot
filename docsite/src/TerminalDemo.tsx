@@ -24,7 +24,7 @@ const FRAMES: Frame[] = [
 
   // --- Collecting phase ---
   { kind: "line", text: "Collecting codepilot-ai", cls: "t-dim", delay: 80 },
-  { kind: "line", text: "  Downloading codepilot_ai-0.9.9-py3-none-any.whl.metadata (12 kB)", cls: "t-dim", delay: 60 },
+  { kind: "line", text: "  Downloading codepilot_ai-0.9.18-py3-none-any.whl.metadata (12 kB)", cls: "t-dim", delay: 60 },
   { kind: "line", text: "Collecting pydantic>=2.0", cls: "t-dim", delay: 55 },
   { kind: "line", text: "  Downloading pydantic-2.13.4-py3-none-any.whl.metadata (109 kB)", cls: "t-dim", delay: 55 },
   { kind: "line", text: "Collecting openai>=1.0", cls: "t-dim", delay: 55 },
@@ -39,7 +39,7 @@ const FRAMES: Frame[] = [
 
   // --- Download phase with progress bars ---
   { kind: "pause", delay: 120 },
-  { kind: "line", text: "Downloading codepilot_ai-0.9.9-py3-none-any.whl (103 kB)", cls: "t-dim", delay: 0 },
+  { kind: "line", text: "Downloading codepilot_ai-0.9.18-py3-none-any.whl (103 kB)", cls: "t-dim", delay: 0 },
   { kind: "bar", pkg: "anthropic-0.104.1", size: "832 kB", delay: 80 },
   { kind: "bar", pkg: "pydantic-2.13.4", size: "472 kB", delay: 80 },
   { kind: "bar", pkg: "pydantic_core-2.46.4", size: "2.1 MB", delay: 80 },
@@ -70,7 +70,7 @@ const FRAMES: Frame[] = [
   // Success
   {
     kind: "line",
-    text: "Successfully installed codepilot-ai-0.9.9",
+    text: "Successfully installed codepilot-ai-0.9.18",
     cls: "t-success",
     delay: 0,
   },

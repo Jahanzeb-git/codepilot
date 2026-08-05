@@ -5,7 +5,7 @@ import {
   PageIntroduction, PageInstallation, PageQuickStart, PageModelsProviders, PageAgentFile,
   PageHowItWorks, PageBasicUsage, PageCodeAsInterface, PageStreaming, PageMultiTurn,
   PageTerminalTools, PageFileHandling, PageSearchTools, PageContextArchiving, PageUserInteraction,
-  PageCompletionBlock, PageChatMode, PageWorkspaceChanges,
+  PageCompletionBlock, PageChatMode, PageWorkspaceChanges, PageMcpSupport,
   PageSessionPersistence, PageContextMemory, PageResumingSession, PageResettingSession,
   PageHooks, PagePermissionGating, PageMidTaskInjection, PageMultiOperation,
   PageCustomTools, PageAborting, PageCLIPattern, PageWebServer, PageAPIReference,
@@ -70,6 +70,7 @@ export function App() {
     "terminal-tools": <PageTerminalTools />,
     "context-archiving": <PageContextArchiving />,
     "user-interaction": <PageUserInteraction />,
+    "mcp-support": <PageMcpSupport />,
     "completion-block": <PageCompletionBlock />,
     "chat-mode": <PageChatMode />,
     "workspace-changes": <PageWorkspaceChanges />,
@@ -233,7 +234,7 @@ function Footer() {
           </a>{" "}
           and the community.
         </span>
-        <span>CodePilot v0.9.9 · MIT License</span>
+        <span>CodePilot v0.9.18 · MIT License</span>
       </div>
     </>
   );
