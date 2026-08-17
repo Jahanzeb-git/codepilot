@@ -33,8 +33,10 @@ Active sessions (use session IDs with terminal tools):
 
 ---
 
+{% if context_stress %}
 **Context stress:**
 {{ context_stress }}
+{% endif %}
 
 **Codebase Snapshot:**
 ```json

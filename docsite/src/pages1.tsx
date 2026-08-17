@@ -10,7 +10,7 @@ export function PageIntroduction({ nav }: { nav: (p: PageId) => void }) {
         <div className="hero-flex">
           {/* ── Left: text content ── */}
           <div className="hero-content">
-            <div className="hero-eyebrow">CodePilot v0.9.19</div>
+            <div className="hero-eyebrow">CodePilot v0.9.20</div>
             <h1 className="hero-title">Embeddable Autonomous<br />Agent Framework</h1>
             <p className="hero-desc">
               CodePilot is an <strong>Embeddable Autonomous Agent (EAA)</strong> framework for software engineering tasks.
@@ -445,14 +445,13 @@ agent:
       <Section title="memory block (optional)">
         <Code lang="yaml">{`agent:
   memory:
-    # Context window size for stress tracking and safety-net triggering
+    # Advertised context window for the selected model (set explicitly)
     max_context_tokens: 120000
 
-    # Trigger global summary when usage crosses this fraction
-    global_summary_threshold: 0.9
-
-    # Max tokens for generated [GLOBAL SUMMARY] content
-    global_summary_max_tokens: 500`}</Code>
+    # Higher values trigger earlier proactive maintenance
+    context_stress_multiplier: 1.0
+    context_stress_trigger: 0.78
+    context_safety_margin_tokens: 1024`}</Code>
       </Section>
     </>
   );

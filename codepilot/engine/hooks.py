@@ -35,7 +35,8 @@ class EventType(Enum):
     USER_MESSAGE_QUEUED   = "user_message_queued"    # send_message() was called
     USER_MESSAGE_INJECTED = "user_message_injected"  # Message inserted into context
     SESSION_RESET         = "session_reset"          # reset() was called
-    CONTEXT_DROP          = "context_drop"           # archive_context reduced context size
+    CONTEXT_MAINTENANCE_START = "context_maintenance_start"  # runtime forced a context cleanup turn
+    CONTEXT_DROP          = "context_drop"           # archive_context (or the emergency backstop) reduced context size
     SUBAGENT_SPAWN        = "subagent_spawn"         # A sub-agent was spawned
     SUBAGENT_MESSAGE      = "subagent_message"       # Sub-agent sent a message to main
     SUBAGENT_FINISH       = "subagent_finish"        # A sub-agent completed its task
@@ -229,11 +230,29 @@ def on_thinking_stream(runtime_instance):
     return decorator
 
 
+def on_context_maintenance_start(runtime_instance):
+    """Decorator: fires when the runtime forces a context-cleanup turn.
+
+    This fires BEFORE the agent acts — at the moment measured context
+    pressure crosses the trigger threshold — so a UI can show something
+    like "Cleaning up context..." while the agent decides what to archive.
+
+    Handler receives: stress_pct (int), history_tokens (int),
+    safe_budget (int), candidates (str — human-readable per-task breakdown).
+    """
+    def decorator(func: Callable):
+        runtime_instance.hooks.register(EventType.CONTEXT_MAINTENANCE_START, func)
+        return func
+    return decorator
+
+
 def on_context_drop(runtime_instance):
-    """Decorator: fires when archive_context reduces context size.
+    """Decorator: fires when context was actually reduced — either by the
+    agent calling archive_context(), or by the emergency backstop when no
+    completed tasks were available to offer the agent.
 
     Handler receives: before_pct (int), after_pct (int), tokens_saved (int),
-    tasks_archived (list[int]).
+    tasks_archived (list[int] — empty when the emergency backstop fired).
     """
     def decorator(func: Callable):
         runtime_instance.hooks.register(EventType.CONTEXT_DROP, func)

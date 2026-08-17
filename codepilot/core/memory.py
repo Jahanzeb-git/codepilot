@@ -7,12 +7,11 @@ Description:
 Agent-driven context memory management for long-running agentic sessions.
 
 Architectural Notes:
-Implements a three-tier context control strategy: (1) agent-driven archiving
-via archive_context/reveal_context tools, (2) a per-step context stress signal
-injected into the system prompt so the agent knows when to act, and (3) a
-global summarization safety net that fires at 90% utilisation as a last resort.
-Token counting uses tiktoken (cl100k_base) with provider-specific fudge factors.
-The ContextArchive stores original messages for reversible archiving.
+Implements complete-prompt preflight accounting, deterministic Context Stress
+triggering, and a temporary same-agent archive_context maintenance turn.
+Token counting uses tiktoken (cl100k_base) with provider-specific estimates.
+ContextArchive retains originals outside the live prompt; there is deliberately
+no whole-history reveal tool.
 
 Copyright (c) 2026 Jahanzeb Ahmed.
 Licensed under the MIT License.
@@ -22,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Dict, List, Tuple, TYPE_CHECKING
+from typing import Dict, List, Tuple, TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
     from ..engine.provider import LLMProvider
@@ -72,8 +71,10 @@ def count_tokens(text: str, provider: str = "openai") -> int:
 def count_messages_tokens(
     messages: List[Dict], provider: str = "openai"
 ) -> int:
-    """Sum token counts across all message contents."""
-    return sum(count_tokens(m.get("content", ""), provider) for m in messages)
+    """Estimate rendered message tokens, including conservative chat framing."""
+    # Exact chat framing is provider/model specific and is not published for
+    # every provider.  Counting it here keeps capacity control conservative.
+    return sum(count_tokens(m.get("content", ""), provider) + 4 for m in messages)
 
 
 # -----------------------------------------------------------------------
@@ -179,6 +180,10 @@ class MemoryConfig:
         global_summary_threshold: float = 0.9,
         global_summary_max_tokens: int = 500,
         provider_name: str = "openai",
+        context_stress_multiplier: float = 1.0,
+        context_stress_trigger: float = 0.78,
+        context_safety_margin_tokens: int = 1024,
+        generation_reserve_tokens: int = 4096,
     ):
         self.max_context_tokens = max_context_tokens
         self.provider_name = provider_name
@@ -187,6 +192,21 @@ class MemoryConfig:
             max_context_tokens * global_summary_threshold
         )
         self.global_summary_max_tokens = global_summary_max_tokens
+        self.context_stress_multiplier = context_stress_multiplier
+        self.context_stress_trigger = context_stress_trigger
+        self.context_safety_margin_tokens = context_safety_margin_tokens
+        self.generation_reserve_tokens = generation_reserve_tokens
+
+
+class ContextPressure(NamedTuple):
+    """Measured preflight state for one rendered model request."""
+
+    history_tokens: int
+    system_tokens: int
+    safe_history_budget: int
+    physical_load: float
+    context_stress: float
+    maintenance_required: bool
 
 
 # -----------------------------------------------------------------------
@@ -273,27 +293,55 @@ class MemoryManager:
         self.provider = provider
         self.archive = ContextArchive()
 
+    def count_prompt_tokens(self, prompt: str) -> int:
+        """Count the full rendered system-prompt text plus chat framing."""
+        return count_tokens(prompt, self.config.provider_name) + 4
+
+    def build_archive_candidates(self, messages: List[Dict]) -> str:
+        """Return completed task sizes; relevance remains the agent's decision."""
+        provider = self.config.provider_name
+        task_map = find_task_map(messages)
+        if not task_map:
+            return ""
+        active = max(task_map)
+        lines = []
+        has_completed_candidate = False
+        for position in sorted(task_map):
+            start, end, is_archived = task_map[position]
+            if position == active:
+                lines.append(f"- Task {position}: ACTIVE — protected")
+            elif is_archived:
+                lines.append(f"- Task {position}: already archived")
+            else:
+                has_completed_candidate = True
+                size = count_messages_tokens(messages[start:end], provider)
+                lines.append(f"- Task {position}: {size:,} tokens")
+        return "\n".join(lines) if has_completed_candidate else ""
+
     # ------------------------------------------------------------------
     # Safety-net global summarization
     # ------------------------------------------------------------------
 
-    async def process(self, messages: List[Dict]) -> List[Dict]:
+    async def process(self, messages: List[Dict], system_tokens: int = 0) -> List[Dict]:
         """
-        Safety-net only. Called at the start of run().
+        Emergency backstop only — NOT called on every run().
 
-        If total tokens exceed the 90% threshold and the agent hasn't kept
-        things under control, fire global summarization to prevent overflow.
+        The agent-driven maintenance turn (archive_context) is the primary
+        mechanism and handles the common case. This exists for the case it
+        cannot handle: a session with no completed, unarchived tasks to
+        offer the agent (e.g. one long-running task with no boundaries, or
+        every prior task is already archived). There is nothing for the
+        agent to reason about there, so instead of doing nothing while
+        physical load climbs toward the model's real context ceiling, this
+        collapses the oldest half of history into a single [GLOBAL SUMMARY]
+        unconditionally. The caller is responsible for only invoking this
+        once the hard physical ceiling (not the softer, tunable stress
+        trigger) has actually been crossed.
         """
-        total = count_messages_tokens(messages, self.config.provider_name)
-
-        if total > self.config.global_summary_threshold_tokens:
-            logger.info(
-                "Global safety net triggered: %d tokens > %d threshold",
-                total, self.config.global_summary_threshold_tokens,
-            )
-            messages = await self._global_summarize(messages)
-
-        return messages
+        pressure = self.measure_context(messages, system_tokens)
+        if pressure.physical_load < 0.93:
+            return messages
+        return await self._global_summarize(messages)
 
     async def _global_summarize(self, messages: List[Dict]) -> List[Dict]:
         """
@@ -365,7 +413,42 @@ class MemoryManager:
     # Context stress signal
     # ------------------------------------------------------------------
 
-    def build_context_stress(self, messages: List[Dict]) -> str:
+    def measure_context(
+        self, messages: List[Dict], system_tokens: int = 0
+    ) -> ContextPressure:
+        """Measure the complete request budget before an inference.
+
+        ``max_context_tokens`` is the configured model context window.
+        ``system_tokens`` must be measured from the exact rendered system
+        prompt for this inference.  The generation reserve protects room for
+        visible output, enabled reasoning, protocol framing, and a fixed
+        safety margin.
+        """
+        provider = self.config.provider_name
+        history = count_messages_tokens(messages, provider)
+        reserve = (
+            self.config.generation_reserve_tokens
+            + self.config.context_safety_margin_tokens
+        )
+        budget = max(1, self.config.max_context_tokens - system_tokens - reserve)
+        physical = history / budget
+        stress = physical * self.config.context_stress_multiplier
+        required = (
+            stress >= self.config.context_stress_trigger
+            or physical >= 0.93
+        )
+        return ContextPressure(
+            history_tokens=history,
+            system_tokens=system_tokens,
+            safe_history_budget=budget,
+            physical_load=physical,
+            context_stress=stress,
+            maintenance_required=required,
+        )
+
+    def build_context_stress(
+        self, messages: List[Dict], system_tokens: int = 0
+    ) -> str:
         """
         Build the context stress signal for the system prompt.
 
@@ -373,13 +456,16 @@ class MemoryManager:
         per-task breakdown, updated every agentic step.
         """
         provider = self.config.provider_name
-        total = count_messages_tokens(messages, provider)
-        max_tok = self.config.max_context_tokens
-        pct = round(total / max_tok * 100) if max_tok else 0
+        pressure = self.measure_context(messages, system_tokens)
+        total = pressure.history_tokens
+        pct = round(pressure.context_stress * 100)
 
         tmap = find_task_map(messages)
 
-        lines = [f"Context: {total:,} / {max_tok:,} tokens ({pct}%)"]
+        lines = [
+            f"History: {total:,} / {pressure.safe_history_budget:,} safe tokens",
+            f"Context Stress: {pct}%",
+        ]
 
         if tmap:
             # Find the active task (highest position)
@@ -404,7 +490,7 @@ class MemoryManager:
                         f"  Task {pos}: {task_tokens:,} tokens{marker}"
                     )
 
-        if pct >= 70:
+        if pressure.maintenance_required:
             lines.append("⚡ Context stress elevated.")
 
         return "\n".join(lines)

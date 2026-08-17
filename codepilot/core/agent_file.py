@@ -65,7 +65,15 @@ class RuntimeConfig(BaseModel):
 
 
 class MemoryConfigModel(BaseModel):
+    # This is the model's advertised context window, not merely a preferred
+    # history size.  Set it explicitly for every production model.
     max_context_tokens: int = Field(default=120_000, gt=0)
+    context_stress_multiplier: float = Field(default=1.0, ge=0.0)
+    context_stress_trigger: float = Field(default=0.78, gt=0.0, le=1.0)
+    context_safety_margin_tokens: int = Field(default=1024, ge=0)
+    # Retained for configuration compatibility. Automatic global summaries are
+    # intentionally no longer used: semantic archival is performed by the
+    # agent during an explicit maintenance turn instead.
     global_summary_threshold: float = Field(default=0.9, gt=0.0, le=1.0)
     global_summary_max_tokens: int = Field(default=500, gt=0)
 

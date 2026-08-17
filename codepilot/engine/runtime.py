@@ -37,6 +37,7 @@ from ..core.context import ContextManager
 from ..core.memory import (
     MemoryManager, MemoryConfig,
     get_highest_task_position, TAG_USER_INPUT,
+    count_messages_tokens,
 )
 from ..core.prompt import PromptManager
 from ..core.session import BaseSession, create_session
@@ -213,6 +214,14 @@ class AsyncRuntime:
                 global_summary_threshold=_mem_cfg.global_summary_threshold,
                 global_summary_max_tokens=_mem_cfg.global_summary_max_tokens,
                 provider_name=self.config.model.provider.lower(),
+                context_stress_multiplier=_mem_cfg.context_stress_multiplier,
+                context_stress_trigger=_mem_cfg.context_stress_trigger,
+                context_safety_margin_tokens=_mem_cfg.context_safety_margin_tokens,
+                generation_reserve_tokens=(
+                    self.config.model.max_tokens
+                    + (self.config.model.thinking.budget_tokens
+                       if self.config.model.thinking.enabled else 0)
+                ),
             ),
             provider=self.provider,
         )
@@ -249,6 +258,20 @@ class AsyncRuntime:
         # ------------------------------------------------------------------ #
         self._cache_timer: Optional[threading.Timer] = None
         self._last_system_prompt: Optional[SystemPromptParts] = None
+        self._context_maintenance_active = False
+        self._context_maintenance_completed = False
+
+        # ------------------------------------------------------------------ #
+        #  Per-step system-prompt cache                                        #
+        # ------------------------------------------------------------------ #
+        # _build_system_prompt() is measured once per step by
+        # _maybe_start_context_maintenance() before the loop knows whether a
+        # maintenance turn is needed. When it isn't, the loop's own prompt
+        # build is identical (same context_stress="" content) — cached here
+        # so it isn't rendered and tiktoken-counted twice per step.
+        self._prompt_cache_step: Optional[int] = None
+        self._prompt_cache: Optional[SystemPromptParts] = None
+        self._prompt_cache_system_tokens: int = 0
 
 
 
@@ -278,9 +301,6 @@ class AsyncRuntime:
             self._raw_llm_generations = list(extra.get("raw_llm_generations", []))
             self._task_counter = get_highest_task_position(self.messages)
             self._session_bootstrapped = True
-
-        # Safety-net: global summarization if context is dangerously high
-        self.messages = await self._memory.process(self.messages)
 
         # MCP setup: connect servers and index tools on the very first run().
         # Deferred from __init__ because setup() is async.
@@ -323,6 +343,8 @@ class AsyncRuntime:
                     "content": changes,
                 })
                 self._watcher.snapshot_all()
+
+            await self._maybe_start_context_maintenance(step)
 
             # 2. Build system prompt (with context stress signal)
             system_prompt = self._build_system_prompt(step, self.config.runtime.max_steps)
@@ -481,6 +503,9 @@ class AsyncRuntime:
             # inline by the filesystem tools (write_file/edit_file) themselves
             # with failure-type-specific guidance. No global notice needed here.
             self._append_execution_result(execution_result)
+
+            if self._context_maintenance_completed:
+                self._finish_context_maintenance()
 
             # 7. task(finish=True) was called during execution → loop terminates.
             #    Emit trailing text (after all parsed blocks) NOW so the user's
@@ -752,10 +777,6 @@ class AsyncRuntime:
         they are part of the runtime's core protocol, not external workspace
         capabilities like filesystem, terminal, or semantic search.
         """
-        # Context management tools (always enabled)
-        self.registry.register("archive_context",       self._context_tools.archive_context)
-        self.registry.register("reveal_context",        self._context_tools.reveal_context)
-        self.registry.register("list_archived_context", self._context_tools.list_archived_context)
         # Runtime control
         self.registry.register("task",                  self._task_control)
 
@@ -763,6 +784,86 @@ class AsyncRuntime:
         if self.config.sub_agents.enabled:
             self.registry.register("spawn_subagent", self._subagent_tools.spawn_subagent)
             self.registry.register("await_subagent",  self._subagent_tools.await_subagent)
+
+    async def _maybe_start_context_maintenance(self, step: int) -> None:
+        """Start one same-agent archival turn when measured stress requires it.
+
+        Two outcomes when maintenance is required:
+          1. There are completed, unarchived tasks the agent can reason
+             about → hand it a forced maintenance turn (the common case).
+          2. There are none (single long-running task, or everything is
+             already archived) → nothing for the agent to judge, so fall
+             back to the emergency backstop (see MemoryManager.process)
+             instead of silently doing nothing while load keeps climbing.
+        """
+        if self._context_maintenance_active:
+            return
+
+        # This build is cached by _build_system_prompt() below and reused
+        # by the loop's own prompt build later this same step if maintenance
+        # turns out not to be needed — see the cache note in __init__.
+        prompt = self._build_system_prompt(step, self.config.runtime.max_steps)
+        system_tokens = self._prompt_cache_system_tokens
+        pressure = self._memory.measure_context(self.messages, system_tokens)
+        if not pressure.maintenance_required:
+            return
+
+        candidates = self._memory.build_archive_candidates(self.messages)
+        if not candidates:
+            before_stress = pressure.context_stress
+            before_tokens = count_messages_tokens(self.messages, self._memory.config.provider_name)
+            new_messages = await self._memory.process(self.messages, system_tokens)
+            if new_messages is self.messages:
+                return  # backstop declined — hard ceiling not actually crossed
+            self.messages = new_messages
+            after_tokens = count_messages_tokens(self.messages, self._memory.config.provider_name)
+            after_stress = self._memory.measure_context(self.messages, system_tokens).context_stress
+            self.hooks.emit(
+                EventType.CONTEXT_DROP,
+                before_pct=round(before_stress * 100),
+                after_pct=round(after_stress * 100),
+                tokens_saved=max(before_tokens - after_tokens, 0),
+                tasks_archived=[],
+            )
+            return
+
+        self._context_maintenance_active = True
+        self._context_maintenance_completed = False
+        self.registry.register("archive_context", self._context_tools.archive_context)
+        self.messages.append({
+            "role": _ROLE_USER,
+            "content": self._build_maintenance_instruction(pressure, candidates),
+        })
+        self.hooks.emit(
+            EventType.CONTEXT_MAINTENANCE_START,
+            stress_pct=round(pressure.context_stress * 100),
+            history_tokens=pressure.history_tokens,
+            safe_budget=pressure.safe_history_budget,
+            candidates=candidates,
+        )
+
+    @staticmethod
+    def _build_maintenance_instruction(pressure, candidates: str) -> str:
+        return (
+            "[INTERNAL CONTEXT MAINTENANCE]\n\n"
+            "Do NOT continue what you are doing. Do not perform normal task work.\n\n"
+            f"Current history: {pressure.history_tokens:,} / "
+            f"{pressure.safe_history_budget:,} safe tokens.\n"
+            f"Context Stress: {pressure.context_stress * 100:.1f}%.\n\n"
+            "Completed-task candidates:\n"
+            f"{candidates}\n\n"
+            "Decide whether completed tasks bear on the ACTIVE task. Archive every "
+            "completed task that can be removed without affecting the ACTIVE task, "
+            "and remove context noise. Use archive_context with dense factual "
+            "summaries preserving exact files, decisions, commands, outcomes, and "
+            "unresolved items. The ACTIVE task is protected."
+        )
+
+    def _finish_context_maintenance(self) -> None:
+        """Return to the stable normal tool set after a successful archive."""
+        self.registry.unregister("archive_context")
+        self._context_maintenance_active = False
+        self._context_maintenance_completed = False
 
     def _task_control(self, *, finish: bool = False):
         """Signal task lifecycle events.
@@ -796,7 +897,7 @@ class AsyncRuntime:
         if mcp_server_block:
             developer_prompt = developer_prompt + "\n\n" + mcp_server_block
 
-        return self.prompt_manager.render(
+        common_kwargs = dict(
             agent_name=self.config.name,
             agent_role=self.config.role or "",
             developer_prompt=developer_prompt,
@@ -805,8 +906,38 @@ class AsyncRuntime:
             codebase_snapshot=self.context_manager.get_formatted_snapshot(),
             shell_info=self._terminal_manager.get_prompt_info(),
             step_info=self._build_step_info(step, max_steps),
-            context_stress=self._memory.build_context_stress(self.messages),
             sub_agent_status=sub_agent_status,
+        )
+
+        if not self._context_maintenance_active:
+            # This exact render (context_stress="") is what
+            # _maybe_start_context_maintenance() needs for its pressure
+            # check, and — when maintenance turns out not to be needed —
+            # what the loop needs for the real inference call too. Cache
+            # per-step so the ~4-5k token prompt isn't rendered and
+            # tiktoken-counted twice for identical content.
+            if self._prompt_cache_step == step:
+                return self._prompt_cache
+            prompt = self.prompt_manager.render(context_stress="", **common_kwargs)
+            self._prompt_cache_step = step
+            self._prompt_cache = prompt
+            self._prompt_cache_system_tokens = self._memory.count_prompt_tokens(prompt.full)
+            return prompt
+
+        # Maintenance is active this step: build the real stress-annotated
+        # prompt. system_tokens comes from this step's own context_stress=""
+        # measurement (cached above, taken during the pressure check that
+        # triggered maintenance in the first place) — no extra render needed
+        # to get it, only one final render with the real stress text.
+        if self._prompt_cache_step != step:
+            base = self.prompt_manager.render(context_stress="", **common_kwargs)
+            self._prompt_cache_step = step
+            self._prompt_cache_system_tokens = self._memory.count_prompt_tokens(base.full)
+        return self.prompt_manager.render(
+            context_stress=self._memory.build_context_stress(
+                self.messages, system_tokens=self._prompt_cache_system_tokens,
+            ),
+            **common_kwargs,
         )
 
     @staticmethod

@@ -86,7 +86,7 @@ class ToolRegistry:
             "### 📁 Filesystem & Workspace Tools": ["view_file", "write_file", "edit_file", "find", "semantic_search"],
             "### 💻 Terminal & Execution Tools": ["execute", "read_output", "send_input", "terminate_terminal"],
             "### 🔌 MCP Tools": ["mcp"],
-            "### 🧠 Context & Memory Management": ["archive_context", "reveal_context", "list_archived_context"],
+            "### 🧠 Context Maintenance": ["archive_context"],
             "### 🤖 Sub-Agent Delegation": ["spawn_subagent", "await_subagent"],
             "### ⚙️ Runtime Control & Interaction": ["ask_user", "task"],
         }

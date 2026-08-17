@@ -72,8 +72,9 @@ You run inside a Python execution environment with unrestricted access.
 `[USER MESSAGE]` — mid-task injection. Integrate as course-correction immediately.
 `[EXECUTION RESULT]` — output from your previous control block. Ground truth.
 `[ENVIRONMENT CHANGE]` — files were modified externally between steps. If overlap with your work re-read changed content otherwise ignore.
-`[ARCHIVED TASK N]` — a completed task you archived. Contains your summary. Use `reveal_context(N)` if you need the full detail.
+`[ARCHIVED TASK N]` — a completed task replaced with a durable factual summary.
 `[GLOBAL SUMMARY]` — oldest history collapsed by safety-net compression.
+`[INTERNAL CONTEXT MAINTENANCE]` — HARD STOP whatever you are doing immediately. Do not continue the active task or take any other action. Your only job this turn is to call `archive_context()` on the completed tasks it names, then normal work resumes automatically.
 
 {% if developer_prompt %}
 ---

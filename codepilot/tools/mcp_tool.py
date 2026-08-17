@@ -79,10 +79,21 @@ class MCPTools:
 
         Called once at the start of the first run() call (deferred from
         __init__ because __init__ is synchronous).
+
+        Fault isolation: one misconfigured or unreachable server must not
+        take down the entire agent. Each server is connected inside its own
+        try/except; a failure is reported via a RUNTIME_ERROR hook naming
+        the server and the exact underlying exception, and setup() moves on
+        to the remaining servers. Previously a single bad server (wrong URL,
+        wrong auth, a transport-level HTTP error, etc.) raised straight out
+        of setup() — called before the agentic loop's own try/except even
+        starts — so it crashed the whole run() call with a raw, unattributed
+        exception. Whatever wraps runtime.run() then had no way to tell that
+        failure apart from an actual LLM provider error.
         """
         import asyncio
         self._main_loop = asyncio.get_running_loop()
-        
+
         servers: list[dict] = self._cfg.get("servers", [])
         for srv in servers:
             name           = srv.get("name", "unknown")
@@ -91,20 +102,36 @@ class MCPTools:
             api_key_param  = srv.get("api_key_param")
 
             if not url:
+                self._report_setup_failure(name, url, "Missing required 'url' field — server skipped.")
                 continue
 
-            # Resolve API key from env
             api_key = os.environ.get(api_key_env) if api_key_env else None
+            if api_key_env and not api_key:
+                self._report_setup_failure(
+                    name, url,
+                    f"'api_key_env: {api_key_env}' is set but that environment "
+                    "variable is empty or unset — connecting without an API key.",
+                )
 
-            # Connect and index (will raise exception if server is unreachable or key is invalid)
-            tools = await self._registry.register(
-                server_url=url,
-                api_key=api_key,
-                api_key_param=api_key_param,
-            )
-            await self._store.index_tools(tools)
+            try:
+                tools = await self._registry.register(
+                    server_url=url,
+                    api_key=api_key,
+                    api_key_param=api_key_param,
+                )
+                await self._store.index_tools(tools)
+            except Exception as exc:
+                self._report_setup_failure(name, url, f"{type(exc).__name__}: {exc}")
+                continue
 
         self._ready = True
+
+    def _report_setup_failure(self, name: str, url: str, message: str) -> None:
+        """Surface a per-server setup failure without aborting the whole runtime."""
+        from ..engine.hooks import EventType
+        full = f"[MCP setup] Server '{name}' ({url or 'no url configured'}) — {message}"
+        if self._runtime:
+            self._runtime.hooks.emit(EventType.RUNTIME_ERROR, error=full)
 
     # ------------------------------------------------------------------
     #  The meta-tool

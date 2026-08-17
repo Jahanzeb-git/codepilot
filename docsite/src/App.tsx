@@ -234,7 +234,7 @@ function Footer() {
           </a>{" "}
           and the community.
         </span>
-        <span>CodePilot v0.9.19 · MIT License</span>
+        <span>CodePilot v0.9.20 · MIT License</span>
       </div>
     </>
   );

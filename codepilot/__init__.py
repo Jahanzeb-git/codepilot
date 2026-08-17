@@ -32,7 +32,7 @@ Observable hooks
     runtime.run("Refactor the database module.")
 """
 
-__version__ = "0.9.19"
+__version__ = "0.9.20"
 __author__  = "CodePilot"
 
 # Core entry point
@@ -67,6 +67,7 @@ from .engine.hooks import (
     on_user_message_queued,
     on_user_message_injected,
     on_runtime_error,
+    on_context_maintenance_start,
     on_context_drop,
     on_subagent_spawn,
     on_subagent_message,
@@ -101,6 +102,7 @@ __all__ = [
     "on_user_message_queued",
     "on_user_message_injected",
     "on_runtime_error",
+    "on_context_maintenance_start",
     "on_context_drop",
     "on_subagent_spawn",
     "on_subagent_message",

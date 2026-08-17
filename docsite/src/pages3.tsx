@@ -336,7 +336,7 @@ export function PageContextArchiving() {
       <Section title="archive_context">
         <p>
           Compresses a completed task sequence, replacing the original detailed messages with a concise custom summary.
-          This reduces token usage and frees context memory without breaking cached prefix alignment.
+          This reduces token usage after a runtime-triggered maintenance turn.
         </p>
         <Code lang="python">{`# LLM control block:
 archive_context(position=2, summary="Completed database migration setup. Files created: migrations/001_init.py")`}</Code>
@@ -349,17 +349,6 @@ archive_context(position=2, summary="Completed database migration setup. Files c
         />
       </Section>
 
-      <Section title="reveal_context">
-        <p>Retrieves and displays the original, un-summarized message details from an archived task for reference.</p>
-        <Code lang="python">{`# LLM control block:
-reveal_context(position=2)`}</Code>
-      </Section>
-
-      <Section title="list_archived_context">
-        <p>Returns a summary list of all currently archived tasks in the session history.</p>
-        <Code lang="python">{`# LLM control block:
-list_archived_context()`}</Code>
-      </Section>
     </>
   );
 }

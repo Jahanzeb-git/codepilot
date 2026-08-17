@@ -68,7 +68,7 @@ Copyright (c) 2026 Jahanzeb Ahmed. Licensed under the MIT License.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Optional
 
 from .mcp import MCPClient, MCPTool, ServerInfo
 

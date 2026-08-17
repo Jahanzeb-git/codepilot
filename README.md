@@ -25,7 +25,7 @@ CodePilot is a Python library for embedding autonomous software-engineering agen
 
 It is intentionally **not** a hosted chatbot UI. The package gives applications a runtime: model inference, tool execution, file editing, terminal control, persistence, hooks, and completion semantics. You bring the product surface, auth model, sandbox, database, and deployment strategy.
 
-**Version:** `0.9.19`
+**Version:** `0.9.20`
 
 Full user documentation lives at: **https://Jahanzeb-git.github.io/codepilot/**
 

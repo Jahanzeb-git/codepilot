@@ -7,11 +7,8 @@ Description:
 Agent-driven context management tools for the CodePilot runtime.
 
 Architectural Notes:
-Exposes three tools to the agent sandbox: archive_context, reveal_context,
-and list_archived_context. These allow the agent to actively manage its own
-context window during long-running tasks by replacing completed task messages
-with summaries, while preserving the originals in a ContextArchive for
-later retrieval without disrupting the LLM's cache state.
+Exposes the temporary archive_context maintenance tool. It is registered only
+during a runtime-triggered context-maintenance turn.
 
 Copyright (c) 2026 Jahanzeb Ahmed.
 Licensed under the MIT License.
@@ -26,13 +23,14 @@ from ..core.memory import (
     count_messages_tokens,
     find_task_map,
 )
+from ..engine.hooks import EventType
 
 if TYPE_CHECKING:
     from ..engine.runtime import Runtime
 
 
 class ContextTools:
-    """Provides archive_context, reveal_context, list_archived_context."""
+    """Provides context-maintenance tools when the runtime enables them."""
 
     def __init__(self, runtime: "Runtime"):
         self.runtime = runtime
@@ -47,22 +45,16 @@ class ContextTools:
         summary: Union[str, List[str], None] = None,
         task: Union[int, Tuple[int, ...], None] = None,
     ) -> str:
-        """Archive completed task context, replacing it with your summary.
+        """Replace one or more completed tasks with their factual summaries.
 
-        Context management guidelines:
-        - Check context stress each step as a pressure signal.
-        - Archive at most once per task, never repeatedly. Never as an
-          opening move.
-        - Prioritize old completed tasks with no bearing on current work.
-        - Immediate preceding tasks likely share context — don't archive
-          speculatively.
-        - Low stress: skip archiving entirely. High stress: act, but you
-          judge what's load-bearing.
-        - Summaries are your ONLY memory of that task (unless you call
-          reveal_context). Pack densely: exact files, commands, decisions,
-          errors, outcomes. Reading it later must tell you exactly what
-          happened, where, and why — so you can judge whether revealing
-          is needed. Never be vague.
+        Use only during an internal context-maintenance turn. Summaries must
+        preserve exact files, commands, decisions, outcomes, and unresolved
+        issues needed by the active task. The active task cannot be archived.
+
+        Positions are validated and processed independently — a bad position
+        in a batch does NOT block the valid ones in the same call. The result
+        always reports exactly what happened, per position, so you can
+        correct only what failed on your next call.
 
         Args:
             position: Task position (int) or tuple of positions.
@@ -74,6 +66,7 @@ class ContextTools:
         messages = self.runtime.messages
         memory   = self.runtime._memory
         provider = memory.config.provider_name
+        system_tokens = getattr(self.runtime, "_prompt_cache_system_tokens", 0)
 
         if position is not None and task is not None:
             return "ERROR: Provide only one of 'position' or 'task', not both."
@@ -94,152 +87,92 @@ class ContextTools:
                 f"Got {len(positions)} positions and {len(summaries)} summaries."
             )
 
-        # Build current task map
+        before_pressure = memory.measure_context(messages, system_tokens)
+
         tmap = find_task_map(messages)
         if not tmap:
-            return "ERROR: No tasks found in context."
+            return "ERROR: No tasks found in context. Nothing was archived."
 
         active_pos = max(tmap.keys())
 
-        # Validate all positions before modifying anything
-        for pos in positions:
+        # Validate each position independently — invalid ones are recorded
+        # as failures and skipped, never block the valid ones in the batch.
+        succeeded: List[Tuple[int, int]] = []   # (position, net_tokens_saved)
+        failed:    List[Tuple[int, str]] = []   # (position, reason)
+        plan: List[Tuple[int, str]] = []
+
+        seen = set()
+        for pos, summ in zip(positions, summaries):
+            if pos in seen:
+                failed.append((pos, "duplicate position in this call — ignored"))
+                continue
+            seen.add(pos)
             if pos not in tmap:
-                return f"ERROR: Task {pos} not found in context."
+                failed.append((pos, "not found in context"))
+                continue
             if pos == active_pos:
-                return f"ERROR: Cannot archive Task {pos} — it is the active task."
+                failed.append((pos, "is the active task — cannot be archived"))
+                continue
             _, _, is_archived = tmap[pos]
             if is_archived:
-                return (
-                    f"ERROR: Task {pos} is already archived. "
-                    f"Use reveal_context({pos}) to restore it first."
-                )
-
-        from ..core.memory import count_tokens
-        sys_tokens = 0
-        sys_prompt = self.runtime._last_system_prompt
-        if sys_prompt:
-            sys_tokens = count_tokens(sys_prompt.full, provider)
-
-        old_total = count_messages_tokens(messages, provider) + sys_tokens
+                failed.append((pos, "already archived"))
+                continue
+            plan.append((pos, summ))
 
         # Process from highest position first so message indices don't shift
-        total_saved = 0
-        for pos, summ in sorted(
-            zip(positions, summaries), key=lambda x: x[0], reverse=True
-        ):
+        # for the remaining ones still to be processed in this call.
+        for pos, summ in sorted(plan, key=lambda x: x[0], reverse=True):
+            tmap = find_task_map(messages)  # re-map after each mutation
+            if pos not in tmap:
+                failed.append((pos, "position shifted out of range mid-call — retry it separately"))
+                continue
+
             start, end, _ = tmap[pos]
             original_msgs = messages[start:end]
-
-            # Store originals in archive
             memory.archive.archive(pos, original_msgs)
 
-            # Count gross tokens saved
             gross_saved = count_messages_tokens(original_msgs, provider)
-
-            # Replace with single archived message
             archived_msg = {
                 "role": "user",
                 "content": f"{TAG_ARCHIVED_TASK} {pos}]\n{summ}",
             }
             messages[start:end] = [archived_msg]
-
-            # Calculate net savings
             net_saved = gross_saved - count_messages_tokens([archived_msg], provider)
-            total_saved += net_saved
+            succeeded.append((pos, net_saved))
 
-            # Rebuild task map after modification for next iteration
-            tmap = find_task_map(messages)
+        total_saved = sum(saved for _, saved in succeeded)
+        new_total = count_messages_tokens(messages, provider)
+        after_pressure = memory.measure_context(messages, system_tokens)
 
-        # Report result
-        new_total = count_messages_tokens(messages, provider) + sys_tokens
-        max_tok = memory.config.max_context_tokens
-        new_pct = round(new_total / max_tok * 100) if max_tok else 0
-
-        before_pct = round(old_total / max_tok * 100) if max_tok else 0
-
-        archived_str = ", ".join(str(p) for p in sorted(positions))
-        result_msg = (
-            f"Archived Task(s) {archived_str}. "
-            f"Context reduced by ~{total_saved:,} tokens. "
-            f"({new_total:,} / {max_tok:,} — {new_pct}%)"
+        lines: List[str] = []
+        if succeeded:
+            done = ", ".join(f"Task {p} (-{s:,} tok)" for p, s in sorted(succeeded))
+            lines.append(f"Archived: {done}.")
+        if failed:
+            skipped = "; ".join(f"Task {p}: {reason}" for p, reason in sorted(failed))
+            lines.append(f"Skipped (not archived): {skipped}.")
+        lines.append(
+            f"History: ~{new_total:,} tokens (saved ~{total_saved:,}). "
+            f"Context Stress: {before_pressure.context_stress * 100:.1f}% -> "
+            f"{after_pressure.context_stress * 100:.1f}%."
         )
 
-        # Emit CONTEXT_DROP event so CLI/UI can render a progress message
-        from ..engine.hooks import EventType
-        self.runtime.hooks.emit(
-            EventType.CONTEXT_DROP,
-            before_pct=before_pct,
-            after_pct=new_pct,
-            tokens_saved=total_saved,
-            tasks_archived=sorted(positions),
-        )
-
-        return result_msg
-
-    def reveal_context(self, position: int) -> str:
-        """Read a previously archived task's full context as text.
-
-        Returns the original detailed messages as a string so you can
-        read them exactly as they occurred, without forcefully injecting
-        them back into the historical timeline (which would break context caching).
-
-        Args:
-            position: Task position (int) to reveal.
-        """
-        memory = self.runtime._memory
-
-        if not memory.archive.is_archived(position):
-            return f"ERROR: Task {position} is not archived. Nothing to reveal."
-
-        # Retrieve a copy of the originals
-        original_msgs = memory.archive.reveal(position)
-        
-        # Build a readable text output
-        lines = [f"=== DETAILED HISTORY FOR TASK {position} ==="]
-        for msg in original_msgs:
-            role = str(msg.get("role", "")).upper()
-            content = str(msg.get("content", ""))
-            
-            lines.append(f"\n[{role}]")
-            lines.append(content)
-            
-        lines.append(f"\n=== END OF TASK {position} HISTORY ===")
-        return "\n".join(lines)
-
-    def list_archived_context(self) -> str:
-        """List all archived tasks with summaries and token savings.
-
-        Use in long sessions to recall what was archived earlier.
-        """
-        memory   = self.runtime._memory
-        provider = memory.config.provider_name
-        all_archived = memory.archive.list_all()
-
-        if not all_archived:
-            return "No archived tasks."
-
-        lines = ["Archived tasks:"]
-        for pos in sorted(all_archived.keys()):
-            saved_tokens = memory.archive.token_count(pos, provider)
-
-            # Find summary from context
-            tmap = find_task_map(self.runtime.messages)
-            summary = "?"
-            if pos in tmap:
-                start, _, is_archived = tmap[pos]
-                if is_archived:
-                    content = self.runtime.messages[start].get("content", "")
-                    # Extract summary after "[ARCHIVED TASK N]\n"
-                    parts = content.split("\n", 1)
-                    summary = parts[1] if len(parts) > 1 else content
-
-            # Truncate summary for display
-            if len(summary) > 150:
-                summary = summary[:147] + "..."
-
-            lines.append(
-                f"  Task {pos} (~{saved_tokens:,} tokens saved): "
-                f"\"{summary}\""
+        if succeeded:
+            self.runtime.hooks.emit(
+                EventType.CONTEXT_DROP,
+                before_pct=round(before_pressure.context_stress * 100),
+                after_pct=round(after_pressure.context_stress * 100),
+                tokens_saved=total_saved,
+                tasks_archived=[p for p, _ in succeeded],
             )
+            # Real progress was made — return to normal work. The runtime
+            # will remeasure stress before the next non-maintenance step.
+            lines.append("The runtime will remeasure Context Stress before normal work resumes.")
+            self.runtime._context_maintenance_completed = True
+        else:
+            # Nothing succeeded — stay in maintenance mode so the next step
+            # can correct the failures above using this exact feedback,
+            # instead of silently returning to work at unresolved pressure.
+            lines.append("Nothing was archived. Still in context maintenance — correct the above and call archive_context() again.")
 
         return "\n".join(lines)

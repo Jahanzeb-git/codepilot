@@ -86,9 +86,9 @@ agent:
                 runtime = AsyncRuntime(str(agent_file))
 
             registered = runtime.registry.as_sandbox_dict()
-            self.assertIn("archive_context", registered)
-            self.assertIn("reveal_context", registered)
-            self.assertIn("list_archived_context", registered)
+            self.assertNotIn("archive_context", registered)
+            self.assertNotIn("reveal_context", registered)
+            self.assertNotIn("list_archived_context", registered)
             self.assertNotIn("semantic_search", registered)
 
     def test_context_tools_remain_registered_when_semantic_search_is_valid(self) -> None:
@@ -126,9 +126,9 @@ agent:
 
             registered = runtime.registry.as_sandbox_dict()
             self.assertIn("semantic_search", registered)
-            self.assertIn("archive_context", registered)
-            self.assertIn("reveal_context", registered)
-            self.assertIn("list_archived_context", registered)
+            self.assertNotIn("archive_context", registered)
+            self.assertNotIn("reveal_context", registered)
+            self.assertNotIn("list_archived_context", registered)
 
     def test_parser_errors_are_returned_to_the_agent_for_recovery(self) -> None:
         malformed_response = """I'll write the file now.

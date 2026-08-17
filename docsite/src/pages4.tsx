@@ -117,20 +117,19 @@ export function PageContextMemory() {
     <>
       <PageHeader
         title="Context Memory Management"
-        subtitle="CodePilot uses agent-driven context control with a global safety net."
+        subtitle="CodePilot uses predictive context stress and a same-agent maintenance turn."
       />
 
       <Section title="How it works">
         <ol style={{ paddingLeft: 20, color: "var(--text-soft)", lineHeight: 2 }}>
-          <li>The agent can explicitly archive finished tasks using <code>archive_context(...)</code>. The original task messages are stored internally and replaced with <code>[ARCHIVED TASK N]</code> plus your summary.</li>
-          <li>The agent can restore any archived task using <code>reveal_context(N)</code>.</li>
-          <li>A global safety net runs at the start of each <code>run()</code>: if context exceeds <code>global_summary_threshold * max_context_tokens</code>, older history is collapsed into one <code>[GLOBAL SUMMARY]</code> message.</li>
+          <li>The runtime measures the rendered system prompt, conversation history, and generation reserve before each inference.</li>
+          <li>When Context Stress crosses its configured threshold, the same agent receives a maintenance turn and temporary <code>archive_context(...)</code> access.</li>
+          <li>The agent decides semantic relevance; the active task is protected and archived tasks remain compact factual summaries.</li>
         </ol>
       </Section>
 
       <Section title="What the LLM sees in long sessions">
-        <Code lang="text">{`[GLOBAL SUMMARY]            <- oldest history compressed by safety net
-[ARCHIVED TASK 3]           <- explicit archive summary created by agent
+        <Code lang="text">{`[ARCHIVED TASK 3]           <- factual completed-task summary
 [ARCHIVED TASK 4]           <- explicit archive summary created by agent
 [Task 5][USER INPUT] ...    <- active task, raw`}</Code>
       </Section>
@@ -151,19 +150,16 @@ archive_context(
     ]
 )
 
-# Reveal archived task content
-reveal_context(3)
-
-# List archived tasks with token savings
-list_archived_context()`}</Code>
+`}</Code>
       </Section>
 
       <Section title="Configuration (agent.yaml)">
         <Code lang="yaml">{`agent:
   memory:
     max_context_tokens: 120000
-    global_summary_threshold: 0.9
-    global_summary_max_tokens: 500`}</Code>
+    context_stress_multiplier: 1.0
+    context_stress_trigger: 0.78
+    context_safety_margin_tokens: 1024`}</Code>
       </Section>
     </>
   );

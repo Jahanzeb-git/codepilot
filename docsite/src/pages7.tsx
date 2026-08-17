@@ -111,15 +111,9 @@ runtime.registry           # ToolRegistry - inspect registered tools`}</Code>
         <p>Pauses execution and prompts the user for input. Fires the <code>ASK_USER</code> hook.</p>
       </Section>
 
-      <Section title="archive_context() / reveal_context() / list_archived_context()">
+      <Section title="archive_context()">
         <Code lang="python">{`archive_context(position=None, summary=None, task=None)
-# Archive completed task context with your summary. task is an alias for position.
-
-reveal_context(position)
-# Return a previously archived task's full original context as text.
-
-list_archived_context()
-# List archived tasks with summary previews and estimated token savings.`}</Code>
+# Available only during runtime-triggered context maintenance. task is an alias for position.`}</Code>
       </Section>
 
       <Section title="find()">

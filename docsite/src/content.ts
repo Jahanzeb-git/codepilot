@@ -218,15 +218,15 @@ export const sections: DocSection[] = [
     title: "Long sessions can archive context instead of drowning in it.",
     eyebrow: "Context Memory",
     description:
-      "The memory manager tracks task boundaries and lets agents archive completed task context with summaries. Archived tasks stay visible as compact summaries and can be revealed later.",
+      "The memory controller measures the complete prompt budget and temporarily asks the agent to archive irrelevant completed-task context when stress rises.",
     icon: TimerReset,
     points: [
-      "archive_context stores a summary for one or more completed tasks.",
-      "reveal_context restores the full original content of an archived task.",
-      "list_archived_context shows summaries and estimated token savings.",
+      "archive_context is exposed only during an internal maintenance turn.",
+      "Archived tasks remain as compact factual summaries.",
+      "The active task is always protected from archiving.",
     ],
     code:
-      "archive_context(position=2, summary='Added FastAPI routes and SQLAlchemy models.')\nreveal_context(2)\nlist_archived_context()",
+      "archive_context(position=2, summary='Added FastAPI routes and SQLAlchemy models.')",
   },
   {
     id: "workspace-change",
