@@ -24,7 +24,6 @@ export type PageId =
   | "context-archiving"
   | "user-interaction"
   | "mcp-support"
-  | "completion-block"
   | "workspace-changes"
   | "chat-mode"
   | "custom-tools"
@@ -57,7 +56,6 @@ export const navGroups: NavGroup[] = [
       { id: "code-as-interface", label: "Code-as-Interface" },
       { id: "streaming", label: "Streaming" },
       { id: "multi-turn", label: "Multi-turn Execution" },
-      { id: "completion-block", label: "Completion Block" },
       { id: "chat-mode", label: "Chat Mode" },
       { id: "workspace-changes", label: "Workspace Changes" },
     ],

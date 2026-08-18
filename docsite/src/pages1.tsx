@@ -10,7 +10,7 @@ export function PageIntroduction({ nav }: { nav: (p: PageId) => void }) {
         <div className="hero-flex">
           {/* ── Left: text content ── */}
           <div className="hero-content">
-            <div className="hero-eyebrow">CodePilot v0.9.20</div>
+            <div className="hero-eyebrow">CodePilot v0.9.21</div>
             <h1 className="hero-title">Embeddable Autonomous<br />Agent Framework</h1>
             <p className="hero-desc">
               CodePilot is an <strong>Embeddable Autonomous Agent (EAA)</strong> framework for software engineering tasks.
@@ -85,8 +85,8 @@ export function PageIntroduction({ nav }: { nav: (p: PageId) => void }) {
       <Section title="What is CodePilot?">
         <p>
           CodePilot uses a <strong>code-as-interface</strong> runtime: the model streams natural language to the user,
-          writes executable Python in a <code>codepilot</code> block, side-loads file payloads when needed, and
-          explicitly terminates with a <code>completion</code> block.
+          writes executable Python in a <code>codepilot</code> control block, side-loads file payloads when needed, and
+          completes work by calling <code>task(finish=True)</code> from the control block.
         </p>
         <p>
           Instead of forcing the model through brittle JSON schemas or generic function-calling wrappers, the model
@@ -335,9 +335,8 @@ if __name__ == "__main__":
       </Section>
 
       <Callout>
-        <code>run()</code> returns when the agent emits a completion block, hits <code>max_steps</code>, or is
-        aborted. The return value is the completion block text, or <code>None</code> if the loop ended for any
-        other reason.
+        <code>run()</code> returns when the agent calls <code>task(finish=True)</code>, hits <code>max_steps</code>, or is
+        aborted. The return value is the agent's final natural-language text, or <code>None</code> if it ended another way.
       </Callout>
     </>
   );
@@ -369,6 +368,13 @@ agent:
     thinking:                       # Anthropic only: extended reasoning
       enabled: true
       budget_tokens: 8000
+
+  memory:
+    # The selected model's total input + output context window.
+    max_context_tokens: 128000
+    context_safety_margin_tokens: 1024
+    context_stress_multiplier: 1.0
+    context_stress_trigger: 0.78
 
   runtime:
     work_dir: "./workspace"         # where the agent reads/writes files
@@ -442,16 +448,34 @@ agent:
         <code>tools:</code> block entirely, the runtime falls back to its default built-in tool set.
       </Callout>
 
-      <Section title="memory block (optional)">
-        <Code lang="yaml">{`agent:
-  memory:
-    # Advertised context window for the selected model (set explicitly)
-    max_context_tokens: 120000
-
-    # Higher values trigger earlier proactive maintenance
-    context_stress_multiplier: 1.0
-    context_stress_trigger: 0.78
-    context_safety_margin_tokens: 1024`}</Code>
+      <Section title="Context memory defaults">
+        <p>
+          When a verified exact model profile is available, CodePilot fills an omitted <code>max_context_tokens</code>
+          and uses its recommended response cap. For an unrecognised model, the AgentFile must set
+          <code>max_context_tokens</code> explicitly; CodePilot never guesses capacity from a provider name.
+        </p>
+        <Code lang="text">{`safe history = max_context_tokens
+             - rendered system prompt
+             - model.max_tokens
+             - thinking.budget_tokens (when enabled)
+             - context_safety_margin_tokens`}</Code>
+        <Table
+          headers={["Provider / model", "Context window", "Default max_tokens"]}
+          rows={[
+            [<><code>openai/gpt-4o</code></>, "128,000", <code>8,192</code>],
+            [<><code>anthropic/claude-fable-5</code>, <code>anthropic/claude-opus-5</code>, <code>anthropic/claude-sonnet-5</code></>, "1,000,000", <code>8,192</code>],
+            [<><code>anthropic/claude-haiku-4-5</code></>, "200,000", <code>8,192</code>],
+            [<><code>alibaba/qwen-max</code></>, "32,768", <code>8,192</code>],
+            [<><code>deepseek/deepseek-chat</code>, <code>deepseek/deepseek-reasoner</code></>, "65,536", <code>8,192</code>],
+            [<><code>alibaba/deepseek-v4-flash</code>, <code>alibaba/deepseek-v4-pro</code>, <code>deepseek/deepseek-v4-flash</code>, <code>deepseek/deepseek-v4-pro</code></>, "1,000,000", <code>8,192</code>],
+          ]}
+        />
+        <Callout>
+          The profile registry is deliberately small and exact because provider model limits change independently. For every other model,
+          set its documented total context window explicitly. Keep <code>context_safety_margin_tokens: 1024</code>, <code>context_stress_multiplier: 1.0</code>, and
+          <code>context_stress_trigger: 0.78</code> unless you have measured a reason to tune them. Do not set
+          <code>model.max_tokens</code> higher than the response you actually need.
+        </Callout>
       </Section>
     </>
   );

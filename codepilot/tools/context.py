@@ -63,26 +63,47 @@ class ContextTools:
 
         Cannot archive the currently active task.
         """
+        self.runtime.hooks.emit(
+            EventType.TOOL_CALL,
+            tool="archive_context",
+            args={"position": position if position is not None else task, "summary": summary},
+        )
+
+        def _finish(result: str) -> str:
+            # exec() discards a bare top-level call's return value — a call
+            # like `archive_context(...)` with no print()/assignment around
+            # it in the generated control block never reaches the agent
+            # unless the result is explicitly pushed into the execution
+            # buffer here, the same way every other tool (view_file,
+            # write_file, mcp, ...) already does via _append_execution +
+            # TOOL_RESULT. This was previously just `return result`, which
+            # meant the agent NEVER saw whether archiving succeeded, failed,
+            # or partially failed — it silently continued as if nothing
+            # happened, on every single call.
+            self.runtime._append_execution(result)
+            self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="archive_context", result=result)
+            return result
+
         messages = self.runtime.messages
         memory   = self.runtime._memory
         provider = memory.config.provider_name
         system_tokens = getattr(self.runtime, "_prompt_cache_system_tokens", 0)
 
         if position is not None and task is not None:
-            return "ERROR: Provide only one of 'position' or 'task', not both."
+            return _finish("ERROR: Provide only one of 'position' or 'task', not both.")
         if position is None:
             position = task
         if position is None:
-            return "ERROR: Missing required argument: 'position' (or alias 'task')."
+            return _finish("ERROR: Missing required argument: 'position' (or alias 'task').")
         if summary is None:
-            return "ERROR: Missing required argument: 'summary'."
+            return _finish("ERROR: Missing required argument: 'summary'.")
 
         # Normalise inputs
         positions = (position,) if isinstance(position, int) else tuple(position)
         summaries = [summary] if isinstance(summary, str) else list(summary)
 
         if len(positions) != len(summaries):
-            return (
+            return _finish(
                 "ERROR: Number of positions and summaries must match. "
                 f"Got {len(positions)} positions and {len(summaries)} summaries."
             )
@@ -91,7 +112,7 @@ class ContextTools:
 
         tmap = find_task_map(messages)
         if not tmap:
-            return "ERROR: No tasks found in context. Nothing was archived."
+            return _finish("ERROR: No tasks found in context. Nothing was archived.")
 
         active_pos = max(tmap.keys())
 
@@ -175,4 +196,4 @@ class ContextTools:
             # instead of silently returning to work at unresolved pressure.
             lines.append("Nothing was archived. Still in context maintenance — correct the above and call archive_context() again.")
 
-        return "\n".join(lines)
+        return _finish("\n".join(lines))

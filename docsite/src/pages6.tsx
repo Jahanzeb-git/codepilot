@@ -233,7 +233,7 @@ def _push(event: dict):
     asyncio.get_event_loop().call_soon_threadsafe(_event_queue.put_nowait, event)
 
 
-# Stream reasoning text and completion block content token by token
+# Stream natural-language agent output token by token
 runtime.hooks.register(EventType.STREAM,
     lambda text, **_: _push({"type": "stream", "text": text}))
 

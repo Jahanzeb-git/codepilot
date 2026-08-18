@@ -5,7 +5,7 @@ import {
   PageIntroduction, PageInstallation, PageQuickStart, PageModelsProviders, PageAgentFile,
   PageHowItWorks, PageBasicUsage, PageCodeAsInterface, PageStreaming, PageMultiTurn,
   PageTerminalTools, PageFileHandling, PageSearchTools, PageContextArchiving, PageUserInteraction,
-  PageCompletionBlock, PageChatMode, PageWorkspaceChanges, PageMcpSupport,
+  PageChatMode, PageWorkspaceChanges, PageMcpSupport,
   PageSessionPersistence, PageContextMemory, PageResumingSession, PageResettingSession,
   PageHooks, PagePermissionGating, PageMidTaskInjection, PageMultiOperation,
   PageCustomTools, PageAborting, PageCLIPattern, PageWebServer, PageAPIReference,
@@ -71,7 +71,6 @@ export function App() {
     "context-archiving": <PageContextArchiving />,
     "user-interaction": <PageUserInteraction />,
     "mcp-support": <PageMcpSupport />,
-    "completion-block": <PageCompletionBlock />,
     "chat-mode": <PageChatMode />,
     "workspace-changes": <PageWorkspaceChanges />,
     "session-persistence": <PageSessionPersistence />,
@@ -197,7 +196,6 @@ function Footer() {
           <a href="#how-it-works">How It Works</a>
           <a href="#code-as-interface">Code-as-Interface</a>
           <a href="#streaming">Streaming</a>
-          <a href="#completion-block">Completion Block</a>
         </div>
         <div className="footer-col">
           <div className="footer-col-title">Sessions</div>
@@ -234,7 +232,7 @@ function Footer() {
           </a>{" "}
           and the community.
         </span>
-        <span>CodePilot v0.9.20 · MIT License</span>
+        <span>CodePilot v0.9.21 · MIT License</span>
       </div>
     </>
   );

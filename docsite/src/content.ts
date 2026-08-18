@@ -3,7 +3,6 @@ import {
   Activity,
   Boxes,
   Cable,
-  CheckCircle2,
   Cloud,
   Code2,
   Database,
@@ -84,7 +83,6 @@ export const navGroups: NavGroup[] = [
       { id: "events", label: "Events" },
       { id: "search", label: "Search Tools" },
       { id: "cli", label: "CLI Pattern" },
-      { id: "completion", label: "Completion Block" },
     ],
   },
 ];
@@ -145,10 +143,10 @@ export const sections: DocSection[] = [
       "Natural language before the control block can stream to the user immediately.",
       "Only the fenced codepilot control block executes; ordinary Python markdown is display-only.",
       "Execution results are fed back to the model as the next user turn.",
-      "The loop stops on a completion block, max_steps, or abort.",
+      "The loop stops when task(finish=True) runs, max_steps is reached, or it is aborted.",
     ],
     code:
-      "```codepilot\nread_file('routes/profile.py', start_line=35, end_line=65)\n```\n\n```completion\nDone. The task is complete.\n```",
+      "```codepilot\nread_file('routes/profile.py', start_line=35, end_line=65)\ntask(finish=True)\n```",
   },
   {
     id: "tools",
@@ -171,12 +169,12 @@ export const sections: DocSection[] = [
     title: "Streaming keeps the interface alive while tools wait.",
     eyebrow: "Streaming",
     description:
-      "When stream=True, the assistant's pre-tool explanation streams token by token. The control block and payload blocks buffer silently, then completion text is emitted only after tools physically finish.",
+      "When stream=True, the assistant's pre-tool explanation streams token by token. The control block and payload blocks buffer silently; final text is emitted after tools finish when task(finish=True) is called.",
     icon: Radio,
     points: [
       "STREAM hooks receive natural language before the first codepilot fence.",
       "Tool execution remains deterministic because code and payloads are parsed from the complete response.",
-      "Completion text is delayed until after file writes and terminal commands have actually run.",
+      "Final text is delayed until after file writes and terminal commands have actually run.",
     ],
     code:
       "from codepilot import Runtime, on_stream\n\nruntime = Runtime('agent.yaml', stream=True)\n\n@on_stream(runtime)\ndef stream(text: str):\n    print(text, end='', flush=True)\n\nruntime.run('Refactor the auth middleware')",
@@ -435,21 +433,6 @@ export const sections: DocSection[] = [
     ],
     code:
       "from codepilot import Runtime, on_stream, on_finish\n\nruntime = Runtime('agent.yaml', session='file', session_id='default', stream=True)\n\n@on_stream(runtime)\ndef stream(text: str, **_):\n    print(text, end='', flush=True)\n\n@on_finish(runtime)\ndef finish(summary: str, **_):\n    print(f'\\nDone: {summary}\\n')\n\nwhile True:\n    task = input('You: ').strip()\n    if task in {'quit', 'exit'}:\n        break\n    if task == 'reset':\n        runtime.reset()\n        continue\n    runtime.run(task)",
-  },
-  {
-    id: "completion",
-    title: "Completion is explicit, not guessed.",
-    eyebrow: "Completion Block",
-    description:
-      "The completion block is the agent's deliberate signal that the task is done. This avoids guessing from natural language and gives applications a clean final summary.",
-    icon: CheckCircle2,
-    points: [
-      "A completion block may appear in the same step as a simple tool action.",
-      "For terminal commands, the agent should wait for execution results before completing.",
-      "run() returns the completion text, or None if max_steps or abort stops the loop.",
-    ],
-    code:
-      "```completion\nDone. Updated TIMEOUT to 30 seconds and verified the tests pass.\n```",
   },
 ];
 

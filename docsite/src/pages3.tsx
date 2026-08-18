@@ -95,64 +95,6 @@ send_input("main", "\\x04", 5)`}</Code>
   );
 }
 
-export function PageCompletionBlock() {
-  return (
-    <>
-      <PageHeader
-        title="Completion Block"
-        subtitle="The completion block is how the agent signals a task is done. Its content streams directly to the user in real time. When the runtime detects it, the agentic loop terminates."
-      />
-
-      <Section title="Why it exists">
-        <ul style={{ paddingLeft: 20, color: "var(--text-soft)", lineHeight: 2 }}>
-          <li><strong>No wasted step</strong> — the completion block can be combined with the action step, saving a full LLM inference call on simple tasks.</li>
-          <li><strong>Real-time streaming</strong> — the completion text reaches the user as the LLM generates it, not after.</li>
-          <li><strong>Natural</strong> — the agent just writes its closing message as plain text inside the fence.</li>
-        </ul>
-      </Section>
-
-      <Section title="Separate final step (multi-step tasks)">
-        <Code lang="text">{`All green — both fixes are solid.
-
-\`\`\`completion
-Fixed the 500 on profile email update: two bugs squashed.
-(1) routes/profile.py:L42 — bare DB write had no error handling; wrapped in try/except,
-now returns a proper 400 on failure.
-(2) utils/validators.py:L18 — email regex was rejecting + aliases; pattern updated.
-All tests pass. You're good to go.
-\`\`\``}</Code>
-      </Section>
-
-      <Section title="Same-step completion (simple tasks)">
-        <Code lang="text">{`Updating the timeout value.
-
-\`\`\`codepilot
-file_editor("config.py", mode="edit")
-\`\`\`
-
-\`\`\`python filename=config.py
-TIMEOUT = 30
-\`\`\`
-
-\`\`\`completion
-Done — updated TIMEOUT from 10 to 30 seconds in config.py:L12.
-\`\`\``}</Code>
-      </Section>
-
-      <Section title="Receiving it in your app">
-        <p>The completion block fires the <code>FINISH</code> hook with its text as <code>summary</code>:</p>
-        <Code lang="python">{`@on_finish(runtime)
-def handle_finish(summary: str, **_):
-    print(f"\\n{summary}\\n")
-    save_to_database(summary)   # or send a notification, etc.
-
-summary = runtime.run("Fix the login bug")
-# summary == the completion block text, or None if loop ended another way`}</Code>
-      </Section>
-    </>
-  );
-}
-
 export function PageChatMode() {
   return (
     <>
@@ -181,7 +123,7 @@ def done(summary: str, **_):
 # Agent answers with natural markdown — no code executed, streams fully
 runtime.run("How does the config loader handle missing files?")
 
-# Agent takes action — executes code, ends with completion block
+# Agent takes action — calls task(finish=True) in its control block
 runtime.run("Add a fallback default value to the config loader")`}</Code>
         <p>
           The agent freely uses <code>python</code> blocks to display code examples in its explanations — they
@@ -330,23 +272,53 @@ export function PageContextArchiving() {
     <>
       <PageHeader
         title="Context Archiving Tools"
-        subtitle="Actively compress and manage the agent's context history to prevent token overflow."
+        subtitle="CodePilot protects the next model call by compacting completed-task history before the context window is exhausted."
       />
+
+      <Section title="When maintenance starts">
+        <p>
+          Before every inference, CodePilot measures the rendered system prompt, existing conversation history,
+          the configured maximum next response, and the safety margin. When Context Stress reaches the configured
+          trigger, the runtime gives the same agent a maintenance-only turn. The active task is protected.
+        </p>
+        <Code lang="text">{`safe history budget = context window
+                    - system prompt
+                    - model.max_tokens
+                    - thinking budget (when enabled)
+                    - safety margin`}</Code>
+        <p>
+          The temporary <code>archive_context</code> tool is available only during that maintenance turn. If no completed
+          task can be archived and physical load reaches 93% of the safe history budget, the runtime uses emergency global summarization.
+        </p>
+      </Section>
 
       <Section title="archive_context">
         <p>
-          Compresses a completed task sequence, replacing the original detailed messages with a concise custom summary.
-          This reduces token usage after a runtime-triggered maintenance turn.
+          The agent chooses semantically irrelevant completed tasks, stores their original messages in session-owned archive state,
+          and replaces their live history with a concise factual summary. The tool result reports saved tokens and the remeasured stress.
         </p>
         <Code lang="python">{`# LLM control block:
 archive_context(position=2, summary="Completed database migration setup. Files created: migrations/001_init.py")`}</Code>
         <Table
           headers={["Parameter", "Type", "Description"]}
           rows={[
-            [<code>position</code>, "int", "The completed task index to compress."],
-            [<code>summary</code>, "str", "A concise summary describing what was accomplished."],
+            [<code>position</code>, "int or tuple", "Completed task index or indices. The active task cannot be archived."],
+            [<code>summary</code>, "str or list", "Dense factual summary: files, decisions, commands, outcomes, and unresolved items."],
           ]}
         />
+      </Section>
+
+      <Section title="What remains in the prompt">
+        <Code lang="text">{`[ARCHIVED TASK 2]
+Implemented the migration. Changed migrations/001_init.py and db.py.
+Tests: pytest tests/db -q passed. No unresolved items relevant to the active task.
+
+[Task 3][USER INPUT]
+Continue with the active task...`}</Code>
+        <p>
+          Archived originals remain in persisted archive state even if an emergency global summary later consumes their live placeholder.
+          Reasoning tags are removed from global summaries before they are stored.
+        </p>
       </Section>
 
     </>

@@ -347,8 +347,9 @@ class MemoryManager:
         """
         Collapse the older half of context into a [GLOBAL SUMMARY].
 
-        When an [ARCHIVED TASK N] placeholder is consumed, its ContextArchive
-        entry is permanently deleted — the original is no longer recoverable.
+        Archived task source records remain in ContextArchive even when their
+        placeholders are included in a global summary.  The summary only
+        changes the live prompt; it must not make archived work unrecoverable.
         """
         total = count_messages_tokens(messages, self.config.provider_name)
         midpoint_target = total // 2
@@ -369,18 +370,6 @@ class MemoryManager:
 
         older_messages = messages[:split_index]
 
-        # Permanently delete any ContextArchive entries being consumed
-        for msg in older_messages:
-            content = msg.get("content", "")
-            m = _ARCHIVED_PATTERN.match(content)
-            if m:
-                pos = int(m.group(1))
-                self.archive.clear_position(pos)
-                logger.info(
-                    "Global summarizer permanently deleted archive for Task %d",
-                    pos,
-                )
-
         # Build the text to summarise
         summaries_text = "\n\n---\n\n".join(
             m.get("content", "") for m in older_messages
@@ -394,6 +383,19 @@ class MemoryManager:
                 temperature=0.0,
                 max_tokens=int(self.config.global_summary_max_tokens * 4),
             )
+
+            # The main agentic loop strips <thinking>...</thinking> before
+            # storing a response (some providers, e.g. reasoning-capable
+            # DeepSeek/Alibaba models, inline chain-of-thought directly in
+            # the returned text). This raw provider.chat() call bypasses
+            # that loop entirely, so without this the reasoning trace leaks
+            # verbatim into the persisted [GLOBAL SUMMARY] — polluting the
+            # "plain prose, no lists, no headers" summary with an internal
+            # monologue nobody asked to keep, and wasting tokens on it in
+            # every future prompt this summary appears in.
+            summary_text = re.sub(
+                r"<thinking>.*?</thinking>\n?", "", summary_text, flags=re.DOTALL
+            ).strip()
 
             global_msg = {
                 "role": "user",
@@ -430,7 +432,17 @@ class MemoryManager:
             self.config.generation_reserve_tokens
             + self.config.context_safety_margin_tokens
         )
-        budget = max(1, self.config.max_context_tokens - system_tokens - reserve)
+        available_history = self.config.max_context_tokens - system_tokens - reserve
+        if available_history <= 0:
+            raise ValueError(
+                "The rendered system prompt and generation reserve exceed "
+                "memory.max_context_tokens: "
+                f"context={self.config.max_context_tokens:,}, "
+                f"system={system_tokens:,}, reserve={reserve:,}. "
+                "Increase memory.max_context_tokens or lower model.max_tokens "
+                "/ thinking.budget_tokens."
+            )
+        budget = available_history
         physical = history / budget
         stress = physical * self.config.context_stress_multiplier
         required = (

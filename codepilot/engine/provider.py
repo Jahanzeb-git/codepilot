@@ -516,6 +516,14 @@ class AlibabaProvider(LLMProvider):
             kwargs["extra_body"] = {"enable_thinking": True}
         else:
             kwargs["temperature"] = temperature
+            # Must explicitly disable — omitting this parameter defaults to
+            # thinking ON for DeepSeek-V4 models served through DashScope
+            # (deepseek-v4-flash / deepseek-v4-pro), regardless of what
+            # thinking.enabled says in agent.yaml. Same requirement as
+            # DeepSeekProvider below, which already does this correctly;
+            # this class did not, so thinking silently ran anyway whenever
+            # a DeepSeek-V4 model was accessed through the alibaba provider.
+            kwargs["extra_body"] = {"enable_thinking": False}
 
         return kwargs
 

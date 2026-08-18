@@ -22,7 +22,7 @@ export function PageAPIReference() {
 # AsyncRuntime() accepts the same arguments. It is required for SQLAlchemy AsyncEngine sessions.
 
 runtime.run(task: str) -> Optional[str]
-    # Blocking. Appends to history. Returns completion block text or None.
+    # Blocking. Appends to history. Returns final natural-language text or None.
 
 runtime.send_message(message: str)
     # Thread-safe. Non-blocking. Tagged [USER MESSAGE] in context.
@@ -44,11 +44,11 @@ runtime.registry           # ToolRegistry - inspect registered tools`}</Code>
 
       <Section title="Hook decorators">
         <Code lang="python">{`from codepilot import (
-    on_stream,                  # STREAM - pre-fence reasoning text or completion block content
+    on_stream,                  # STREAM - natural-language agent output
     on_tool_call,               # TOOL_CALL - before any tool executes
     on_tool_result,             # TOOL_RESULT - after any tool returns
     on_ask_user,                # ASK_USER - agent called ask_user()
-    on_finish,                  # FINISH - task complete (completion block detected)
+    on_finish,                  # FINISH - task(finish=True) called
     on_permission_request,      # PERMISSION_REQUEST - awaiting approval
     on_user_message_queued,     # USER_MESSAGE_QUEUED - send_message() called
     on_user_message_injected,   # USER_MESSAGE_INJECTED - message in context

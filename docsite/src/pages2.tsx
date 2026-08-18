@@ -14,17 +14,16 @@ export function PageHowItWorks() {
           <li>LLM writes a natural language reasoning paragraph (streamed to user in real time), then a <code>{"`"}codepilot{"`"}</code> block (Python code)</li>
           <li>Runtime executes the code block in a sandboxed environment with bound tool functions</li>
           <li>Execution result is appended to conversation history as <code>[EXECUTION RESULT]</code></li>
-          <li>Repeat until the agent emits a <code>{"`"}completion{"`"}</code> block, hits <code>max_steps</code>, or is aborted</li>
+          <li>Repeat until the agent calls <code>task(finish=True)</code> from a control block, hits <code>max_steps</code>, or is aborted</li>
         </ol>
       </Section>
 
-      <Section title="The three block types">
+      <Section title="The two block types">
         <Table
           headers={["Block", "Syntax", "Purpose"]}
           rows={[
             [<strong>Control Block</strong>, <code>{"`"}``codepilot{"`"}``</code>, "The only block the runtime executes. Regular python blocks are display-only markdown."],
-            [<strong>Payload Blocks</strong>, <code>{"`"}``python filename=…{"`"}``</code>, "File content consumed by file_editor() in order. Never executed."],
-            [<strong>Completion Block</strong>, <code>{"`"}``completion{"`"}``</code>, "Natural text that streams to the user. Its presence marks the task complete."],
+            [<strong>Payload Blocks</strong>, <code>{"`"}``python filename=…{"`"}``</code>, "File content consumed by write_file() or edit_file() in order. Never executed."],
           ]}
         />
       </Section>
@@ -38,12 +37,13 @@ read_file("routes/profile.py", start_line=35, end_line=65)
 \`\`\``}</Code>
       </Section>
 
-      <Section title="Single-step task (action + completion)">
+      <Section title="Single-step task (action + finish)">
         <Code lang="text">{`Got it, updating the timeout value.
 
 \`\`\`codepilot
 # Simple single-line edit, no read needed.
 file_editor("config.py", mode="edit")
+task(finish=True)
 \`\`\`
 
 \`\`\`python filename=config.py
@@ -54,9 +54,7 @@ TIMEOUT = 60
 >>>>>>> REPLACE
 \`\`\`
 
-\`\`\`completion
-Done. Updated TIMEOUT to 30s in config.py.
-\`\`\``}</Code>
+Done. Updated TIMEOUT to 60s in config.py.`}</Code>
       </Section>
 
       <Section title="Chat/explanation (no execution)">
@@ -90,7 +88,7 @@ export function PageBasicUsage() {
 
 runtime = Runtime("agent.yaml")
 summary = runtime.run("Fix the nginx config")
-print(summary)  # the text the agent put in the completion block, or None`}</Code>
+print(summary)  # final natural-language text, or None`}</Code>
       </Section>
 
       <Section title="Async Usage">
@@ -108,9 +106,8 @@ if __name__ == "__main__":
       </Section>
 
       <Callout>
-        <code>run()</code> returns when the agent emits a completion block, hits <code>max_steps</code>, or is
-        aborted. The return value is the completion block text, or <code>None</code> if the loop ended for any
-        other reason.
+        <code>run()</code> returns when the agent calls <code>task(finish=True)</code>, hits <code>max_steps</code>, or is
+        aborted. The return value is its final natural-language text, or <code>None</code> if it ended another way.
       </Callout>
     </>
   );
@@ -140,10 +137,10 @@ runtime.run("Diagnose the CI pipeline for the latest failure and stage the fix."
       </Section>
 
       <Section title="What gets streamed">
-        <p>The runtime streams in two windows per step:</p>
+        <p>The runtime streams natural-language text around the execution protocol:</p>
         <ol style={{ paddingLeft: 20, color: "var(--text-soft)", lineHeight: 2 }}>
-          <li><strong>Pre-fence text</strong> — everything before the <code>{"`"}codepilot{"`"}</code> block. This is the agent's reasoning paragraph. Streams in real time as the LLM generates it.</li>
-          <li><strong>Completion block</strong> — the <code>{"`"}completion{"`"}</code> block content, when the task is done. Streams in real time directly to the user. The loop terminates after this.</li>
+          <li><strong>Pre-control text</strong> — everything before the <code>{"`"}codepilot{"`"}</code> block streams as the LLM generates it.</li>
+          <li><strong>Final text</strong> — after a successful <code>task(finish=True)</code>, trailing natural-language text is emitted after tools finish.</li>
         </ol>
         <p style={{ marginTop: 12 }}>
           Everything between the two windows (the codepilot block, payload blocks) is buffered silently while tools execute.

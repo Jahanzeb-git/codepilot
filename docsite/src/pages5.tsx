@@ -30,7 +30,7 @@ runtime = Runtime("agent.yaml", stream=True)
 
 @on_stream(runtime)
 def handle_stream(text: str, **_):
-    """Fires for each text chunk — both pre-fence reasoning and completion block content."""
+    """Fires for each text chunk of natural-language agent output."""
     print(text, end="", flush=True)
 
 
@@ -58,7 +58,7 @@ def handle_ask(question: str, **_):
 
 @on_finish(runtime)
 def handle_finish(summary: str, **_):
-    """Fires when the task completes (completion block detected)."""
+    """Fires when the agent completes the task with task(finish=True)."""
     print(f"\\n{summary}\\n")
 
 
@@ -90,14 +90,14 @@ runtime.hooks.register(EventType.FINISH,  lambda summary, **_: save_to_db(summar
           rows={[
             [<code>START</code>, <code>task</code>, "run() is called"],
             [<code>STEP</code>, <code>step, max_steps</code>, "Each agentic step begins"],
-            [<code>STREAM</code>, <code>text</code>, "Chunk of streamed text (pre-fence reasoning or completion block content)"],
+            [<code>STREAM</code>, <code>text</code>, "Chunk of natural-language agent output"],
             [<code>TOOL_CALL</code>, <code>tool, args, label</code>, "Before any tool executes"],
             [<code>TOOL_RESULT</code>, <code>tool, result</code>, "After any tool returns"],
             [<code>ASK_USER</code>, <code>question</code>, "Agent calls ask_user()"],
             [<code>PERMISSION_REQUEST</code>, <code>tool, description</code>, "Tool with require_permission: true fires"],
             [<code>SECURITY_ERROR</code>, <code>error</code>, "AST validation rejects the control block"],
             [<code>RUNTIME_ERROR</code>, <code>error</code>, "Provider, parser, or control-block execution error occurs"],
-            [<code>FINISH</code>, <code>summary</code>, "Task complete — completion block detected"],
+            [<code>FINISH</code>, <code>summary</code>, "Task complete — task(finish=True) called"],
             [<code>MAX_STEPS</code>, "—", "Loop exits because max_steps was reached"],
             [<code>USER_MESSAGE_QUEUED</code>, <code>message</code>, "send_message() called"],
             [<code>USER_MESSAGE_INJECTED</code>, <code>message</code>, "Queued message enters LLM context"],

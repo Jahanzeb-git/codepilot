@@ -25,6 +25,8 @@ from typing import Any, Dict, List, Optional
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
+from .model_profiles import get_model_profile
+
  
 class ThinkingConfig(BaseModel):
     """Extended thinking / reasoning config — Anthropic, OpenAI, Gemini, DeepSeek, and Alibaba models."""
@@ -169,19 +171,63 @@ class AgentConfig(BaseModel):
             # on the nested model:
             object.__setattr__(self.runtime, "work_dir", str(resolved))
 
-        # --- auto-adjust max_context_tokens if it is the default ---
-        if self.memory.max_context_tokens == 120_000:
-            model_name = self.model.name.lower()
-            new_max = 120_000
-            if "deepseek" in model_name:
-                new_max = 64_000
-            elif "claude-3" in model_name:
-                new_max = 200_000
-            elif "gpt-4" in model_name or "qwen" in model_name:
-                new_max = 128_000
-            
-            if new_max != 120_000:
-                object.__setattr__(self.memory, "max_context_tokens", new_max)
+        # --- resolve omitted capacity settings from an exact model profile ---
+        profile = get_model_profile(self.model.provider, self.model.name)
+        context_was_set = "max_context_tokens" in self.memory.model_fields_set
+        output_was_set = "max_tokens" in self.model.model_fields_set
+        if not context_was_set:
+            if profile is None:
+                raise ValueError(
+                    "memory.max_context_tokens is required for unrecognised model "
+                    f"'{self.model.provider}/{self.model.name}'. CodePilot will not "
+                    "guess a context window from a provider name; set the model's "
+                    "documented total context window explicitly."
+                )
+            object.__setattr__(self.memory, "max_context_tokens", profile.context_tokens)
+        if not output_was_set and profile is not None:
+            object.__setattr__(self.model, "max_tokens", profile.recommended_max_tokens)
+        if profile is not None and self.model.max_tokens > profile.max_output_tokens:
+            raise ValueError(
+                f"model.max_tokens ({self.model.max_tokens:,}) exceeds the documented "
+                f"maximum output for '{self.model.provider}/{self.model.name}' "
+                f"({profile.max_output_tokens:,})."
+            )
+
+        # --- sanity check: the memory budget must be physically satisfiable ---
+        # generation_reserve_tokens (see MemoryManager.measure_context) is set
+        # from model.max_tokens + thinking.budget_tokens — reserved headroom
+        # for the model's own output, never available for conversation
+        # history. If max_context_tokens doesn't comfortably exceed that
+        # reserve, the safe history budget floors at 1 token: any nonzero
+        # history then produces a physical_load in the hundreds, Context
+        # Stress reads as an absurd number (e.g. "122000%") the LLM sees
+        # every step, and archive_context() can never bring the agent back
+        # under the hard ceiling no matter what it archives — the emergency
+        # backstop fires on effectively every step, permanently. This is a
+        # config error, not a runtime condition, so it's caught here rather
+        # than surfacing as inexplicable behaviour mid-session.
+        reserve = self.model.max_tokens + (
+            self.model.thinking.budget_tokens if self.model.thinking.enabled else 0
+        ) + self.memory.context_safety_margin_tokens
+        min_headroom = 2000  # smallest budget that can hold a real turn or two
+        if self.memory.max_context_tokens < reserve + min_headroom:
+            raise ValueError(
+                "memory.max_context_tokens "
+                f"({self.memory.max_context_tokens:,}) leaves no usable "
+                "budget for conversation history once generation headroom "
+                "is reserved:\n"
+                f"  model.max_tokens                    = {self.model.max_tokens:,}\n"
+                f"  thinking.budget_tokens (if enabled)  = "
+                f"{self.model.thinking.budget_tokens if self.model.thinking.enabled else 0:,}\n"
+                f"  memory.context_safety_margin_tokens  = {self.memory.context_safety_margin_tokens:,}\n"
+                f"  reserved total                       = {reserve:,}\n"
+                f"  memory.max_context_tokens configured = {self.memory.max_context_tokens:,}\n\n"
+                f"Increase memory.max_context_tokens to at least "
+                f"{reserve + min_headroom:,}, or lower model.max_tokens / "
+                "thinking.budget_tokens, so at least "
+                f"{min_headroom:,} tokens remain for actual conversation "
+                "history — not just system prompt and output reservation."
+            )
 
     # ------------------------------------------------------------------
     # Class-level factory
