@@ -360,31 +360,14 @@ class AsyncRuntime:
                 if self.config.model.provider.lower() == "deepseek":
                     force_thinking = True
 
-            # 3. LLM inference (streaming or blocking)
+            # 3. LLM inference — always stream internally so the second-block
+            # early-abort can fire in real time regardless of the public stream=
+            # flag. _stream_inference suppresses user-facing STREAM events when
+            # self._stream is False, preserving the external API contract exactly.
             try:
-                if self._stream:
-                    # _stream_inference handles thinking interception inline:
-                    # - thinking chunks → THINKING_STREAM (never STREAM)
-                    # - returned text has thinking stripped → BlockParser-safe
-                    response_text = await self._stream_inference(
-                        system_prompt, messages=rendered_msgs, force_thinking=force_thinking
-                    )
-                else:
-                    response_text = await self.provider.chat(
-                        messages=rendered_msgs,
-                        system=system_prompt,
-                        temperature=self.config.model.temperature,
-                        max_tokens=self.config.model.max_tokens,
-                        force_thinking=force_thinking,
-                    )
-                    # Non-streaming: extract and emit thinking separately,
-                    # then strip it so BlockParser never sees it.
-                    import re as _re
-                    think_match = _re.search(r'<thinking>(.*?)</thinking>\n?', response_text, flags=_re.DOTALL)
-                    if think_match:
-                        self.hooks.emit(EventType.THINKING_STREAM, thinking=think_match.group(1))
-                        response_text = response_text[:think_match.start()] + response_text[think_match.end():]
-                    self._emit_prefence_text(response_text)
+                response_text = await self._stream_inference(
+                    system_prompt, messages=rendered_msgs, force_thinking=force_thinking
+                )
 
             except Exception as exc:
                 error_msg = f"LLM provider error: {exc}"
@@ -1066,8 +1049,9 @@ class AsyncRuntime:
         """
         Stream the LLM response token by token — 3-state machine:
 
-          'streaming'   — emit text to the user in real time. Watch for a
-                          line-anchored ```codepilot fence OR <thinking> tag.
+          'streaming'   — accumulate text; emit to the user in real time ONLY
+                          when self._stream is True. Watch for a line-anchored
+                          ```codepilot fence OR <thinking> tag.
           'thinking'    — inside <thinking>...</thinking>. Emit chunks to
                           THINKING_STREAM only. Never forward to STREAM.
                           Never include in the returned response text.
@@ -1075,6 +1059,13 @@ class AsyncRuntime:
                           until generation finishes OR a second ```codepilot
                           block is detected (in which case we abort the stream
                           early and clip at the last clean fence boundary).
+
+        Internal-always-stream contract:
+          This method is ALWAYS called regardless of the public stream= flag.
+          When self._stream is False, all EventType.STREAM emissions are
+          suppressed so the API surface is silent — but the token stream from
+          the provider is still consumed in real time, enabling the second-block
+          early-abort to fire before the model wastes further tokens.
 
         Second-block early-abort logic:
           While buffering, we track `last_clean_clip_pos` — the character
@@ -1186,7 +1177,7 @@ class AsyncRuntime:
                             m = self._CONTROL_FENCE_RE.search(accumulated_so_far)
                             if m:
                                 ctrl_pos = m.start()
-                                if ctrl_pos > pre_fence_emitted:
+                                if self._stream and ctrl_pos > pre_fence_emitted:
                                     self.hooks.emit(EventType.STREAM,
                                                     text=accumulated_so_far[pre_fence_emitted:ctrl_pos])
                                 state = "buffering"
@@ -1196,7 +1187,7 @@ class AsyncRuntime:
                                 chunks.append(pre_think)
                                 accumulated_so_far = "".join(chunks)
                                 safe_end = len(accumulated_so_far) - self._HOLDBACK
-                                if safe_end > pre_fence_emitted:
+                                if self._stream and safe_end > pre_fence_emitted:
                                     self.hooks.emit(EventType.STREAM,
                                                     text=accumulated_so_far[pre_fence_emitted:safe_end])
                                     pre_fence_emitted = safe_end
@@ -1276,7 +1267,7 @@ class AsyncRuntime:
                     m = self._CONTROL_FENCE_RE.search(accumulated)
                     if m:
                         ctrl_pos = m.start()
-                        if ctrl_pos > pre_fence_emitted:
+                        if self._stream and ctrl_pos > pre_fence_emitted:
                             self.hooks.emit(EventType.STREAM,
                                             text=accumulated[pre_fence_emitted:ctrl_pos])
                         state = "buffering"
@@ -1285,7 +1276,7 @@ class AsyncRuntime:
                         _first_ctrl_end = m.end()
                     else:
                         safe_end = len(accumulated) - self._HOLDBACK
-                        if safe_end > pre_fence_emitted:
+                        if self._stream and safe_end > pre_fence_emitted:
                             self.hooks.emit(EventType.STREAM,
                                             text=accumulated[pre_fence_emitted:safe_end])
                             pre_fence_emitted = safe_end
@@ -1312,7 +1303,7 @@ class AsyncRuntime:
         if state == "streaming":
             # No codepilot block at all — pure conversation, flush everything.
             remaining = accumulated[pre_fence_emitted:]
-            if remaining:
+            if self._stream and remaining:
                 self.hooks.emit(EventType.STREAM, text=remaining)
 
         return accumulated
