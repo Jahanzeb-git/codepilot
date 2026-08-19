@@ -399,8 +399,12 @@ class AsyncRuntime:
             try:
                 control_block, payload_blocks, protocol_warning = BlockParser.split(response_text)
             except ValueError as exc:
+                from codepilot.core.block_parser import ProtocolViolationError
                 self.messages.append({"role": _ROLE_ASSISTANT, "content": response_text})
-                error_msg = self._format_parser_error(str(exc))
+                if isinstance(exc, ProtocolViolationError):
+                    error_msg = str(exc)
+                else:
+                    error_msg = self._format_parser_error(str(exc))
                 # Attempt to salvage payload content by position even though
                 # the response had protocol violations. This allows the LLM to
                 # retry failed writes using from_cache_id=<N> without regenerating.
@@ -682,9 +686,12 @@ class AsyncRuntime:
     #  Internal helpers — used by tool classes                                #
     # ====================================================================== #
 
-    def pop_next_payload_block(self) -> Optional[CodeBlock]:
-        if self._payload_queue:
-            return self._payload_queue.pop(0)
+    def pop_payload_block_for_path(self, path: str) -> Optional[CodeBlock]:
+        """Find and extract the payload block specifically annotated for this path."""
+        norm_path = path.replace("\\", "/")
+        for i, block in enumerate(self._payload_queue):
+            if block.filename and block.filename.replace("\\", "/") == norm_path:
+                return self._payload_queue.pop(i)
         return None
 
     def _append_execution(self, text: str):
@@ -1249,12 +1256,11 @@ class AsyncRuntime:
             f"Specific parser failure: {error}\n\n"
             "How to fix your next response:\n"
             "1. Emit exactly one ```codepilot fenced Control Block if you want tools to run.\n"
-            "2. For every write_file(...) call, provide the required Payload Block(s) immediately "
+            "2. For every write_file(...) or edit_file(...) call, provide the required Payload Block immediately "
             "after the Control Block.\n"
             "3. Every Payload Block must include a filename= annotation that exactly matches the "
-            "corresponding write_file path, for example: ```python filename=src/app.py.\n"
-            "4. Payload Blocks are consumed strictly in write_file call order. For mode='multi_edit', "
-            "provide one Payload Block per tuple in edits=[...], in the same order as the tuples.\n"
+            "corresponding tool call path, for example: ```python filename=src/app.py.\n"
+            "4. Payload Blocks are consumed strictly in tool call order.\n"
             "5. Use task(finish=True) in the control block to signal task completion — do not "
             "combine it with execute() or read_output() in the same step.\n\n"
             "No tool code from the previous response ran. Re-emit a corrected CodePilot response now."

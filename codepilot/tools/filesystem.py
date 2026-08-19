@@ -388,7 +388,7 @@ class FilesystemTools:
                 return
         else:
             # Consume payload block BEFORE any error that might short-circuit
-            payload = self.runtime.pop_next_payload_block()
+            payload = self.runtime.pop_payload_block_for_path(path)
             if payload is None:
                 self._emit_error(
                     "write_file",
@@ -537,7 +537,7 @@ class FilesystemTools:
                 )
                 return
         else:
-            payload = self.runtime.pop_next_payload_block()
+            payload = self.runtime.pop_payload_block_for_path(path)
             if payload is None:
                 self._emit_error(
                     "edit_file",

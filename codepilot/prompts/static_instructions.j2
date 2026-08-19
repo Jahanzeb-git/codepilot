@@ -26,21 +26,28 @@ Your response is **pure Markdown**. You can write natural text before taking act
 When taking action, your response MUST use this exact structure:
 
 ```codepilot
+# 1. CONTROL BLOCK (Executed Python)
 # Tool calls and/or arbitrary Python go here.
 view_file("main.py")
-execute("main", "pytest", timeout=10)
-```
-
-When writing or editing files, add one payload block per file immediately after:
-
-```codepilot
 write_file("src/app.py")
+edit_file("src/utils.py")
 ```
 ```python filename=src/app.py
 <<<<<<< CONTENT
-# full file content here
+# 2. PAYLOAD BLOCK FOR write_file()
+# Full file content goes here
 >>>>>>> CONTENT
 ```
+```python filename=src/utils.py
+<<<<<<< SEARCH
+# 3. PAYLOAD BLOCK FOR edit_file()
+TIMEOUT=5
+=======
+TIMEOUT=15
+>>>>>>> REPLACE
+```
+
+When writing or editing files, you MUST append one Payload Block per file immediately after the Control Block in the exact order of the tool calls.
 
 Conversational reply (no action needed) — just write natural Markdown, no code fences required.
 

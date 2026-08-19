@@ -23,6 +23,11 @@ import ast
 from typing import List, Optional, Tuple
 from dataclasses import dataclass, field
 
+class ProtocolViolationError(ValueError):
+    def __init__(self, message: str, control_block: Optional['CodeBlock'] = None):
+        super().__init__(message)
+        self.control_block = control_block
+
 
 @dataclass
 class CodeBlock:
@@ -364,12 +369,13 @@ class BlockParser:
         trimmed and reported as a protocol warning so the operation can succeed.
         """
         if cls._INLINE_CONTENT_ARG_RE.search(control_block.content):
-            raise ValueError(
+            raise ProtocolViolationError(
                 "write_file() / edit_file() was called with an inline content-like "
                 "argument (content=, payload=, text=, or data=). These tools never "
                 "accept file content as a Python argument. Put the file content in a "
                 "Payload Block immediately after the ```codepilot block, annotated "
-                "with filename=<same path>."
+                "with filename=<same path>.",
+                control_block
             )
 
         write_calls, has_dynamic, has_syntax_error = cls._extract_write_file_calls(control_block.content)
@@ -379,14 +385,14 @@ class BlockParser:
         if has_syntax_error:
             return payload_blocks, None
 
-        # Guard: fire only when a tool call exists with a non-literal (dynamic) path.
         if not write_calls and has_dynamic:
-            raise ValueError(
+            raise ProtocolViolationError(
                 "view_file() / write_file() / edit_file() call found, but its first argument was "
                 "not a literal quoted path. These tools must use a literal path like "
                 'edit_file("src/app.py", ...) so the runtime can '
                 "validate Payload Block filename= annotations. For computed content "
-                "or dynamic paths, use Python native file I/O with WORK_DIR instead."
+                "or dynamic paths, use Python native file I/O with WORK_DIR instead.",
+                control_block
             )
 
         # Build the full list of tool calls for warning diagnostics (all tools, not just writers)
@@ -406,15 +412,52 @@ class BlockParser:
                 return [], warning
             return [], None
 
+        _SAFE_TOOLS = {"write_file", "edit_file", "view_file", "find", "semantic_search"}
+        is_safe_block = all(tool in _SAFE_TOOLS for tool, _, _ in all_calls)
+
         # Flatten (filepath, count) into an ordered list of expected filenames
         expected: List[str] = []
         for filepath, count in write_calls:
             for _ in range(count):
                 expected.append(filepath)
 
-        # --- Surplus payloads: more blocks than needed ---
-        # Trim the excess and emit a soft warning. The valid prefix is consumed
-        # normally by write_file() calls in order.
+        missing_or_mismatch = False
+        error_msg = ""
+
+        if len(payload_blocks) < len(expected):
+            missing_or_mismatch = True
+            if unannotated_blocks:
+                block_numbers = ", ".join(str(b.index + 1) for b in unannotated_blocks)
+                error_msg = (f"Payload Block(s) missing filename= annotations (blocks: {block_numbers}). "
+                             f"Found {len(payload_blocks)} annotated payload(s), expected {len(expected)}.")
+            else:
+                error_msg = f"Payload count mismatch: {len(payload_blocks)} payload block(s) found, expected {len(expected)}."
+        else:
+            # check annotations on the valid prefix
+            for i, (block, exp_path) in enumerate(zip(payload_blocks[:len(expected)], expected)):
+                if block.filename is None:
+                    missing_or_mismatch = True
+                    error_msg = f"Payload block {i + 1} is missing a filename= annotation. Expected: filename={exp_path}."
+                    break
+                if block.filename.replace("\\", "/") != exp_path.replace("\\", "/"):
+                    missing_or_mismatch = True
+                    error_msg = f"Payload block {i + 1} filename mismatch: got 'filename={block.filename}', expected 'filename={exp_path}'."
+                    break
+
+        if missing_or_mismatch:
+            provided_filenames = [b.filename for b in payload_blocks if b.filename]
+            synthetic_feedback = cls._build_synthetic_feedback(
+                control_block=control_block, 
+                all_calls=all_calls, 
+                error_msg=error_msg, 
+                is_partial=is_safe_block,
+                provided_filenames=provided_filenames
+            )
+            if is_safe_block:
+                return payload_blocks, synthetic_feedback
+            else:
+                raise ProtocolViolationError(synthetic_feedback, control_block)
+
         if len(payload_blocks) > len(expected):
             surplus_blocks = payload_blocks[len(expected):]
             valid_blocks   = payload_blocks[:len(expected)]
@@ -425,34 +468,8 @@ class BlockParser:
                 expected=len(expected),
                 surplus_blocks=surplus_blocks,
             )
-            # Still validate the required prefix before returning
-            cls._check_filename_annotations(valid_blocks, expected)
             return valid_blocks, warning
 
-        # --- Fewer payloads than required: hard error ---
-        if len(payload_blocks) < len(expected):
-            if unannotated_blocks:
-                block_numbers = ", ".join(str(b.index + 1) for b in unannotated_blocks)
-                raise ValueError(
-                    f"Payload Block(s) after the ```codepilot block are missing filename= "
-                    f"annotations (block number(s): {block_numbers}). Found "
-                    f"{len(payload_blocks)} annotated payload block(s), expected "
-                    f"{len(expected)} (tool calls requiring payloads in order: "
-                    f"{', '.join(f'{fp} ×{n}' if n > 1 else fp for fp, n in write_calls)}). "
-                    "Every payload must be fenced like "
-                    "```python filename=path/to/file.py."
-                )
-            summary = ", ".join(
-                f"{fp} ×{n}" if n > 1 else fp for fp, n in write_calls
-            )
-            raise ValueError(
-                f"Payload count mismatch: {len(payload_blocks)} payload block(s) found, "
-                f"expected {len(expected)} "
-                f"(tool calls requiring payloads in order: {summary})."
-            )
-
-        # --- Exact match: validate filename= annotations ---
-        cls._check_filename_annotations(payload_blocks, expected)
         return payload_blocks, None
 
     # ------------------------------------------------------------------
@@ -564,25 +581,46 @@ class BlockParser:
         )
 
     @classmethod
-    def _check_filename_annotations(
-        cls,
-        payload_blocks: List[CodeBlock],
-        expected: List[str],
-    ) -> None:
-        """Hard-error check for per-block filename= annotation correctness."""
-        for i, (block, exp_path) in enumerate(zip(payload_blocks, expected)):
-            if block.filename is None:
-                raise ValueError(
-                    f"Payload block {i + 1} is missing a filename= annotation. "
-                    f"Expected: ```<lang> filename={exp_path}. "
-                    f"Every payload block must declare its target file."
-                )
-            actual_norm   = block.filename.replace("\\", "/")
-            expected_norm = exp_path.replace("\\", "/")
-            if actual_norm != expected_norm:
-                raise ValueError(
-                    f"Payload block {i + 1} filename mismatch: "
-                    f"annotated as 'filename={block.filename}' "
-                    f"but tool call {i + 1} targets '{exp_path}'. "
-                    f"Payload blocks must appear in the same order as tool calls."
-                )
+    def _build_synthetic_feedback(
+        cls, 
+        control_block: CodeBlock, 
+        all_calls: List[Tuple[str, str, int]], 
+        error_msg: str,
+        is_partial: bool,
+        provided_filenames: List[str]
+    ) -> str:
+        """Generates the highly engineered synthetic feedback prompt."""
+        
+        retry_calls = []
+        if is_partial:
+            # Only retry the payload-requiring calls that lacked a matching payload block
+            for call in all_calls:
+                tool, filepath, needs_payload = call
+                if needs_payload and filepath not in provided_filenames:
+                    retry_calls.append(call)
+        else:
+            retry_calls = all_calls
+
+        synthetic = "Let me fix the issue real quick.\n```codepilot\n"
+        if not is_partial:
+            synthetic += control_block.content + "\n"
+        else:
+            for tool, filepath, _ in retry_calls:
+                synthetic += f'{tool}("{filepath}")\n'
+        synthetic += "```\n"
+
+        for tool, filepath, needs_payload in retry_calls:
+            if needs_payload:
+                synthetic += f"```python filename={filepath}\n"
+                if tool == "write_file":
+                    synthetic += "<<<<<<< CONTENT\n# full file content here\n>>>>>>> CONTENT\n```\n"
+                elif tool == "edit_file":
+                    synthetic += "<<<<<<< SEARCH\n# content to search\n=======\n# content to replace\n>>>>>>> REPLACE\n```\n"
+                else:
+                    synthetic += "<<<<<<< CONTENT\n...\n>>>>>>> CONTENT\n```\n"
+
+        return (
+            f"PROTOCOL VIOLATION: {error_msg}\n\n"
+            f"To fix your next response generate response formatted AS IS wrote below:\n"
+            f"{synthetic}"
+        )
