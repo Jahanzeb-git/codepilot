@@ -1053,6 +1053,9 @@ class AsyncRuntime:
     # ------------------------------------------------------------------ #
 
     _CONTROL_FENCE_RE = re.compile(r"```codepilot\n")
+    # Matches a standalone closing ``` fence line: newline + ``` + optional spaces + newline.
+    # Used by the second-block early-abort logic to track the last clean clip point.
+    _CLOSE_FENCE_RE = re.compile(r"\n```[ \t]*\n")
     # Hold-back: buffer enough chars to avoid prematurely emitting a
     # partial fence marker split across streaming chunks.
     _HOLDBACK = len("```codepilot")  # 12 chars
@@ -1069,7 +1072,19 @@ class AsyncRuntime:
                           THINKING_STREAM only. Never forward to STREAM.
                           Never include in the returned response text.
           'buffering'   — ```codepilot fence detected: accumulate silently
-                          until generation finishes.
+                          until generation finishes OR a second ```codepilot
+                          block is detected (in which case we abort the stream
+                          early and clip at the last clean fence boundary).
+
+        Second-block early-abort logic:
+          While buffering, we track `last_clean_clip_pos` — the character
+          position in the accumulated buffer immediately after the closing ```
+          of the most recently completed fence (codepilot block close OR any
+          payload block close). When we detect the opening of a second
+          ```codepilot block, we immediately break out of the stream loop and
+          clip the accumulated buffer at `last_clean_clip_pos`. The stored
+          history therefore contains a syntactically complete, single-block
+          response — the model never sees that generation was cut off.
 
         Returning accumulated WITHOUT the thinking block ensures BlockParser
         never sees code fences inside chain-of-thought, eliminating the
@@ -1087,6 +1102,33 @@ class AsyncRuntime:
 
         # Holdback buffer for partial tag/fence detection
         holdback: str = ""
+
+        # --- Second-block abort tracking (active only in 'buffering' state) ---
+        # Tracks the position in the joined chunks string right after the last
+        # closing ``` fence we have seen. Updated every time a line that is
+        # exactly ``` (a closing fence) is completed inside 'buffering'.
+        last_clean_clip_pos: int = 0
+        # A small rolling window to detect a closing ``` fence line.
+        # We watch for the pattern \n```\n (or ```\n at the very start of buffering).
+        _CLOSE_FENCE       = "```"
+        _SECOND_CTRL_FENCE = "```codepilot\n"  # second control block opening
+        # We hold enough chars to never split the _SECOND_CTRL_FENCE marker.
+        _SECOND_FENCE_HOLDBACK = len(_SECOND_CTRL_FENCE)  # 14 chars
+
+        # Helper: scan the buffered text for the second ```codepilot opening.
+        # We need at least _SECOND_FENCE_HOLDBACK chars of lookahead to be sure
+        # we are not splitting the token across chunks.  We scan everything
+        # except the last _SECOND_FENCE_HOLDBACK chars (safe window).
+        def _second_ctrl_pos(buf: str, search_from: int) -> int:
+            """Return the start-index of the second ```codepilot\\n in buf, or -1."""
+            # The first occurrence of ```codepilot\\n is the control block itself.
+            # We look for a SECOND match after the end of the first.
+            first = buf.find(_SECOND_CTRL_FENCE, search_from)
+            return first  # caller ensures search_from is past the first block's open
+
+        # Position right after the first ```codepilot\n fence opening (set once we
+        # enter buffering state so the second-fence scanner starts after it).
+        _first_ctrl_end: int = 0
 
         async for chunk in self.provider.chat_stream(
             messages=msgs,
@@ -1185,6 +1227,47 @@ class AsyncRuntime:
 
                     if state == "buffering":
                         chunks.append(to_process)
+                        accumulated = "".join(chunks)
+
+                        # -------------------------------------------------------- #
+                        # Second-block early-abort detection                        #
+                        #                                                            #
+                        # Strategy: scan the safe window (everything except the     #
+                        # last _SECOND_FENCE_HOLDBACK chars) for the second         #
+                        # ```codepilot\n marker.  If found, clip at                 #
+                        # last_clean_clip_pos and break out of the stream loop.     #
+                        # -------------------------------------------------------- #
+                        safe_scan_end = len(accumulated) - _SECOND_FENCE_HOLDBACK
+                        if safe_scan_end > _first_ctrl_end:
+                            second_pos = _second_ctrl_pos(accumulated, _first_ctrl_end)
+                            if second_pos != -1 and second_pos < safe_scan_end:
+                                # Second ```codepilot block detected.
+                                # Clip at the last clean fence boundary we recorded.
+                                if last_clean_clip_pos > 0:
+                                    # Trim chunks to the clip point.
+                                    clip_str = accumulated[:last_clean_clip_pos]
+                                    chunks = [clip_str]
+                                # Break out of the inner while loop, then the outer
+                                # async for loop via a sentinel flag.
+                                holdback = "\x00ABORT\x00"
+                                break
+
+                        # -------------------------------------------------------- #
+                        # Track last clean clip position                            #
+                        #                                                            #
+                        # A "clean clip point" is the position immediately after    #
+                        # a closing ``` fence line (i.e. a line that is exactly     #
+                        # ``` possibly with trailing whitespace).                   #
+                        #                                                            #
+                        # We scan the accumulated buffer for closing fence lines.   #
+                        # The pattern is: \n```\s*\n  (a standalone ``` line).      #
+                        # We take the rightmost such occurrence.                    #
+                        # -------------------------------------------------------- #
+                        for close_m in self._CLOSE_FENCE_RE.finditer(accumulated):
+                            candidate = close_m.end()
+                            if candidate > last_clean_clip_pos:
+                                last_clean_clip_pos = candidate
+
                         break
 
                     # state == "streaming"
@@ -1197,6 +1280,9 @@ class AsyncRuntime:
                             self.hooks.emit(EventType.STREAM,
                                             text=accumulated[pre_fence_emitted:ctrl_pos])
                         state = "buffering"
+                        # Record where the first control fence opening ends so the
+                        # second-fence scanner never mis-fires on the first one.
+                        _first_ctrl_end = m.end()
                     else:
                         safe_end = len(accumulated) - self._HOLDBACK
                         if safe_end > pre_fence_emitted:
@@ -1205,10 +1291,17 @@ class AsyncRuntime:
                             pre_fence_emitted = safe_end
                     break
 
+            # ------------------------------------------------------------------ #
+            # Check if the inner loop requested a stream abort                   #
+            # ------------------------------------------------------------------ #
+            if holdback == "\x00ABORT\x00":
+                holdback = ""
+                break
+
         # ------------------------------------------------------------------ #
         # Flush holdback remainder                                            #
         # ------------------------------------------------------------------ #
-        if holdback and state != "thinking":
+        if holdback and state != "thinking" and holdback != "\x00ABORT\x00":
             chunks.append(holdback)
 
         # ------------------------------------------------------------------ #
