@@ -335,9 +335,10 @@ class FilesystemTools:
         write_file("app.py")
         ```
         ```python filename=app.py
-        <<<<<<< CONTENT
+        <<<<<<< SEARCH
+        =======
         # full file content here
-        >>>>>>> CONTENT
+        >>>>>>> REPLACE
         ```
         Example 2 (multiple files):
         ```codepilot
@@ -345,14 +346,16 @@ class FilesystemTools:
         write_file("example.py")
         ```
         ```text filename=file.txt
-        <<<<<<< CONTENT
+        <<<<<<< SEARCH
+        =======
         content for file.txt
-        >>>>>>> CONTENT
+        >>>>>>> REPLACE
         ```
         ```python filename=example.py
-        <<<<<<< CONTENT
+        <<<<<<< SEARCH
+        =======
         # content for example.py
-        >>>>>>> CONTENT
+        >>>>>>> REPLACE
         ```
         Example 3 (retry from cache after failure):
         ```codepilot

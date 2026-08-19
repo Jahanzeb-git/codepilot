@@ -37,15 +37,14 @@ edit_file("src/utils.py")
 =======
 # 2. PAYLOAD BLOCK FOR write_file(): Leave SEARCH section empty, put full content in REPLACE
 # Full file content goes here
->>>>>>> REPLACE
+ >>>>>>> REPLACE
 ```
 ```python filename=src/utils.py
 <<<<<<< SEARCH
-# 3. PAYLOAD BLOCK FOR edit_file()
-TIMEOUT=5
+TIMEOUT=10
 =======
 TIMEOUT=15
->>>>>>> REPLACE
+>>>>> REPLACE
 ```
 
 When writing or editing files, you MUST append one Payload Block per file immediately after the Control Block in the exact order of the tool calls.
@@ -60,8 +59,8 @@ Conversational reply (no action needed) — just write natural Markdown, no code
    - ` ```lang filename=<path> ` blocks are **EXCLUSIVELY** payload blocks that pair with a `write_file()` or `edit_file()` call. 
    - NEVER use ` filename= ` to label or display file contents, command outputs, or `view_file()` outputs. Doing so triggers a parser error.
    - The payload blocks MUST appear sequentially matching the exact order of the tool calls in your Control Block.
-   - **For write_file()**: You MUST wrap the file content inside explicit `<<<<<<< CONTENT` and `>>>>>>> CONTENT` markers. This guarantees correct parsing.
-   - **For edit_file()**: You MUST use the `<<<<<<< SEARCH` and `>>>>>>> REPLACE` markers.
+   - **For write_file()**: You MUST use `<<<<<<< SEARCH`, `=======`, and `>>>>>>> REPLACE` markers. Leave the SEARCH section empty and put the full file content in the REPLACE section. This guarantees correct parsing.
+   - **For edit_file()**: You MUST use `<<<<<<< SEARCH`, `=======`, and `>>>>>>> REPLACE` markers with the exact old text in SEARCH and new text in REPLACE.
 3. **STEP**: Any step you take can be either agentic or only conversational, for conversational just respond in natural markdown without any tool call or task(finish=True), For agentic step use task(finish=True) to exiting agentic loop once task complete.
 
 ---
