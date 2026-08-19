@@ -613,11 +613,11 @@ class BlockParser:
             if needs_payload:
                 synthetic += f"```python filename={filepath}\n"
                 if tool == "write_file":
-                    synthetic += "<<<<<<< CONTENT\n# full file content here\n>>>>>>> CONTENT\n```\n"
+                    synthetic += "<<<<<<< SEARCH\n=======\n# full file content here\n>>>>>>> REPLACE\n```\n"
                 elif tool == "edit_file":
                     synthetic += "<<<<<<< SEARCH\n# content to search\n=======\n# content to replace\n>>>>>>> REPLACE\n```\n"
                 else:
-                    synthetic += "<<<<<<< CONTENT\n...\n>>>>>>> CONTENT\n```\n"
+                    synthetic += "<<<<<<< SEARCH\n=======\n...\n>>>>>>> REPLACE\n```\n"
 
         return (
             f"PROTOCOL VIOLATION: {error_msg}\n\n"

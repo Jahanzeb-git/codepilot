@@ -360,6 +360,49 @@ class FilesystemTools:
         write_file("scripts/deploy.sh", from_cache_id=1)
         ```
         """
+    @staticmethod
+    def _extract_clean_write_content(raw: str) -> str:
+        """Extract clean content from raw payload text, stripping SEARCH/REPLACE or CONTENT markers if present."""
+        lines = raw.splitlines(keepends=True)
+
+        # Check if SEARCH/REPLACE format is used
+        has_search = any(l.strip().startswith("<<<<<<< SEARCH") for l in lines)
+        has_replace = any(l.strip().startswith(">>>>>>> REPLACE") for l in lines)
+
+        if has_search and has_replace:
+            replace_lines = []
+            state = "OUTSIDE"
+            for line in lines:
+                stripped = line.strip()
+                if stripped.startswith("<<<<<<< SEARCH"):
+                    state = "SEARCH"
+                elif stripped == "=======" or stripped.startswith("======="):
+                    if state == "SEARCH":
+                        state = "REPLACE"
+                elif stripped.startswith(">>>>>>> REPLACE"):
+                    if state == "REPLACE":
+                        state = "OUTSIDE"
+                elif state == "REPLACE":
+                    replace_lines.append(line)
+            if replace_lines:
+                return "".join(replace_lines)
+
+        # Check if CONTENT format is used
+        import re
+        c_match = re.search(r"<{5,9}\s*CONTENT\s*\n(.*?)\n>{5,9}\s*CONTENT", raw, re.DOTALL)
+        if c_match:
+            return c_match.group(1)
+
+        return raw
+
+    def write_file(
+        self,
+        path: str,
+        from_cache_id: Optional[int] = None,
+    ) -> None:
+        """
+        Create a new file or overwrite an existing file.
+        """
         ui_status = f"Creating {path}..."
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="write_file",
@@ -402,7 +445,7 @@ class FilesystemTools:
             if err:
                 self._emit_error("write_file", err)
                 return
-            content = payload.content
+            content = self._extract_clean_write_content(payload.content)
 
         # Permission gate
         tool_cfg = self.runtime._tool_config("write_file")
