@@ -51,8 +51,6 @@ agent:
   tools:
     - name: read_file
       enabled: true
-    - name: write_file
-      enabled: true
     - name: execute
       enabled: true
       config:
@@ -142,97 +140,58 @@ flowchart LR
 
 ## Why Code-as-Interface
 
-Most agent frameworks force the model to express actions as JSON function calls. CodePilot instead asks the model to write Python inside a fenced `codepilot` control block:
+Most agent frameworks force the model to express actions as JSON function calls. CodePilot uses a diff-native Code-as-Interface protocol: each workspace mutation is a self-contained unified diff, and tool calls live in a fresh ephemeral `codepilot.py` diff:
 
 ````markdown
 I will inspect the failing test first.
 
-```codepilot
-read_file("tests/test_api.py")
-execute("main", "pytest tests/test_api.py -q", timeout=30)
+```diff
+diff --git a/codepilot.py b/codepilot.py
+--- /dev/null
++++ b/codepilot.py
+@@ -0,0 +1,2 @@
++view_file("tests/test_api.py")
++execute("main", "pytest tests/test_api.py -q", timeout=30)
 ```
 ````
 
-The runtime executes only the `codepilot` block. Ordinary `python` markdown remains display text and is never executed.
+The runtime executes only the generated ephemeral `codepilot.py` script. Ordinary Python markdown remains display text and is never executed.
 
 This design is useful because software work is naturally procedural:
 
 - Agents often need several tool calls in a deliberate order.
 - Tool results need to feed control flow inside the same step.
-- File writes need structured side-loaded payloads, not fragile escaped strings.
+- File writes use reviewable, self-describing diffs instead of fragile escaped strings or positional payloads.
 - Developers need observable execution results, not opaque function-call envelopes.
 
 The model still operates under a strict protocol:
 
-- `codepilot` block: executable control code.
-- Payload blocks: file content consumed by `write_file()`.
-- `completion` block: explicit task-finished signal.
+- `diff --git a/path b/path`: a complete file mutation.
+- `diff --git a/codepilot.py b/codepilot.py`: fresh executable tool script.
+- `task(finish=True)` in the script: explicit task-finished signal.
 
 This aligns with research showing that LLM agents benefit from interleaving reasoning and environment actions, as in ReAct, and from well-designed agent-computer interfaces for software engineering tasks.
 
 ## How File Editing Works
 
-`write_file()` never accepts file content as an inline string. Content comes from the next payload block, in order. This avoids escaping failures, malformed JSON arguments, and partial string corruption.
+Each hunk is applied by reconstructing its old and new blocks. The runtime ignores `@@` line counts, uniquely finds the old block in the current file while ignoring indentation, then replaces it with the new block. Context lines retain the file's actual indentation. A zero-match or multi-match hunk is rejected without guessing.
 
-Single file creation:
-
-````markdown
-```codepilot
-write_file("config.py", mode="w")
+```diff
+diff --git a/config.py b/config.py
+--- a/config.py
++++ b/config.py
+@@ -999,1 +999,1 @@
+-TIMEOUT = 30
++TIMEOUT = 60
 ```
 
-```python filename=config.py
-TIMEOUT = 30
-RETRIES = 3
-```
-````
-
-Line-based edit:
-
-````markdown
-```codepilot
-file_editor("config.py", mode="edit")
-```
-
-```python filename=config.py
-<<<<<<< SEARCH
-TIMEOUT = 30
-=======
-TIMEOUT = 60
->>>>>>> REPLACE
-```
-````
-
-Multiple non-contiguous edits in one file:
-
-````markdown
-```codepilot
-file_editor("routes/profile.py", mode="edit")
-```
-
-```python filename=routes/profile.py
-<<<<<<< SEARCH
-def get_profile():
-    return {}
-=======
-def get_profile():
-    return {"status": "ok"}
->>>>>>> REPLACE
-<<<<<<< SEARCH
-def update_profile():
-    pass
-=======
-def update_profile(data):
-    save(data)
->>>>>>> REPLACE
-```
-````
+For creation or a complete rewrite, emit a pure-addition hunk. If an OS-level failure occurs after a large diff is parsed, CodePilot reports `diff_cache_id`; repair the condition in `codepilot.py` and call `retry_diff(id)` to replay the exact cached operation.
 
 Safety properties:
 
 - Paths are constrained to `runtime.work_dir` unless `unsafe_mode: true`.
-- Edits are validated using exact block matching before mutation.
-- Multiple edits to the same file are processed sequentially.
+- Edits use unique content matching before mutation; hunk counts are never trusted.
+- Multiple hunks are applied against evolving in-memory content, then committed atomically per file diff.
 - Tool results are appended back into the conversation as ground truth.
 
 ## How Terminal Tools Work
@@ -353,7 +312,7 @@ CodePilot’s design is influenced by agent and tool-use research:
 - [SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering](https://arxiv.org/abs/2405.15793) argues that software agents benefit from purpose-built interfaces for navigating repositories, editing files, and running programs.
 - [Voyager: An Open-Ended Embodied Agent with Large Language Models](https://arxiv.org/abs/2305.16291) demonstrates the value of agents that accumulate skills while acting in an external environment.
 
-CodePilot translates those ideas into a small Python library focused on practical software work: executable control blocks, payload-backed file edits, persistent terminals, observable hooks, and pluggable session storage.
+CodePilot translates those ideas into a small Python library focused on practical software work: ephemeral executable scripts, content-addressed diff edits, persistent terminals, observable hooks, and pluggable session storage.
 
 ## Documentation
 

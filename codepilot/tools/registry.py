@@ -83,7 +83,7 @@ class ToolRegistry:
         the primacy effect, mitigating LLM "Lost in the Middle" syndrome.
         """
         categories = {
-            "### 📁 Filesystem & Workspace Tools": ["view_file", "write_file", "edit_file", "find", "semantic_search"],
+            "### 📁 Filesystem & Workspace Tools": ["view_file", "find", "semantic_search"],
             "### 💻 Terminal & Execution Tools": ["execute", "read_output", "send_input", "terminate_terminal"],
             "### 🔌 MCP Tools": ["mcp"],
             "### 🧠 Context Maintenance": ["archive_context"],

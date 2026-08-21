@@ -27,12 +27,14 @@ import queue
 import re
 import threading
 import traceback
+from pathlib import Path
+from dataclasses import replace
 from typing import Dict, List, Optional, Any, Union
 
 from ..core.prompt import SystemPromptParts
 
 from ..core.agent_file import AgentConfig
-from ..core.block_parser import BlockParser, CodeBlock
+from ..core.diff_protocol import DiffOperation, DiffProtocolError, apply_operation, parse_operations
 from ..core.context import ContextManager
 from ..core.memory import (
     MemoryManager, MemoryConfig,
@@ -61,7 +63,8 @@ _ROLE_ASSISTANT = "assistant"
 TAG_USER_INJECTION   = "[USER MESSAGE]"
 TAG_EXECUTION_RESULT = "[EXECUTION RESULT]"
 TAG_ENV_CHANGE       = "[ENVIRONMENT CHANGE]"
-CONTROL_BLOCK_FILENAME = "<codepilot-control-block>"
+CONTROL_BLOCK_FILENAME = "~/.codepilot/runtime/codepilot.py"
+RUNTIME_SCRIPT_NAME = "codepilot.py"
 
 # Background timer delay for upgrading Anthropic cache TTL to 1h.
 # Set to 4.5 minutes — just before the default 5min TTL expires.
@@ -76,15 +79,13 @@ class AsyncRuntime:
     Streaming
     ---------
     When ``stream=True``, the LLM response is received token by token.
-    Any natural text before the first code fence is emitted immediately via
-    the STREAM hook, giving the user real-time feedback while the rest of the
-    response (code blocks, payload blocks) buffers silently.  Once the full
-    response is received the normal parse, validate, execute pipeline runs
-    unchanged.
+    Any natural text before the first diff header is emitted immediately via
+    the STREAM hook, giving the user real-time feedback while file operations
+    buffer until their complete diff records can be validated and applied.
 
-    When ``stream=False`` (default), the full response is fetched in one call.
-    Pre-fence text is still emitted as a single ``STREAM`` event for
-    consistency — hook handlers work identically in both modes.
+    Streaming is enabled by default so natural Markdown reaches the UI while
+    diff records are safely buffered. Set ``stream=False`` to suppress public
+    STREAM hooks; inference still streams internally for protocol detection.
 
     Multi-turn
     ----------
@@ -97,16 +98,15 @@ class AsyncRuntime:
     memory (default) — in-RAM, lost on exit.
     file             — persisted to ~/.codepilot/sessions/<id>.json.
 
-    Multi-file writes
+    Multi-file diffs
     -----------------
-    Any number of ``write_file()`` calls per step (mode='w' / 'a').
-    Edits and inserts: one per step to prevent line-number drift.
-    Each ``write_file()`` consumes the next Payload Block in order.
+    Any number of independent file diffs may appear in a step. Hunk ranges
+    are ignored; edits are located by uniquely matching their old content.
 
     Parallel commands
     -----------------
     ``run_command(cmd, execution="parallel")`` queues commands; they are
-    launched simultaneously after the control block finishes.
+    launched simultaneously after the runtime script finishes.
     """
 
     def __init__(
@@ -115,7 +115,7 @@ class AsyncRuntime:
         session: str = "memory",
         session_id: Optional[str] = None,
         session_dir=None,
-        stream: bool = False,
+        stream: bool = True,
         db_url: Optional[str] = None,
         db=None,
     ):
@@ -136,18 +136,14 @@ class AsyncRuntime:
         # ------------------------------------------------------------------ #
         #  Per-step ephemeral state                                            #
         # ------------------------------------------------------------------ #
-        self._payload_queue:    List[CodeBlock] = []
         self._execution_buffer: List[str]       = []
-        self._step_write_count:  int = 0
-        self._step_edited_files: set[str] = set()
-
-        # Payload cache: populated at parse-time (before execution) so OS-level
-        # failures can offer from_cache_id=<N> recovery.
-        # Keys are auto-incrementing integer IDs, values are content strings.
-        # Decoupled from file paths so the LLM can retry with a corrected path.
-        # Entries are evicted on successful write/edit to prevent stale reuse.
-        self._payload_cache: dict[int, str] = {}
-        self._payload_cache_counter: int = 0
+        # A failed filesystem diff may be large.  Retain the parsed operation so
+        # the next script can repair permissions and replay it without asking the
+        # model to reproduce content.
+        self._diff_cache: dict[int, DiffOperation] = {}
+        self._diff_cache_counter: int = 0
+        self._runtime_script_path = Path.home() / ".codepilot" / "runtime" / RUNTIME_SCRIPT_NAME
+        self._reset_runtime_script()
 
         self.context_manager = ContextManager(self.config.runtime.work_dir)
         self.prompt_manager  = PromptManager()
@@ -329,8 +325,7 @@ class AsyncRuntime:
             self.hooks.emit(EventType.STEP, step=step, max_steps=self.config.runtime.max_steps)
 
             # Reset per-step state
-            self._step_write_count = 0
-            self._step_edited_files = set()
+            self._reset_runtime_script()
 
             # 1. Drain mid-execution queue before next inference
             self._drain_message_queue()
@@ -375,46 +370,12 @@ class AsyncRuntime:
                 self._append_execution_result(f"PROVIDER ERROR: {error_msg}")
                 continue
 
-            # 4. Parse response first so we can extract payload blocks.
-            # Parser errors are recoverable model-format mistakes. Preserve the
-            # assistant response in history, then feed back a protocol-level
-            # correction message so the next inference can fix its block shape.
-            try:
-                control_block, payload_blocks, protocol_warning = BlockParser.split(response_text)
-            except ValueError as exc:
-                from codepilot.core.block_parser import ProtocolViolationError
-                self.messages.append({"role": _ROLE_ASSISTANT, "content": response_text})
-                if isinstance(exc, ProtocolViolationError):
-                    error_msg = str(exc)
-                else:
-                    error_msg = self._format_parser_error(str(exc))
-                # Attempt to salvage payload content by position even though
-                # the response had protocol violations. This allows the LLM to
-                # retry failed writes using from_cache_id=<N> without regenerating.
-                salvaged = BlockParser.salvage_payloads_for_cache(response_text)
-                if salvaged:
-                    salvage_lines = []
-                    retry_lines = []
-                    for target_path, content in salvaged:
-                        cache_id = self._cache_payload(content)
-                        salvage_lines.append(f"  - '{target_path}' → cache_id={cache_id}")
-                        retry_lines.append(f'write_file("{target_path}", from_cache_id={cache_id})')
-                    system_msg = (
-                        "\n\n[SYSTEM] Despite the error, file content was salvaged by "
-                        "positional matching and cached:\n"
-                        + "\n".join(salvage_lines)
-                        + "\n\nIn the next step, retry WITHOUT payload blocks — "
-                        "content will be loaded from cache:\n"
-                        "```codepilot\n"
-                        + "\n".join(retry_lines)
-                        + "\n```\n"
-                        "Important: DO NOT regenerate file content. No payload block(s) needed — "
-                        "call write_file() directly in control block without associating payload block."
-                    )
-                    error_msg = error_msg + system_msg
-                self.hooks.emit(EventType.RUNTIME_ERROR, error=error_msg)
-                self._append_execution_result(error_msg)
-                continue
+            # 4. Parse self-contained diff operations.  Natural Markdown with no
+            # diff is a conversational response; the old positional payload
+            # protocol is intentionally no longer recognised.
+            # parse_operations is fault-tolerant: it returns (ops, parse_errors)
+            # so a single malformed diff block does not abort the good ones.
+            operations, parse_errors = parse_operations(response_text)
 
             # 4.5 Fire observability hook with the exact raw LLM generation
             # BEFORE any execution side effects. This is the place in the pipeline
@@ -431,10 +392,7 @@ class AsyncRuntime:
             # model does not reinforce the pattern on the next inference step.
             stored_response = re.sub(r"\s*</task_\d+>", "", response_text)
             
-            # Self-Correcting History: If the LLM glued the fence to the previous sentence
-            # or used only one newline, auto-correct it to \n\n before saving to history.
-            # This ensures the LLM learns the perfect pattern for future turns.
-            stored_response = re.sub(r"([^\n])\s*(```codepilot\b)", r"\1\n\n\2", stored_response).strip()
+            stored_response = stored_response.strip()
             
             self.messages.append({"role": _ROLE_ASSISTANT, "content": stored_response})
 
@@ -442,53 +400,34 @@ class AsyncRuntime:
             self._last_system_prompt = system_prompt
             self._schedule_cache_timer()
 
-            if control_block is None:
-                # No ```codepilot block → conversational reply (may include
-                # display ```python blocks). Already streamed to user.
+            if not operations and not parse_errors:
+                # No diff at all — conversational reply. Already streamed to user.
                 break
 
-            # 5. Populate payload cache BEFORE execution.
-            # This ensures content is cached even if the OS rejects the write.
-            # Cache IDs are auto-assigned; the mapping from tool-call position
-            # to cache ID is stored so filesystem tools can look up by ID.
-            # Only calls with payload_count==1 are cached (from_cache_id calls
-            # have payload_count==0 and are excluded).
-            try:
-                write_calls, _, _ = BlockParser._extract_write_file_calls(control_block.content)
-                cache_targets = [fp for fp, cnt in write_calls if cnt == 1]
-                self._step_precache_ids: dict[str, int] = {}
-                for target, block in zip(cache_targets, payload_blocks):
-                    cache_id = self._cache_payload(block.content)
-                    self._step_precache_ids[target] = cache_id
-            except Exception:
-                pass  # Cache population is best-effort; never block execution
-
-            # 6. Execute
-            # (Post-execution [SYSTEM] cache notice removed — now inline in tools)
-            self._payload_queue    = list(payload_blocks)
+            # 5. Apply all workspace diffs, then execute the ephemeral script.
             self._execution_buffer = []
-            await self._execute(control_block.content)
 
-            # 5.5 If surplus payload blocks were detected, the warning is appended
-            # AFTER the tool outputs in its own [PROTOCOL WARNING] section so
-            # the model can clearly distinguish factual tool results from
-            # meta-feedback about its own generation quality.
-            # The warning explicitly states the operation succeeded so the
-            # model does NOT attempt to redo the step.
+            # Feed back parse errors for each malformed diff block BEFORE applying
+            # the good ones.  This preserves the left-to-right reading order in
+            # [EXECUTION RESULT] so the model sees positional context.
+            for pos, target, exc in parse_errors:
+                err_msg = self._format_diff_error(str(exc))
+                # Prepend position so the model can correlate with its own output.
+                self._append_execution(
+                    f"[diff #{pos} for '{target}'] PARSE FAILED: {err_msg}"
+                )
+                self.hooks.emit(EventType.RUNTIME_ERROR, error=err_msg)
+
+            await self._apply_diff_operations(operations)
+            script = self._runtime_script_path.read_text(encoding="utf-8")
+            if script:
+                await self._execute(script)
+            self._reset_runtime_script()
 
             # 7. Assemble execution result and feed back as next user turn
             execution_result = "\n\n".join(self._execution_buffer).strip()
             if not execution_result:
-                execution_result = "[Control block executed with no output.]"
-            if protocol_warning:
-                self.hooks.emit(EventType.RUNTIME_ERROR, error=protocol_warning)
-                execution_result = (
-                    f"{execution_result}\n\n"
-                    f"[PROTOCOL WARNING]\n{protocol_warning}"
-                )
-            # Note: [SYSTEM] retry notices for cached content are now emitted
-            # inline by the filesystem tools (write_file/edit_file) themselves
-            # with failure-type-specific guidance. No global notice needed here.
+                execution_result = "[Diff step completed with no output.]"
             self._append_execution_result(execution_result)
 
             if self._context_maintenance_completed:
@@ -499,7 +438,7 @@ class AsyncRuntime:
             #    stream reflects reality — summary appears after tools ran.
             if self._done:
                 trailing = self._extract_trailing_text(
-                    response_text, control_block, payload_blocks
+                    response_text, operations
                 )
                 if trailing:
                     self.hooks.emit(EventType.STREAM, text=trailing)
@@ -591,7 +530,7 @@ class AsyncRuntime:
         """
         Register a custom tool into the agent's sandbox.
 
-        The tool is callable by name in the agent's control block.
+        The tool is callable by name in the ephemeral runtime script.
         Its docstring is automatically injected into the system prompt.
 
         Args:
@@ -610,9 +549,11 @@ class AsyncRuntime:
         Inject a synthetic 'Pre-Flight Diagnostic' sequence into an empty session.
         This provides the LLM with real environment context (OS, Python) while
         serving as a flawless few-shot example of:
-        1. Emitting perfectly fenced ```codepilot blocks (with blank lines).
+        1. Emitting a valid ```diff-fenced unified diff for codepilot.py.
         2. Chaining terminal commands with '&&' instead of raw newlines.
-        3. Properly closing a task with task(finish=True).
+        3. Properly closing a task with task(finish=True) in a separate step.
+        The synthetic messages use the current diff protocol so the model
+        pattern-matches the correct format from turn zero.
         """
         import platform
         import sys
@@ -638,8 +579,12 @@ class AsyncRuntime:
                 "role": _ROLE_ASSISTANT,
                 "content": (
                     "I will check the operating system and Python environment to ensure I have the correct context before proceeding.\n\n"
-                    "```codepilot\n"
-                    f'execute("main", "{cmd}", timeout=5)\n'
+                    "```diff\n"
+                    "diff --git a/codepilot.py b/codepilot.py\n"
+                    "--- /dev/null\n"
+                    "+++ b/codepilot.py\n"
+                    "@@ -0,0 +1,1 @@\n"
+                    f'+execute("main", "{cmd}", timeout=5)\n'
                     "```"
                 )
             },
@@ -651,8 +596,12 @@ class AsyncRuntime:
                 "role": _ROLE_ASSISTANT,
                 "content": (
                     "Environment verified successfully. I am standing by for the user's first task.\n\n"
-                    "```codepilot\n"
-                    "task(finish=True)\n"
+                    "```diff\n"
+                    "diff --git a/codepilot.py b/codepilot.py\n"
+                    "--- /dev/null\n"
+                    "+++ b/codepilot.py\n"
+                    "@@ -0,0 +1,1 @@\n"
+                    "+task(finish=True)\n"
                     "```"
                 )
             },
@@ -669,23 +618,176 @@ class AsyncRuntime:
     #  Internal helpers — used by tool classes                                #
     # ====================================================================== #
 
-    def pop_payload_block_for_path(self, path: str) -> Optional[CodeBlock]:
-        """Find and extract the payload block specifically annotated for this path."""
-        norm_path = path.replace("\\", "/")
-        for i, block in enumerate(self._payload_queue):
-            if block.filename and block.filename.replace("\\", "/") == norm_path:
-                return self._payload_queue.pop(i)
-        return None
-
     def _append_execution(self, text: str):
         self._execution_buffer.append(text)
 
-    def _cache_payload(self, content: str) -> int:
-        """Store content in the payload cache and return its unique ID."""
-        self._payload_cache_counter += 1
-        cache_id = self._payload_cache_counter
-        self._payload_cache[cache_id] = content
+    def _cache_diff(self, operation: DiffOperation) -> int:
+        """Store a failed, parsed diff operation for lossless retry."""
+        self._diff_cache_counter += 1
+        cache_id = self._diff_cache_counter
+        self._diff_cache[cache_id] = operation
         return cache_id
+
+    def _reset_runtime_script(self) -> None:
+        self._runtime_script_path.parent.mkdir(parents=True, exist_ok=True)
+        self._runtime_script_path.write_text("", encoding="utf-8")
+
+    def _safe_diff_path(self, path: str) -> Path:
+        work_dir = Path(self.config.runtime.work_dir).resolve()
+        candidate = (work_dir / path).resolve()
+        if not self.config.runtime.unsafe_mode and not candidate.is_relative_to(work_dir):
+            raise PermissionError(f"'{path}' is outside workspace '{work_dir}'.")
+        return candidate
+
+    async def _apply_diff_operations(self, operations: list[DiffOperation]) -> None:
+        """Apply each independent diff with existing TOOL_CALL/RESULT hooks."""
+        for operation in operations:
+            if operation.path.replace("\\", "/") == RUNTIME_SCRIPT_NAME:
+                try:
+                    source = apply_operation(operation, "", exists=False)
+                    self._runtime_script_path.write_text(source, encoding="utf-8")
+                    result = f"[diff] runtime script prepared ({len(source)} bytes)."
+                    self._append_execution(result)
+                    self.hooks.emit(EventType.TOOL_RESULT, tool="diff", result=result)
+                except DiffProtocolError as exc:
+                    # codepilot.py-specific: always a /dev/null creation diff,
+                    # so only creation-specific errors can appear here.
+                    result = (
+                        f"[diff:codepilot.py] REJECTED: {exc} "
+                        "Regenerate the complete codepilot.py diff using `--- /dev/null` "
+                        "and only `+` lines. No script ran this step."
+                    )
+                    self._append_execution(result)
+                    self.hooks.emit(EventType.TOOL_RESULT, tool="diff", result=result)
+                except OSError as exc:
+                    result = (
+                        f"[diff:codepilot.py] OS ERROR: {exc}. "
+                        "The runtime script directory may be missing. "
+                        "Regenerate the codepilot.py /dev/null diff; no script ran."
+                    )
+                    self._append_execution(result)
+                    self.hooks.emit(EventType.TOOL_RESULT, tool="diff", result=result)
+                continue
+
+            self.hooks.emit(
+                EventType.TOOL_CALL, tool="diff",
+                args={"path": operation.path, "hunks": len(operation.hunks)},
+                label=f"Applying diff to {operation.path}...",
+            )
+            try:
+                path = self._safe_diff_path(operation.path)
+                exists = path.exists()
+
+                if not exists and not operation.is_creation:
+                    result = (
+                        f"[diff] REJECTED: '{operation.path}' does not exist. "
+                        "You cannot apply an edit diff to a non-existent file. "
+                        "If you intended to create it, use a '--- /dev/null' creation diff."
+                    )
+                    self._append_execution(result)
+                    self.hooks.emit(EventType.TOOL_RESULT, tool="diff", result=result)
+                    continue
+
+                current = path.read_text(encoding="utf-8") if exists else ""
+                new_content = apply_operation(operation, current, exists)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(new_content, encoding="utf-8")
+                if hasattr(self, "_watcher"):
+                    self._watcher.register(str(path))
+                
+                if not exists:
+                    result = f"[diff] '{operation.path}' created ({len(operation.hunks)} hunk(s), {len(new_content)} bytes). (Missing parent directories auto-created)."
+                else:
+                    result = f"[diff] '{operation.path}' updated ({len(operation.hunks)} hunk(s), {len(new_content)} bytes)."
+                
+                self._append_execution(result)
+                self.hooks.emit(EventType.TOOL_RESULT, tool="diff", result=result)
+            except DiffProtocolError as exc:
+                e = str(exc).lower()
+                if "not found" in e:
+                    # Hunk content not in file — need more context lines.
+                    # Cannot cache because the operation itself is flawed.
+                    result = (
+                        f"[diff] REJECTED: '{operation.path}' unchanged. {exc} "
+                        "Regenerate this file's diff with more surrounding unchanged lines "
+                        "(context lines starting with a space) so the old region matches exactly once."
+                    )
+                elif "ambiguous" in e:
+                    # Multiple identical regions found.
+                    # Cannot cache because the operation itself is flawed.
+                    result = (
+                        f"[diff] REJECTED: '{operation.path}' unchanged. {exc} "
+                        "Add more unique context lines (lines with a space prefix) "
+                        "above or below the changed block to make the match unambiguous."
+                    )
+                else:
+                    # Structurally invalid (e.g., creation diff with wrong lines).
+                    result = (
+                        f"[diff] REJECTED: '{operation.path}' unchanged. {exc} "
+                        "Regenerate it from scratch."
+                    )
+                self._append_execution(result)
+                self.hooks.emit(EventType.TOOL_RESULT, tool="diff", result=result)
+            except OSError as exc:
+                cache_id = self._cache_diff(operation)
+                result = (
+                    f"[diff] OS ERROR: '{operation.path}' unchanged: {exc}\n"
+                    f"Diff cached as diff_cache_id={cache_id} — do not regenerate content. "
+                    f"Fix the OS condition in codepilot.py then call retry_diff({cache_id}) "
+                    f"or retry_diff({cache_id}, path='correct/path') if the target path was wrong."
+                )
+                self._append_execution(result)
+                self.hooks.emit(EventType.TOOL_RESULT, tool="diff", result=result)
+            except Exception as exc:
+                result = f"[diff] UNEXPECTED ERROR: '{operation.path}' unchanged: {type(exc).__name__}: {exc}."
+                self._append_execution(result)
+                self.hooks.emit(EventType.TOOL_RESULT, tool="diff", result=result)
+
+    def retry_diff(self, diff_cache_id: int, path: Optional[str] = None) -> None:
+        """Retry a cached diff after fixing an OS error; optional path corrects a bad target path."""
+        operation = self._diff_cache.get(diff_cache_id)
+        if operation is None:
+            self._append_execution(f"[diff] ERROR: diff_cache_id={diff_cache_id} is not available.")
+            return
+        # This method runs from codepilot.py synchronously; use the same single
+        # operation logic without an event-loop roundtrip.
+        try:
+            if path is not None:
+                operation = replace(operation, path=path)
+            path = self._safe_diff_path(operation.path)
+            exists = path.exists()
+
+            if not exists and not operation.is_creation:
+                self._append_execution(
+                    f"[diff] REJECTED: '{operation.path}' does not exist. "
+                    "Cannot retry an edit diff on a non-existent file."
+                )
+                return
+
+            current = path.read_text(encoding="utf-8") if exists else ""
+            new_content = apply_operation(operation, current, exists)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(new_content, encoding="utf-8")
+            self._diff_cache.pop(diff_cache_id, None)
+            
+            if not exists:
+                result = f"[diff] '{operation.path}' created from diff_cache_id={diff_cache_id}."
+            else:
+                result = f"[diff] '{operation.path}' updated from diff_cache_id={diff_cache_id}."
+                
+            self._append_execution(result)
+            self.hooks.emit(EventType.TOOL_RESULT, tool="diff", result=result)
+        except DiffProtocolError as exc:
+            self._append_execution(
+                f"[diff] REJECTED: cached diff {diff_cache_id} no longer matches the current file: {exc} "
+                "Read the current file with view_file() and generate a fresh diff; "
+                "the cached operation was retained for reference."
+            )
+        except OSError as exc:
+            self._append_execution(
+                f"[diff] OS ERROR: cached diff {diff_cache_id} still failing: {exc}. "
+                "Fix the environment condition and call retry_diff again."
+            )
 
     def _tool_config(self, tool_name: str) -> dict:
         for tc in self.config.tools:
@@ -725,12 +827,10 @@ class AsyncRuntime:
         enabled = (
             {tc.name for tc in self.config.tools if tc.enabled}
             if self.config.tools
-            else {"view_file", "write_file", "edit_file", "execute", "read_output",
+            else {"view_file", "execute", "read_output",
                   "send_input", "terminate_terminal", "ask_user", "find"}
         )
         if "view_file"          in enabled: self.registry.register("view_file",           self._fs_tools.view_file)
-        if "write_file"         in enabled: self.registry.register("write_file",          self._fs_tools.write_file)
-        if "edit_file"          in enabled: self.registry.register("edit_file",           self._fs_tools.edit_file)
         if "execute"             in enabled: self.registry.register("execute",             self._terminal_manager.execute)
         if "read_output"         in enabled: self.registry.register("read_output",         self._terminal_manager.read_output)
         if "send_input"          in enabled: self.registry.register("send_input",          self._terminal_manager.send_input)
@@ -769,6 +869,7 @@ class AsyncRuntime:
         """
         # Runtime control
         self.registry.register("task",                  self._task_control)
+        self.registry.register("retry_diff",            self.retry_diff)
 
         # Sub-agent tools — only registered when enabled in config
         if self.config.sub_agents.enabled:
@@ -860,7 +961,7 @@ class AsyncRuntime:
 
         task(finish=True) — marks the current task as complete. The agentic
         loop terminates after this step finishes executing. Write your
-        final summary as plain text before or after the ```codepilot block.
+        final summary as plain text before or after the diff records.
         """
         if finish:
             self._done = True
@@ -1018,30 +1119,42 @@ class AsyncRuntime:
     @staticmethod
     def _extract_trailing_text(
         response_text: str,
-        control_block,
-        payload_blocks: list,
+        operations: list[DiffOperation],
     ) -> str:
         """Extract raw text after the last parsed block.
 
         This text is the agent's final summary — streamed to the user after
         execution completes, replacing the old ```completion block.
         """
-        last_block = payload_blocks[-1] if payload_blocks else control_block
-        if last_block is None:
+        if not operations:
             return ""
-        return response_text[last_block.end_pos:].strip()
+        last = operations[-1].source
+        start = response_text.rfind(last)
+        if start < 0:
+            return ""
+        trailing = response_text[start + len(last):].strip()
+        return trailing.strip("`").strip()
 
     # ------------------------------------------------------------------ #
     #  Streaming inference                                                 #
     # ------------------------------------------------------------------ #
 
-    _CONTROL_FENCE_RE = re.compile(r"```codepilot\n")
+    # Primary trigger: the ```diff opening fence. Buffering starts here so the
+    # fence itself is never streamed to the user as raw text.
+    _DIFF_FENCE_OPEN_RE = re.compile(r"```diff\n")
+    # Fallback trigger: bare diff --git header when the model omits the fence.
+    # The parser handles fenceless diffs fine; we just need to stop streaming.
+    _DIFF_HEADER_RE = re.compile(r"^diff --git a/.+? b/.+?$", re.MULTILINE)
+    # Kept for backward compatibility with _find_control_fence / _emit_prefence_text.
+    _CONTROL_FENCE_RE = _DIFF_HEADER_RE
     # Matches a standalone closing ``` fence line: newline + ``` + optional spaces + newline.
     # Used by the second-block early-abort logic to track the last clean clip point.
     _CLOSE_FENCE_RE = re.compile(r"\n```[ \t]*\n")
-    # Hold-back: buffer enough chars to avoid prematurely emitting a
-    # partial fence marker split across streaming chunks.
-    _HOLDBACK = len("```codepilot")  # 12 chars
+    # Hold-back: buffer enough chars to avoid prematurely emitting a partial marker.
+    _HOLDBACK = len("diff --git a/x b/x")
+    # The abort sentinel for a second codepilot.py action script in one generation.
+    # Only codepilot.py diffs are restricted; multi-file workspace diffs are fine.
+    _CODEPILOT_DIFF_HEADER = "diff --git a/codepilot.py b/codepilot.py"
 
     async def _stream_inference(
         self, system_prompt: Union[str, SystemPromptParts], messages: List[Dict] = None, force_thinking: bool = False
@@ -1049,40 +1162,34 @@ class AsyncRuntime:
         """
         Stream the LLM response token by token — 3-state machine:
 
-          'streaming'   — accumulate text; emit to the user in real time ONLY
-                          when self._stream is True. Watch for a line-anchored
-                          ```codepilot fence OR <thinking> tag.
+          'streaming'   — accumulate text; emit to the user in real time.
+                          Watch for ```diff fence (primary) or bare diff --git
+                          header (fallback) to transition to 'buffering'.
+                          Also watches for <thinking> open tag.
           'thinking'    — inside <thinking>...</thinking>. Emit chunks to
                           THINKING_STREAM only. Never forward to STREAM.
                           Never include in the returned response text.
-          'buffering'   — ```codepilot fence detected: accumulate silently
-                          until generation finishes OR a second ```codepilot
-                          block is detected (in which case we abort the stream
-                          early and clip at the last clean fence boundary).
+          'buffering'   — diff content detected: accumulate silently until
+                          generation finishes OR a second codepilot.py diff
+                          header is detected (early-abort fires, stream is
+                          clipped at the last clean closing-fence boundary).
 
-        Internal-always-stream contract:
-          This method is ALWAYS called regardless of the public stream= flag.
-          When self._stream is False, all EventType.STREAM emissions are
-          suppressed so the API surface is silent — but the token stream from
-          the provider is still consumed in real time, enabling the second-block
-          early-abort to fire before the model wastes further tokens.
+        Detection order (streaming → buffering transition):
+          1. ```diff\n  — PRIMARY. The opening fence triggers buffering before
+             the diff --git line arrives, so the fence itself is never leaked
+             to the user stream as raw Markdown text.
+          2. diff --git a/... b/... — FALLBACK. When the model emits a diff
+             without a ```diff fence wrapper, the bare header triggers buffering
+             so the parser can still find and apply the operation.
 
-        Second-block early-abort logic:
-          While buffering, we track `last_clean_clip_pos` — the character
-          position in the accumulated buffer immediately after the closing ```
-          of the most recently completed fence (codepilot block close OR any
-          payload block close). When we detect the opening of a second
-          ```codepilot block, we immediately break out of the stream loop and
-          clip the accumulated buffer at `last_clean_clip_pos`. The stored
-          history therefore contains a syntactically complete, single-block
-          response — the model never sees that generation was cut off.
-
-        Returning accumulated WITHOUT the thinking block ensures BlockParser
-        never sees code fences inside chain-of-thought, eliminating the
-        payload-mismatch parser error on the first prompt.
-
-        A hold-back buffer prevents premature emission when fence/tag markers
-        are split across streaming chunks.
+        Early-abort (second codepilot.py diff):
+          Only a second `diff --git a/codepilot.py b/codepilot.py` triggers
+          the abort — not every second diff --git, because emitting multiple
+          independent workspace-file diffs in one step is intentional and valid.
+          When the abort fires we clip the accumulated buffer at
+          last_clean_clip_pos (the char position right after the closing ```
+          of the last fully-completed diff block) so history always contains
+          a syntactically complete response. The model never sees the cut.
 
         Returns the complete response text (thinking stripped) for pipeline processing.
         """
@@ -1099,27 +1206,25 @@ class AsyncRuntime:
         # closing ``` fence we have seen. Updated every time a line that is
         # exactly ``` (a closing fence) is completed inside 'buffering'.
         last_clean_clip_pos: int = 0
-        # A small rolling window to detect a closing ``` fence line.
-        # We watch for the pattern \n```\n (or ```\n at the very start of buffering).
-        _CLOSE_FENCE       = "```"
-        _SECOND_CTRL_FENCE = "```codepilot\n"  # second control block opening
-        # We hold enough chars to never split the _SECOND_CTRL_FENCE marker.
-        _SECOND_FENCE_HOLDBACK = len(_SECOND_CTRL_FENCE)  # 14 chars
-
-        # Helper: scan the buffered text for the second ```codepilot opening.
-        # We need at least _SECOND_FENCE_HOLDBACK chars of lookahead to be sure
-        # we are not splitting the token across chunks.  We scan everything
-        # except the last _SECOND_FENCE_HOLDBACK chars (safe window).
-        def _second_ctrl_pos(buf: str, search_from: int) -> int:
-            """Return the start-index of the second ```codepilot\\n in buf, or -1."""
-            # The first occurrence of ```codepilot\\n is the control block itself.
-            # We look for a SECOND match after the end of the first.
-            first = buf.find(_SECOND_CTRL_FENCE, search_from)
-            return first  # caller ensures search_from is past the first block's open
-
-        # Position right after the first ```codepilot\n fence opening (set once we
-        # enter buffering state so the second-fence scanner starts after it).
+        # Sentinel string for the codepilot.py action-script diff header.
+        # Only a SECOND occurrence of this exact header triggers the abort;
+        # the first occurrence is what triggered buffering.
+        _CODEPILOT_HDR     = self._CODEPILOT_DIFF_HEADER  # "diff --git a/codepilot.py b/codepilot.py"
+        _SECOND_HDR_HOLDBACK = len(_CODEPILOT_HDR)  # safe look-ahead window
+        # Whether the first codepilot.py diff has been seen yet.
+        _first_codepilot_seen: bool = False
+        # Position in accumulated past which we scan for the second header.
         _first_ctrl_end: int = 0
+
+        def _second_codepilot_pos(buf: str, search_from: int) -> int:
+            """Return start-index of the second codepilot.py diff header, or -1."""
+            return buf.find(_CODEPILOT_HDR, search_from)
+
+        # Whether buffering was triggered by a ```diff fence (vs. bare header fallback).
+        # Tracked so we know what to look for as the primary detector.
+        _fence_triggered: bool = False
+        # The ```diff opening string for primary detection.
+        _DIFF_FENCE = "```diff\n"
 
         async for chunk in self.provider.chat_stream(
             messages=msgs,
@@ -1221,38 +1326,40 @@ class AsyncRuntime:
                         accumulated = "".join(chunks)
 
                         # -------------------------------------------------------- #
-                        # Second-block early-abort detection                        #
+                        # Second codepilot.py diff early-abort detection            #
                         #                                                            #
-                        # Strategy: scan the safe window (everything except the     #
-                        # last _SECOND_FENCE_HOLDBACK chars) for the second         #
-                        # ```codepilot\n marker.  If found, clip at                 #
-                        # last_clean_clip_pos and break out of the stream loop.     #
+                        # Scan the safe window for a second occurrence of the       #
+                        # codepilot.py diff header. Multiple workspace-file diffs   #
+                        # in one step are ALLOWED; only a second codepilot.py       #
+                        # action-script diff is forbidden (model hasn't seen the    #
+                        # first one's execution result yet).                        #
                         # -------------------------------------------------------- #
-                        safe_scan_end = len(accumulated) - _SECOND_FENCE_HOLDBACK
-                        if safe_scan_end > _first_ctrl_end:
-                            second_pos = _second_ctrl_pos(accumulated, _first_ctrl_end)
+                        safe_scan_end = len(accumulated) - _SECOND_HDR_HOLDBACK
+                        if _first_codepilot_seen and safe_scan_end > _first_ctrl_end:
+                            second_pos = _second_codepilot_pos(accumulated, _first_ctrl_end)
                             if second_pos != -1 and second_pos < safe_scan_end:
-                                # Second ```codepilot block detected.
+                                # Second codepilot.py diff detected — abort.
                                 # Clip at the last clean fence boundary we recorded.
                                 if last_clean_clip_pos > 0:
-                                    # Trim chunks to the clip point.
                                     clip_str = accumulated[:last_clean_clip_pos]
                                     chunks = [clip_str]
-                                # Break out of the inner while loop, then the outer
-                                # async for loop via a sentinel flag.
                                 holdback = "\x00ABORT\x00"
                                 break
 
                         # -------------------------------------------------------- #
+                        # Mark first codepilot.py diff as seen (once)              #
+                        # -------------------------------------------------------- #
+                        if not _first_codepilot_seen:
+                            cp_pos = accumulated.find(_CODEPILOT_HDR)
+                            if cp_pos != -1:
+                                _first_codepilot_seen = True
+                                # Start scanning for the second one after this header
+                                _first_ctrl_end = cp_pos + len(_CODEPILOT_HDR)
+
+                        # -------------------------------------------------------- #
                         # Track last clean clip position                            #
                         #                                                            #
-                        # A "clean clip point" is the position immediately after    #
-                        # a closing ``` fence line (i.e. a line that is exactly     #
-                        # ``` possibly with trailing whitespace).                   #
-                        #                                                            #
-                        # We scan the accumulated buffer for closing fence lines.   #
-                        # The pattern is: \n```\s*\n  (a standalone ``` line).      #
-                        # We take the rightmost such occurrence.                    #
+                        # A "clean clip point" is right after a closing ``` line.  #
                         # -------------------------------------------------------- #
                         for close_m in self._CLOSE_FENCE_RE.finditer(accumulated):
                             candidate = close_m.end()
@@ -1261,25 +1368,49 @@ class AsyncRuntime:
 
                         break
 
-                    # state == "streaming"
+                    # state == "streaming" — check for buffering trigger.
                     chunks.append(to_process)
                     accumulated = "".join(chunks)
-                    m = self._CONTROL_FENCE_RE.search(accumulated)
-                    if m:
-                        ctrl_pos = m.start()
+
+                    # -------------------------------------------------------- #
+                    # Primary trigger: ```diff\n fence                         #
+                    # Buffering starts at the backtick, so the fence itself    #
+                    # is never emitted to the user stream as raw text.         #
+                    # -------------------------------------------------------- #
+                    fence_m = self._DIFF_FENCE_OPEN_RE.search(accumulated)
+                    if fence_m:
+                        # Emit everything BEFORE the opening fence.
+                        ctrl_pos = fence_m.start()
                         if self._stream and ctrl_pos > pre_fence_emitted:
                             self.hooks.emit(EventType.STREAM,
                                             text=accumulated[pre_fence_emitted:ctrl_pos])
                         state = "buffering"
-                        # Record where the first control fence opening ends so the
-                        # second-fence scanner never mis-fires on the first one.
-                        _first_ctrl_end = m.end()
+                        _fence_triggered = True
+                        # Scanner starts after the fence open; codepilot.py header
+                        # will be detected inside the buffered block below.
+                        _first_ctrl_end = fence_m.end()
                     else:
-                        safe_end = len(accumulated) - self._HOLDBACK
-                        if self._stream and safe_end > pre_fence_emitted:
-                            self.hooks.emit(EventType.STREAM,
-                                            text=accumulated[pre_fence_emitted:safe_end])
-                            pre_fence_emitted = safe_end
+                        # ---------------------------------------------------- #
+                        # Fallback trigger: bare diff --git header (no fence)   #
+                        # ---------------------------------------------------- #
+                        hdr_m = self._DIFF_HEADER_RE.search(accumulated)
+                        if hdr_m:
+                            ctrl_pos = hdr_m.start()
+                            if self._stream and ctrl_pos > pre_fence_emitted:
+                                self.hooks.emit(EventType.STREAM,
+                                                text=accumulated[pre_fence_emitted:ctrl_pos])
+                            state = "buffering"
+                            _first_ctrl_end = hdr_m.end()
+                            # If this bare header IS the codepilot.py header, mark it seen.
+                            if _CODEPILOT_HDR in accumulated[hdr_m.start():hdr_m.end() + 1]:
+                                _first_codepilot_seen = True
+                                _first_ctrl_end = hdr_m.start() + len(_CODEPILOT_HDR)
+                        else:
+                            safe_end = len(accumulated) - self._HOLDBACK
+                            if self._stream and safe_end > pre_fence_emitted:
+                                self.hooks.emit(EventType.STREAM,
+                                                text=accumulated[pre_fence_emitted:safe_end])
+                                pre_fence_emitted = safe_end
                     break
 
             # ------------------------------------------------------------------ #
@@ -1333,21 +1464,74 @@ class AsyncRuntime:
             self.hooks.emit(EventType.STREAM, text=response_text.strip())
 
     @staticmethod
-    def _format_parser_error(error: str) -> str:
+    def _format_diff_error(error: str) -> str:
+        """
+        Return a terse, failure-class-aware correction for a DiffProtocolError
+        raised by parse_operations().
+
+        The model's response has already been stored in history.  This message
+        appears as [EXECUTION RESULT] so the model sees exactly what it did wrong
+        and what the minimum fix is.  Every word here costs a token on the retry.
+        """
+        e = error.lower()
+
+        # --- No @@ hunk marker at all --- #
+        if "no @@ hunk marker" in e:
+            return (
+                f"DIFF PARSE ERROR: {error}\n"
+                "Every diff block needs at least one `@@ ... @@` line between "
+                "the `--- / +++` headers and the hunk body. "
+                "The @@ numbers are ignored; any value is accepted."
+            )
+
+        # --- Malformed hunk line (bad prefix) --- #
+        if "malformed hunk line" in e:
+            return (
+                f"DIFF PARSE ERROR: {error}\n"
+                "Every hunk body line must start with exactly one character: "
+                "space (context), `+` (addition), or `-` (deletion). "
+                "No other prefixes are valid."
+            )
+
+        # --- Missing or bad target path --- #
+        if "missing a writable" in e or "missing" in e:
+            return (
+                f"DIFF PARSE ERROR: {error}\n"
+                "The `+++ b/<path>` line is required and must contain a real workspace path. "
+                "For file creation use `--- /dev/null`. For codepilot.py always use "
+                "`--- /dev/null` and `+++ b/codepilot.py`."
+            )
+
+        # --- Deletion diff (not supported) --- #
+        if "deletion diff" in e or "not supported" in e:
+            return (
+                f"DIFF PARSE ERROR: {error}\n"
+                "File deletion via `+++ /dev/null` is not supported. "
+                "To remove a file call `execute(\"main\", \"rm <path>\")` from codepilot.py."
+            )
+
+        # --- Creation diff has non-add lines --- #
+        if "creation diff" in e and "only +" in e:
+            return (
+                f"DIFF PARSE ERROR: {error}\n"
+                "A creation diff (`--- /dev/null`) must contain only `+` lines — "
+                "no context (space) or deletion (`-`) lines."
+            )
+
+        # --- Empty hunk --- #
+        if "empty hunk" in e:
+            return (
+                f"DIFF PARSE ERROR: {error}\n"
+                "The hunk body between `@@` markers is empty. "
+                "Include at least one `+` or `-` line."
+            )
+
+        # --- Generic fallback --- #
         return (
-            "PARSER ERROR: The previous assistant response was not executed because "
-            "it violated CodePilot's block protocol.\n\n"
-            f"Specific parser failure: {error}\n\n"
-            "How to fix your next response:\n"
-            "1. Emit exactly one ```codepilot fenced Control Block if you want tools to run.\n"
-            "2. For every write_file(...) or edit_file(...) call, provide the required Payload Block immediately "
-            "after the Control Block.\n"
-            "3. Every Payload Block must include a filename= annotation that exactly matches the "
-            "corresponding tool call path, for example: ```python filename=src/app.py.\n"
-            "4. Payload Blocks are consumed strictly in tool call order.\n"
-            "5. Use task(finish=True) in the control block to signal task completion — do not "
-            "combine it with execute() or read_output() in the same step.\n\n"
-            "No tool code from the previous response ran. Re-emit a corrected CodePilot response now."
+            f"DIFF PARSE ERROR: {error}\n"
+            "Emit each file change as a self-contained `diff --git a/<p> b/<p>` block "
+            "with `---`, `+++`, `@@`, and hunk lines prefixed by space/+/-. "
+            "For codepilot.py use `--- /dev/null` and only `+` lines."
         )
 
     # ------------------------------------------------------------------ #
@@ -1415,14 +1599,14 @@ class AsyncRuntime:
             if match:
                 line_no = match.group(1)
         line_no = line_no or "unknown"
-        origin = f"generated ```codepilot Control Block, line {line_no}"
+        origin = f"generated codepilot.py runtime script, line {line_no}"
         exception_name = type(exc).__name__
         exception_message = str(exc) or "(no exception message)"
 
         if ran_any_statements:
             semantics = (
                 "Execution semantics:\n"
-                "- Python started executing the Control Block.\n"
+                "- Python started executing the runtime script.\n"
                 "- Statements before the failing line may already have run and may have produced tool results or side effects.\n"
                 "- The failing statement did not complete, and statements after it did not run.\n"
                 "- Tool results printed before this error are still ground truth; inspect them before retrying."
@@ -1430,13 +1614,13 @@ class AsyncRuntime:
         else:
             semantics = (
                 "Execution semantics:\n"
-                "- Python could not compile the Control Block.\n"
-                "- No statements in the Control Block ran.\n"
-                "- No tool calls or file/terminal side effects came from this failed Control Block."
+                "- Python could not compile the runtime script.\n"
+            "- No statements in the runtime script ran.\n"
+                "- No tool calls or file/terminal side effects came from this failed runtime script."
             )
 
         return (
-            "EXECUTION ERROR: The assistant's ```codepilot Control Block raised a Python exception.\n\n"
+            "EXECUTION ERROR: The assistant's codepilot.py runtime script raised a Python exception.\n\n"
             f"Origin: {origin}.\n"
             f"Exception: {exception_name}: {exception_message}\n\n"
             f"{semantics}\n\n"

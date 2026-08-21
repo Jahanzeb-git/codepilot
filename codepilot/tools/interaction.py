@@ -35,7 +35,8 @@ class InteractionTools:
         Ask the human operator a question and return their answer as a string.
         Use this whenever a requirement is ambiguous enough that assuming would
         force an architectural decision on the user's behalf. Never guess — ask.
-        The answer is returned to your control block and also appears in [EXECUTION RESULT].
+        Call it from codepilot.py. The answer is returned to that script and also
+        appears in [EXECUTION RESULT] for the next step.
         """
         self.runtime.hooks.emit(EventType.TOOL_CALL, tool="ask_user", args={"question": question})
 

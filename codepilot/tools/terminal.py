@@ -831,20 +831,7 @@ class TerminalManager:
         
         For a new terminal session: set new_terminal=True with a unique new session_id.
         Optional shell parameter: 'bash' (default on Linux/macOS), 'powershell' (default on Windows), or 'cmd'.
-        
-        [CRITICAL CONSTRAINT]
-        AVOID using VISUAL/CONTINUOUS tools (TUIs, Pagers, interactive Editors like nano/vim) 
-        as they pollute context.
-        Only use them when genuinely necessary.
-
-        Example 1:
-        ```codepilot
-        execute("main", "pytest test/test_profile.py -v", 10)
-        ```
-        Example 2:
-        ```codepilot
-        execute("new_1", "uvicorn main:app --reload", 10, new_terminal=True)
-        ```
+        Inspect [EXECUTION RESULT] before taking a dependent action.
         """
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="execute",

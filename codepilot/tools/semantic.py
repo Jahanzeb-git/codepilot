@@ -616,14 +616,6 @@ class SemanticTools:
           - For 'search', describe intent: "error handling in API layer" > "try except"
 
         Use `top_k` to limit results (default 5).
-        
-        Examples:
-        ```codepilot
-        semantic_search(query="where is user authentication?", mode="search")
-        semantic_search(query="process_payment", mode="trace_callers")
-        semantic_search(query="initialize_app", mode="trace_callees")
-        semantic_search(query="calculate_total", mode="trace_graph", depth=3)
-        ```
         """
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="semantic_search",

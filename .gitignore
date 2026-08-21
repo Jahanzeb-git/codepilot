@@ -164,6 +164,7 @@ workspaces/
 test_grepai/
 debug_*.py
 test_*.py
+!tests/test_diff_protocol.py
 test_*.yaml
 rdpge_trace_*.json
 

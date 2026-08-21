@@ -200,22 +200,9 @@ class FilesystemTools:
 
     def view_file(self, path: str, start_line: int = 1, end_line: int = None) -> None:
         """
-        Read file content with 1-indexed line numbers. Use start_line/end_line to target
-        a specific range; omit both to read the entire file.
-        
-        [CRITICAL CONSTRAINT]
-        NEVER output a payload block (```lang filename=...) when using view_file().
-        It does NOT consume payloads!
-
-        Example 1:
-        ```codepilot
-        view_file("app.py")
-        ```
-        Example 2:
-        ```codepilot
-        view_file("requirements.txt")
-        view_file("main.py", start_line=50, end_line=80)
-        ```
+        Read file content with 1-indexed line numbers. Use a targeted range when
+        you only need an edit anchor; omit end_line to read through EOF.
+        Read the resulting [EXECUTION RESULT] before emitting a dependent edit.
         """
         ui_status = (
             f"Reading {path}: L{start_line}-{end_line}"

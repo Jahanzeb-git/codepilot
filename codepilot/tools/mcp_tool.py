@@ -290,8 +290,8 @@ class MCPTools:
             lines.append("")  # blank line between tools
 
         lines.append(
-            "To call a tool use:\n"
-            "```codepilot\n"
+            "Call this from codepilot.py:\n"
+            "```python\n"
             "mcp(server=\"<server_name>\", func_name=\"<tool_name>\", arguments={...})\n"
             "```"
         )

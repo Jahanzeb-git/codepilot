@@ -26,6 +26,7 @@ Licensed under the MIT License.
 from __future__ import annotations
 
 import queue
+import re
 import tempfile
 import threading
 import time
@@ -205,8 +206,9 @@ class SubAgentTools:
         Args:
             task:    Clear task description for the worker agent.
             context: All context the worker needs (file contents, constraints).
-            tools:   Allowlist of tool names (default: read_file, write_file,
-                     execute, read_output, send_input, find, ask_user).
+            tools:   Allowlist of tool names (default: view_file, execute,
+                     read_output, send_input, find, ask_user). Workspace changes
+                     are always emitted as diffs, not tool calls.
             model:   Override model (default: same as main agent). Use a
                      faster/cheaper variant for focused tasks.
 
@@ -351,7 +353,7 @@ class SubAgentTools:
             # Build a temporary agent.yaml for the sub-agent
             config_path = self._build_subagent_config(tool_names, model_override)
 
-            # Track files written by sub-agent
+            # Track files changed by sub-agent diff operations.
             files_tracker: List[str] = []
 
             sub_rt = SyncRuntime(
@@ -375,13 +377,12 @@ class SubAgentTools:
             )
 
             def _track_tool_result(tool: str, result: str, **_):
-                if tool == "write_file" and "ERROR" not in result:
-                    # Extract path from result if possible
-                    lines = result.splitlines()
-                    if lines:
-                        p = lines[0].strip()
-                        if p and p not in files_tracker:
-                            files_tracker.append(p)
+                if tool == "diff" and "ERROR" not in result and "REJECTED" not in result:
+                    match = re.search(r"'([^']+)'", result)
+                    if match and match.group(1) != "codepilot.py":
+                        path = match.group(1)
+                        if path not in files_tracker:
+                            files_tracker.append(path)
 
             sub_rt.hooks.register(
                 __import__(
@@ -440,7 +441,7 @@ class SubAgentTools:
         api_key_env = main_cfg.model.api_key_env
 
         default_tools = [
-            "read_file", "write_file", "execute",
+            "view_file", "execute",
             "read_output", "send_input", "find",
         ]
         enabled_tools = tool_names or default_tools

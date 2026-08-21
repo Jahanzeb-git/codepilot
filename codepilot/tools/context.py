@@ -72,10 +72,10 @@ class ContextTools:
         def _finish(result: str) -> str:
             # exec() discards a bare top-level call's return value — a call
             # like `archive_context(...)` with no print()/assignment around
-            # it in the generated control block never reaches the agent
+            # it in the generated codepilot.py script never reaches the agent
             # unless the result is explicitly pushed into the execution
             # buffer here, the same way every other tool (view_file,
-            # write_file, mcp, ...) already does via _append_execution +
+            # mcp, ...) already does via _append_execution +
             # TOOL_RESULT. This was previously just `return result`, which
             # meant the agent NEVER saw whether archiving succeeded, failed,
             # or partially failed — it silently continued as if nothing

@@ -19,14 +19,12 @@
 
 Directory: `{{ work_dir }}` — OS: `{{ os_info }}` — Time: `{{ current_time }}`
 
+{% if step_info %}
 **Agentic step info:**
 {{ step_info }}
+{% endif %}
 
 ## STATEFUL VIRTUAL TERMINAL (VT100 PTY)
-
-**EXECUTION PROTOCOL (ACI vs HCI):**
-1. **VISUAL/CONTINUOUS (TUIs/Pagers/Editors):** AVOID. Human-centric interfaces pollute context. Only use when genuinely needed.
-2. **INTERACTIVE PROMPTS (Installers/Auth):** MINIMIZE. You can use CLI's if needed but not overly.
 
 Active sessions (use session IDs with terminal tools):
 {{ shell_info }}
