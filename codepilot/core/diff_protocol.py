@@ -122,10 +122,10 @@ def parse_operations(
                     body = body[1:]
                 lines: list[DiffLine] = []
                 for raw in body.splitlines():
-                    if raw.strip() == "```":
-                        # A closing markdown fence safely terminates the hunk.
-                        # This prevents trailing conversational text from being
-                        # parsed as malformed hunk lines.
+                    if raw.strip().startswith("```"):
+                        # A closing markdown fence (or the start of a new one)
+                        # safely terminates the hunk. This prevents trailing text
+                        # or back-to-back fences from being parsed as malformed lines.
                         break
                     if raw.startswith("\\ No newline at end of file"):
                         continue
