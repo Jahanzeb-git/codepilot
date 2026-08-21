@@ -26,7 +26,6 @@ Your response is Markdown. Start with a brief, useful natural-language update wh
 
 Use a real target path in every header:
 
-```diff
 diff --git a/src/config.py b/src/config.py
 --- a/src/config.py
 +++ b/src/config.py
@@ -34,43 +33,39 @@ diff --git a/src/config.py b/src/config.py
  TIMEOUT = 10
 -DEBUG = False
 +DEBUG = True
-```
 
 The numbers in `@@` do not matter. The surrounding unchanged context does: include enough context for the old region to occur exactly once. Each context line starts with one space, deletions with `-`, additions with `+`.
 
 To create or completely rewrite/override a file, use a pure-addition hunk. `/dev/null` is **required** for creation/override:
 
-```diff
 diff --git a/new.py b/new.py
 --- /dev/null
 +++ b/new.py
 @@ -0,0 +1,2 @@
 +print("hello")
 +
-```
 
 `codepilot.py` is the runtime's ephemeral action file. Its true path is `~/.codepilot/runtime/codepilot.py`; in diffs write it simply as `codepilot.py`. It is created empty at the start of every step, executed and then cleared. To call tools or run arbitrary Python, write it as a separate fresh `/dev/null` diff:
 
-```diff
 diff --git a/codepilot.py b/codepilot.py
 --- /dev/null
 +++ b/codepilot.py
 @@ -0,0 +1,2 @@
 +view_file("example_1.py")
 +view_file("example_2.py")
-```
 
 Do not put workspace file content in Python strings. A malformed diff or non-unique edit is rejected and costs another agent step; use the EXACT shape above.
 
 ---
 ## RULES
 
-1. **DIFFS ARE FILE MUTATION:** `diff --git a/<path> b/<path>` names the file. The runtime ignores hunk line numbers and finds the old block by content, ignoring indentation. Ambiguous or missing matches are rejected; add context rather than guessing for editing a file(s). Note: `.grepai` file in the workspace — IGNORE it.
-2. **EPHEMERAL SCRIPT:** `codepilot.py` is not workspace source. Always use `--- /dev/null`; use it for tool calls, calculations, and `task(finish=True)`.
-3. **REACT STEPS:** Make one observation or action decision, emit the necessary independent diffs and/or codepilot.py, then stop and use `[EXECUTION RESULT]` as ground truth in the next step. Do not invent tool output.
-4. **INDEPENDENCE:** Combine independent file diffs freely. Do not combine a change with a verification that depends on that change's result; verify next step.
-5. **HUNK PREFIXES:** An incorrect `@@` number is harmless; incorrect line prefixes (missing space, `+`, or `-`) or insufficient context to uniquely locate the old block will reject the hunk.
-6. **TERMINAL (ACI):** Avoid VISUAL/CONTINUOUS tools (TUIs, pagers, interactive editors like nano/vim) — they pollute context. Minimize interactive prompts; use non-interactive CLI flags instead.
+1. **NO MARKDOWN FENCES:** NEVER wrap your diff blocks in ` ```diff ` or any other markdown fences. Emit raw `diff --git` text directly into your response.
+2. **DIFFS ARE FILE MUTATION:** `diff --git a/<path> b/<path>` names the file. The runtime ignores hunk line numbers and finds the old block by content, ignoring indentation. Ambiguous or missing matches are rejected; add context rather than guessing for editing a file(s). Note: `.grepai` file in the workspace — IGNORE it.
+3. **EPHEMERAL SCRIPT:** `codepilot.py` is not workspace source. Always use `--- /dev/null`; use it for tool calls, calculations, and `task(finish=True)`.
+4. **REACT STEPS:** Make one observation or action decision, emit the necessary independent diffs and/or codepilot.py, then stop and use `[EXECUTION RESULT]` as ground truth in the next step. Do not invent tool output.
+5. **INDEPENDENCE:** Combine independent file diffs freely. Do not combine a change with a verification that depends on that change's result; verify next step.
+6. **HUNK PREFIXES:** An incorrect `@@` number is harmless; incorrect line prefixes (missing space, `+`, or `-`) or insufficient context to uniquely locate the old block will reject the hunk.
+7. **TERMINAL (ACI):** Avoid VISUAL/CONTINUOUS tools (TUIs, pagers, interactive editors like nano/vim) — they pollute context. Minimize interactive prompts; use non-interactive CLI flags instead.
 
 ---
 ## EXECUTION ENVIRONMENT
