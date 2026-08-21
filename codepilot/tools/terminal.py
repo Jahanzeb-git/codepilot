@@ -829,7 +829,10 @@ class TerminalManager:
         Returns output with status: 'completed' (has return_code) or 'running'
         (timed out — use read_output() to wait more, send_input() for prompts).
         
-        For a new terminal session: set new_terminal=True with a unique new session_id.
+        To spawn a background process or new environment, set new_terminal=True AND provide 
+        a UNIQUE new session_id (e.g., execute("server", "./run.sh", new_terminal=True)). 
+        Do NOT reuse an existing session_id (like "main") when creating a new_terminal.
+        
         Optional shell parameter: 'bash' (default on Linux/macOS), 'powershell' (default on Windows), or 'cmd'.
         Inspect [EXECUTION RESULT] before taking a dependent action.
         """

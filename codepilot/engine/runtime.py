@@ -688,6 +688,22 @@ class AsyncRuntime:
                     self.hooks.emit(EventType.TOOL_RESULT, tool="diff", result=result)
                     continue
 
+                tool_cfg = self._tool_config("diff")
+                if tool_cfg.get("require_permission", False):
+                    action_type = "Create/Override" if operation.is_creation else "Edit"
+                    perm = self.hooks.emit(
+                        EventType.PERMISSION_REQUEST, tool="diff",
+                        description=f"{action_type} File: {operation.path}",
+                    )
+                    approved = bool(perm) if perm is not None else (
+                        input(f"\n[Permission] {action_type}: {operation.path}\nApprove? [y/N]: ").strip().lower() in ("y", "yes")
+                    )
+                    if not approved:
+                        result = f"[diff] REJECTED: Permission denied to {action_type.lower()} '{operation.path}'"
+                        self._append_execution(result)
+                        self.hooks.emit(EventType.TOOL_RESULT, tool="diff", result=result)
+                        continue
+
                 current = path.read_text(encoding="utf-8") if exists else ""
                 new_content = apply_operation(operation, current, exists)
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -763,6 +779,22 @@ class AsyncRuntime:
                     "Cannot retry an edit diff on a non-existent file."
                 )
                 return
+
+            tool_cfg = self._tool_config("diff")
+            if tool_cfg.get("require_permission", False):
+                action_type = "Create/Override" if operation.is_creation else "Edit"
+                perm = self.hooks.emit(
+                    EventType.PERMISSION_REQUEST, tool="diff",
+                    description=f"{action_type} File: {operation.path}",
+                )
+                approved = bool(perm) if perm is not None else (
+                    input(f"\n[Permission] {action_type}: {operation.path}\nApprove? [y/N]: ").strip().lower() in ("y", "yes")
+                )
+                if not approved:
+                    result = f"[diff] REJECTED: Permission denied to {action_type.lower()} '{operation.path}'"
+                    self._append_execution(result)
+                    self.hooks.emit(EventType.TOOL_RESULT, tool="diff", result=result)
+                    return
 
             current = path.read_text(encoding="utf-8") if exists else ""
             new_content = apply_operation(operation, current, exists)
