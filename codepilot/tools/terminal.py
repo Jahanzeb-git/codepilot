@@ -865,12 +865,21 @@ class TerminalManager:
         # Create new terminal if requested
         if new_terminal:
             if session_id in self._sessions:
-                result = f"[terminal:{session_id}] Error: session '{session_id}' already exists."
-                self.runtime._append_execution(result)
-                self.runtime.hooks.emit(
-                    EventType.TOOL_RESULT, tool="execute", result=result,
+                # Forgiveness path: model used new_terminal=True but forgot to
+                # provide a unique session_id (defaulted to an existing one).
+                # Derive a semantic ID from the command so the model can
+                # recognise and reuse it in subsequent read_output/send_input calls.
+                cmd_slug = re.sub(r"[^a-z0-9]+", "_", command.split()[0].lower())[:20].strip("_")
+                short_uid = uuid.uuid4().hex[:6]
+                auto_id = f"{cmd_slug}_{short_uid}"
+                notice = (
+                    f"[terminal] Note: session_id='{session_id}' already exists; "
+                    f"auto-assigned session_id='{auto_id}' for this new terminal. "
+                    f"Use '{auto_id}' in subsequent read_output() / send_input() calls."
                 )
-                return result
+                self.runtime._append_execution(notice)
+                self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="execute", result=notice)
+                session_id = auto_id
             # Validate shell choice
             if shell is not None and shell not in VALID_SHELLS:
                 result = (

@@ -721,20 +721,19 @@ class AsyncRuntime:
             except DiffProtocolError as exc:
                 e = str(exc).lower()
                 if "not found" in e:
-                    # Hunk content not in file — need more context lines.
-                    # Cannot cache because the operation itself is flawed.
+                    # Hard anchors (- lines) not present in file verbatim.
                     result = (
                         f"[diff] REJECTED: '{operation.path}' unchanged. {exc} "
-                        "Regenerate this file's diff with more surrounding unchanged lines "
-                        "(context lines starting with a space) so the old region matches exactly once."
+                        "The - lines in this hunk must exactly match the current file content. "
+                        "Read the file with view_file(), correct the - lines to match what is "
+                        "actually there, then regenerate the diff."
                     )
                 elif "ambiguous" in e:
-                    # Multiple identical regions found.
-                    # Cannot cache because the operation itself is flawed.
+                    # Hard anchors found in multiple places; context scoring tied.
                     result = (
                         f"[diff] REJECTED: '{operation.path}' unchanged. {exc} "
-                        "Add more unique context lines (lines with a space prefix) "
-                        "above or below the changed block to make the match unambiguous."
+                        "Add more unique space-prefixed context lines above or below the "
+                        "changed block so that only one region scores highest."
                     )
                 else:
                     # Structurally invalid (e.g., creation diff with wrong lines).
@@ -860,17 +859,19 @@ class AsyncRuntime:
             {tc.name for tc in self.config.tools if tc.enabled}
             if self.config.tools
             else {"view_file", "execute", "read_output",
-                  "send_input", "terminate_terminal", "ask_user", "find"}
+                  "send_input", "terminate_terminal", "ask_user", "find",
+                  "find_and_replace_many"}
         )
-        if "view_file"          in enabled: self.registry.register("view_file",           self._fs_tools.view_file)
-        if "execute"             in enabled: self.registry.register("execute",             self._terminal_manager.execute)
-        if "read_output"         in enabled: self.registry.register("read_output",         self._terminal_manager.read_output)
-        if "send_input"          in enabled: self.registry.register("send_input",          self._terminal_manager.send_input)
-        if "terminate_terminal"  in enabled: self.registry.register("terminate_terminal",  self._terminal_manager.terminate_terminal)
-        if "ask_user"            in enabled: self.registry.register("ask_user",            self._interaction_tools.ask_user)
-        if "semantic_search"     in enabled: self.registry.register("semantic_search",     self._semantic_tools.semantic_search)
-        if "find"                in enabled: self.registry.register("find",                self._search_tools.find)
-        if "mcp"                 in enabled and self._mcp_tools is not None:
+        if "view_file"              in enabled: self.registry.register("view_file",              self._fs_tools.view_file)
+        if "find_and_replace_many"  in enabled: self.registry.register("find_and_replace_many",  self._fs_tools.find_and_replace_many)
+        if "execute"                in enabled: self.registry.register("execute",                self._terminal_manager.execute)
+        if "read_output"            in enabled: self.registry.register("read_output",            self._terminal_manager.read_output)
+        if "send_input"             in enabled: self.registry.register("send_input",             self._terminal_manager.send_input)
+        if "terminate_terminal"     in enabled: self.registry.register("terminate_terminal",     self._terminal_manager.terminate_terminal)
+        if "ask_user"               in enabled: self.registry.register("ask_user",               self._interaction_tools.ask_user)
+        if "semantic_search"        in enabled: self.registry.register("semantic_search",        self._semantic_tools.semantic_search)
+        if "find"                   in enabled: self.registry.register("find",                   self._search_tools.find)
+        if "mcp"                    in enabled and self._mcp_tools is not None:
             self.registry.register("mcp", self._mcp_tools.mcp)
 
     def _validate_semantic_config(self):

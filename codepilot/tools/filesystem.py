@@ -21,7 +21,6 @@ import os
 from pathlib import Path
 from typing import Optional, Union, TYPE_CHECKING
 
-from ..core.block_parser import CodeBlock
 from ..engine.hooks import EventType
 
 if TYPE_CHECKING:
@@ -703,6 +702,79 @@ class FilesystemTools:
             self._emit_error(
                 "edit_file",
                 f"Failed while editing '{path}': {exc}.{cache_msg}",
+            )
+
+    # ------------------------------------------------------------------
+    # Tool: find_and_replace_many
+    # ------------------------------------------------------------------
+
+    def find_and_replace_many(self, path: str, find: str, replace: str) -> None:
+        """Replace every occurrence of an exact literal string across an entire file — use when the same text repeats and all instances must change (e.g., renaming a variable, constant, or import path file-wide)."""
+        self.runtime.hooks.emit(
+            EventType.TOOL_CALL, tool="find_and_replace_many",
+            args={"path": path, "find": find, "replace": replace},
+            label=f"Replacing all occurrences in {path}...",
+        )
+
+        if not find:
+            self._emit_error(
+                "find_and_replace_many",
+                "find= must be a non-empty string. Nothing was changed.",
+            )
+            return
+
+        try:
+            abs_path = self._safe_path(path)
+            if not Path(abs_path).is_file():
+                self._emit_error(
+                    "find_and_replace_many",
+                    f"'{path}' not found in the workspace.",
+                )
+                return
+
+            with open(abs_path, "r", encoding="utf-8") as f:
+                original = f.read()
+
+            count = original.count(find)
+            if count == 0:
+                self._emit_error(
+                    "find_and_replace_many",
+                    f"The string {find!r} was not found in '{path}'. Nothing was changed.",
+                )
+                return
+
+            tool_cfg = self.runtime._tool_config("find_and_replace_many")
+            if tool_cfg.get("require_permission", False):
+                if not self._request_permission(
+                    "find_and_replace_many",
+                    f"Replace {count} occurrence(s) of {find!r} in '{path}'",
+                ):
+                    self._emit_error(
+                        "find_and_replace_many",
+                        f"Permission denied for '{path}'. Nothing was changed.",
+                    )
+                    return
+
+            new_content = original.replace(find, replace)
+            with open(abs_path, "w", encoding="utf-8") as f:
+                f.write(new_content)
+
+            if hasattr(self.runtime, "_watcher"):
+                try:
+                    self.runtime._watcher.register(abs_path)
+                except Exception:
+                    pass
+
+            result = (
+                f"[find_and_replace_many] '{path}': replaced {count} occurrence(s) of "
+                f"{find!r} with {replace!r}."
+            )
+            self._emit_result("find_and_replace_many", result)
+
+        except Exception as exc:
+            self._emit_error(
+                "find_and_replace_many",
+                f"Unexpected error in '{path}': {exc}.",
             )
 
     # ------------------------------------------------------------------
