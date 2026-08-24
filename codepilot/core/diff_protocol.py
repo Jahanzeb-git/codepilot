@@ -128,7 +128,7 @@ def parse_operations(
                 for raw in body.splitlines():
                     stripped = raw.strip()
                     if stripped.startswith("```"):
-                        # A bare fence line (context or unpreixed) safely terminates
+                        # A bare fence line (context or unprefixed) safely terminates
                         # the hunk — prevents trailing markdown fences polluting the
                         # parsed diff.
                         break
@@ -174,243 +174,291 @@ def _normal(line: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Phase 1: Hard Anchors + Soft Context Scoring
+# Phase 1: Region detection
+# ---------------------------------------------------------------------------
+#
+# ALGORITHM
+# ---------
+# For a hunk with N remove (-) lines:
+#
+#   Step 1 — Find candidate regions
+#       Locate every file position of the FIRST remove line and every file
+#       position of the LAST remove line.  For each (first_pos, last_pos)
+#       pair where first_pos <= last_pos, verify that every intermediate
+#       remove line appears in the file between those positions IN ORDER
+#       (but not necessarily contiguously — anything can sit between them).
+#       Each valid pair defines a candidate region [first_pos, last_pos].
+#
+#   Step 2 — Unique? done.  Multiple? → context scoring.
+#       For each candidate region, count how many of the diff's context
+#       lines appear in a window around that region (above, within, below).
+#       Highest score wins.  Tie → reject with a precise message.
+#
+# This correctly handles:
+#   - Disjoint removes (context between - lines in the diff) ← trace_2 fix
+#   - Missing context lines (model omitted some context)
+#   - Fully unique single-line edits
 # ---------------------------------------------------------------------------
 
-def _find_hard_anchor_matches(
-    file_lines: list[str],
-    remove_lines: list[str],
-) -> list[int]:
-    """Return every start index where *remove_lines* appear contiguously in *file_lines*.
 
-    Comparison is normalised (leading whitespace and line endings stripped).
-    If *remove_lines* is empty (pure-insertion hunk) every file position is a
-    candidate: returns [0 .. len(file_lines)] inclusive so the caller can still
-    disambiguate via context scoring.
+def _find_remove_positions(file_lines: list[str], text: str) -> list[int]:
+    """Return all file line indices where *text* matches (normalised)."""
+    needle = _normal(text)
+    return [i for i, fl in enumerate(file_lines) if _normal(fl) == needle]
+
+
+def _find_region_candidates(
+    file_lines: list[str],
+    remove_texts: list[str],
+) -> list[tuple[int, int]]:
+    """Return (region_start, region_end) pairs for every valid placement.
+
+    A valid placement satisfies:
+      - remove_texts[0] is found at region_start in the file.
+      - remove_texts[-1] is found at region_end (>= region_start) in the file.
+      - Every intermediate remove line appears in the file between
+        region_start and region_end, in order (gaps are allowed).
+
+    Returns a list of (region_start, region_end) tuples.
+    If there is only one remove line, region_start == region_end.
     """
-    if not remove_lines:
-        return list(range(len(file_lines) + 1))
-    needle = [_normal(ln) for ln in remove_lines]
-    n = len(needle)
-    return [
-        start
-        for start in range(len(file_lines) - n + 1)
-        if [_normal(file_lines[start + i]) for i in range(n)] == needle
-    ]
+    if not remove_texts:
+        return []
+
+    first_text = remove_texts[0]
+    last_text = remove_texts[-1]
+    middle_texts = remove_texts[1:-1] if len(remove_texts) > 1 else []
+
+    first_positions = _find_remove_positions(file_lines, first_text)
+    if not first_positions:
+        return []
+
+    # Single remove line: every occurrence is a candidate region
+    if len(remove_texts) == 1:
+        return [(p, p) for p in first_positions]
+
+    last_positions = _find_remove_positions(file_lines, last_text)
+    if not last_positions:
+        return []
+
+    candidates: list[tuple[int, int]] = []
+    for fp in first_positions:
+        for lp in last_positions:
+            if lp < fp:
+                continue
+            if lp == fp and first_text != last_text:
+                # Same physical line can only be first==last if the texts match
+                continue
+            # Verify all intermediate removes appear in file[fp+1 .. lp-1] in order
+            search_from = fp + 1
+            valid = True
+            for mid in middle_texts:
+                mid_needle = _normal(mid)
+                found = False
+                for k in range(search_from, lp):
+                    if _normal(file_lines[k]) == mid_needle:
+                        search_from = k + 1
+                        found = True
+                        break
+                if not found:
+                    valid = False
+                    break
+            if valid:
+                candidates.append((fp, lp))
+
+    return candidates
 
 
-def _score_context(
+def _score_region(
     file_lines: list[str],
-    candidate_start: int,
-    candidate_end: int,
+    region_start: int,
+    region_end: int,
     hunk: "DiffHunk",
 ) -> int:
-    """Score how many context lines from *hunk* match the file around [candidate_start, candidate_end).
+    """Score a region by how many diff context lines match the file around it.
 
-    Context lines that appear before the first remove line are matched against
-    file lines immediately above the candidate region (going upward).  Context
-    lines that appear after the last remove line are matched against file lines
-    immediately below.  Interleaved context lines (between remove groups) are
-    matched at their implicit cursor position within the region.
+    Context lines are split into three groups based on their position in the
+    hunk relative to the remove lines:
 
-    Each matching context line adds 1 point.  Missing or out-of-bounds context
-    lines add 0.  The total is the score for this candidate.
+      above_ctx  — context lines before the first remove line.
+                   Matched against file lines immediately above region_start.
+
+      below_ctx  — context lines after the last remove line.
+                   Matched against file lines immediately below region_end.
+
+      inner_ctx  — context lines between remove lines (interleaved).
+                   Matched anywhere within the region span.
+
+    Each matching context line adds 1 point.  Out-of-bounds or missing lines
+    add 0.  This position-aware approach prevents two identical regions from
+    tying when one has a unique function name above it and the other doesn't.
     """
+    WINDOW = 8
+
+    # Classify context lines by their hunk position relative to removes
+    above_ctx: list[str] = []
+    below_ctx: list[str] = []
+    inner_ctx: list[str] = []
+
+    seen_first_remove = False
+    last_remove_idx = max(
+        (i for i, dl in enumerate(hunk.lines) if dl.kind == "remove"),
+        default=-1,
+    )
+
+    for i, dl in enumerate(hunk.lines):
+        if dl.kind == "remove":
+            seen_first_remove = True
+        elif dl.kind == "context":
+            if not seen_first_remove:
+                above_ctx.append(dl.text)
+            elif i > last_remove_idx:
+                below_ctx.append(dl.text)
+            else:
+                inner_ctx.append(dl.text)
+
     score = 0
-    above_ctx: list[str] = []   # context lines before the first - line
-    below_ctx: list[str] = []   # context lines after the last - line
-    inner_ctx: list[tuple[int, str]] = []  # (file_offset_within_region, text)
 
-    seen_remove = False
-    remove_finished = False
-    remove_offset = 0  # cursor within the candidate region
-
-    for dl in hunk.lines:
-        if dl.kind == "remove":
-            seen_remove = True
-            remove_offset += 1
-        elif dl.kind == "add":
-            # additions don't occupy file positions
-            pass
-        else:  # context
-            if not seen_remove:
-                above_ctx.append(dl.text)
-            elif remove_finished or not any(
-                d.kind == "remove" for d in hunk.lines[hunk.lines.index(dl):]
-            ):
-                below_ctx.append(dl.text)
-            else:
-                inner_ctx.append((remove_offset, dl.text))
-            remove_offset += 1
-
-    # Detect "remove_finished": context lines after all removes
-    # Re-derive above/below cleanly without the ambiguous mid-loop state above.
-    above_ctx = []
-    below_ctx = []
-    inner_ctx = []
-    remove_offset = 0
-    first_remove_seen = False
-    last_remove_offset = -1
-
-    # First pass: find last remove position
-    tmp_offset = 0
-    for dl in hunk.lines:
-        if dl.kind == "remove":
-            last_remove_offset = tmp_offset
-            tmp_offset += 1
-        elif dl.kind == "context":
-            tmp_offset += 1
-
-    # Second pass: classify context lines
-    cur_offset = 0
-    for dl in hunk.lines:
-        if dl.kind == "remove":
-            first_remove_seen = True
-            cur_offset += 1
-        elif dl.kind == "context":
-            if not first_remove_seen:
-                above_ctx.append(dl.text)
-            elif cur_offset > last_remove_offset:
-                below_ctx.append(dl.text)
-            else:
-                inner_ctx.append((cur_offset, dl.text))
-            cur_offset += 1
-
-    # Score above-context lines (match file lines just above candidate_start)
-    for i, ctx in enumerate(reversed(above_ctx)):
-        file_idx = candidate_start - 1 - i
+    # Score above-context: file lines immediately above region_start
+    for j, ctx in enumerate(reversed(above_ctx)):
+        file_idx = region_start - 1 - j
         if 0 <= file_idx < len(file_lines):
             if _normal(file_lines[file_idx]) == _normal(ctx):
                 score += 1
 
-    # Score below-context lines (match file lines just below candidate_end)
-    for i, ctx in enumerate(below_ctx):
-        file_idx = candidate_end + i
+    # Score below-context: file lines immediately below region_end
+    for j, ctx in enumerate(below_ctx):
+        file_idx = region_end + 1 + j
         if 0 <= file_idx < len(file_lines):
             if _normal(file_lines[file_idx]) == _normal(ctx):
                 score += 1
 
-    # Score inner context lines (interleaved within the candidate region)
-    for offset, ctx in inner_ctx:
-        file_idx = candidate_start + offset
-        if 0 <= file_idx < len(file_lines):
-            if _normal(file_lines[file_idx]) == _normal(ctx):
+    # Score inner-context: search within the region span
+    if inner_ctx:
+        region_set = {_normal(fl) for fl in file_lines[region_start:region_end + 1]}
+        for ctx in inner_ctx:
+            if _normal(ctx) in region_set:
                 score += 1
 
     return score
 
 
 # ---------------------------------------------------------------------------
-# Phase 2: buffer / flush cursor walk
+# Phase 2: Apply the hunk to the confirmed region
 # ---------------------------------------------------------------------------
 
-def _apply_hunk_at(
+
+def _apply_hunk(
     file_lines: list[str],
     hunk: "DiffHunk",
     region_start: int,
+    region_end: int,
 ) -> list[str]:
-    """Apply *hunk* at the confirmed region starting at *region_start*.
+    """Apply *hunk* to *file_lines* using the confirmed region [region_start, region_end].
 
-    Walk the hunk line by line:
-    - context line  → keep the corresponding file line as-is; advance cursor.
-    - remove line   → collect into buffer; advance cursor.
-    - add line      → if buffer non-empty: flush (replace buffered file lines
-                       with this + line and any immediately following + lines);
-                       if buffer empty: insert before cursor position.
+    Walk strategy
+    -------------
+    Maintain a file cursor starting at region_start.
 
-    This handles N→M replacements correctly regardless of the ratio.
+    For each diff line (in order):
+
+      (-) remove line:
+          Scan forward from cursor to region_end until we find the matching
+          file line.  Emit as-is any file lines we skip over (they are not
+          mentioned in the diff → implicitly kept).  Buffer the matched line
+          for removal; advance cursor past it.
+
+      (+) add line:
+          Accumulate into pending_adds.  These are flushed (emitted) the next
+          time we hit a non-add diff line or reach the end of the hunk.
+
+      ( ) context line (advisory only):
+          Flush any pending buffer/adds first, then skip (Phase 2 does not
+          re-verify context — Phase 1 already located the region).
+
+    After all diff lines are processed:
+      - Flush any remaining buffer/adds.
+      - Emit any remaining file lines within the region (implicitly kept).
+      - Append everything after region_end.
     """
-    result_before = list(file_lines[:region_start])
-    result_after_start = region_start
-    file_cursor = region_start
-    buffer_start: int | None = None   # file index where current - run started
-    buffer_len = 0                    # number of - lines accumulated
-    additions: list[str] = []        # + lines waiting to flush with the buffer
+    result: list[str] = list(file_lines[:region_start])
+    cursor = region_start
+    remove_buffer: list[int] = []  # file indices held for removal
+    pending_adds: list[str] = []   # + line texts to emit on flush
 
-    output: list[str] = []
+    def flush() -> None:
+        for add_text in pending_adds:
+            result.append(add_text + "\n")
+        remove_buffer.clear()
+        pending_adds.clear()
 
-    i = 0
-    lines = hunk.lines
-    while i < len(lines):
-        dl = lines[i]
-        if dl.kind == "context":
-            # Flush any pending buffer first (- lines with no trailing + yet)
-            if buffer_start is not None:
-                # Remove buffered file lines, emit additions collected so far
-                for a in additions:
-                    output.append(a + "\n")
-                additions = []
-                buffer_start = None
-                buffer_len = 0
-            output.append(file_lines[file_cursor])
-            file_cursor += 1
-        elif dl.kind == "remove":
-            if buffer_start is None:
-                buffer_start = file_cursor
-                buffer_len = 0
-            buffer_len += 1
-            file_cursor += 1
-        else:  # add
-            if buffer_start is not None:
-                # Accumulate + lines for this buffer run
-                additions.append(dl.text)
-            else:
-                # Pure insertion: no preceding - lines
-                output.append(dl.text + "\n")
-        i += 1
+    def emit_upto(stop: int) -> None:
+        nonlocal cursor
+        while cursor < stop:
+            result.append(file_lines[cursor])
+            cursor += 1
 
-    # End of hunk: flush any remaining buffer
-    if buffer_start is not None:
-        for a in additions:
-            output.append(a + "\n")
+    for dl in hunk.lines:
+        if dl.kind == "remove":
+            # Flush any pure-insertion pending adds before starting a new removal
+            if not remove_buffer and pending_adds:
+                flush()
+            # Scan forward within the region to find this - line
+            target = _normal(dl.text)
+            found_at = None
+            for k in range(cursor, region_end + 1):
+                if _normal(file_lines[k]) == target:
+                    found_at = k
+                    break
+            if found_at is None:
+                # Phase 1 verified this exists; skip defensively if somehow missing
+                continue
+            # Keep any file lines we skip over (implicitly not in the diff)
+            emit_upto(found_at)
+            # Buffer this file line for removal; advance cursor
+            remove_buffer.append(cursor)
+            cursor += 1
 
-    # Append the remainder of the file after the consumed region
-    remove_count = sum(1 for dl in hunk.lines if dl.kind == "remove")
-    result_tail = list(file_lines[region_start + remove_count + sum(
-        1 for dl in hunk.lines if dl.kind == "context"
-    ):])
-    return result_before + output + result_tail
+        elif dl.kind == "add":
+            pending_adds.append(dl.text)
+
+        else:  # context — advisory only
+            # Flush before advancing past this context position
+            if remove_buffer or pending_adds:
+                flush()
+
+    # End of hunk: flush remaining buffer/adds
+    if remove_buffer or pending_adds:
+        flush()
+
+    # Emit any remaining file lines within the region (not consumed by removes)
+    emit_upto(region_end + 1)
+
+    # Append everything after the region
+    result.extend(file_lines[region_end + 1:])
+    return result
 
 
 # ---------------------------------------------------------------------------
 # Public apply entry-point
 # ---------------------------------------------------------------------------
 
-def _render(hunk: "DiffHunk", file_lines: list[str], match_start: int) -> list[str]:
-    """Reconstruct output lines from a confirmed match region.
-
-    Context lines take their indentation from the matched file lines;
-    addition lines keep the model's text verbatim.
-    """
-    rendered: list[str] = []
-    old_offset = 0
-    for line in hunk.lines:
-        if line.kind == "remove":
-            old_offset += 1
-        elif line.kind == "context":
-            rendered.append(file_lines[match_start + old_offset])
-            old_offset += 1
-        else:
-            rendered.append(line.text + "\n")
-    return rendered
-
 
 def apply_operation(operation: DiffOperation, current: str, exists: bool) -> str:
-    """Return the new content or raise a precise, non-mutating rejection.
-
-    Uses the two-phase Hard Anchors + Soft Context Scoring algorithm:
+    """Return the new file content or raise a precise, non-mutating rejection.
 
     Phase 1 — Locate the region
-        Extract the ``-`` lines as hard anchors.  Search the file for that
-        exact sequence.  If found exactly once → proceed.  If found multiple
-        times → disambiguate with context-line scoring.  Tie → reject with a
-        precise feedback message naming the count of matching regions.
+        Find every file position of the first and last remove (-) line.
+        Build candidate regions (first_pos → last_pos), verifying all
+        intermediate - lines appear in order between them (gaps allowed).
+        Unique region → Phase 2.  Multiple → context scoring tiebreak.
+        Tie or zero candidates → reject with a precise actionable message.
 
     Phase 2 — Apply the edit
-        Walk the hunk with a buffer/flush cursor.  ``-`` lines accumulate in a
-        buffer; the first ``+`` line (or end of hunk) flushes the buffer as a
-        block replacement.  Context lines advance the cursor without re-checking
-        (Phase 1 already located the region uniquely).
+        Walk the hunk.  - lines are found in the region and buffered.
+        + lines flush the buffer (replacement).  File lines inside the
+        region that are not mentioned by any - line are kept as-is.
+        Context lines in the diff are advisory (Phase 1 already used them).
     """
     if operation.is_creation:
         if any(line.kind != "add" for hunk in operation.hunks for line in hunk.lines):
@@ -421,101 +469,86 @@ def apply_operation(operation: DiffOperation, current: str, exists: bool) -> str
 
     working = current
     for number, hunk in enumerate(operation.hunks, start=1):
-        remove_lines_text = [dl.text for dl in hunk.lines if dl.kind == "remove"]
-        context_lines_text = [dl.text for dl in hunk.lines if dl.kind == "context"]
         file_lines = working.splitlines(keepends=True)
+        remove_texts = [dl.text for dl in hunk.lines if dl.kind == "remove"]
+        context_texts = [dl.text for dl in hunk.lines if dl.kind == "context"]
 
-        if not remove_lines_text:
-            # ── Pure insertion: no hard anchors ───────────────────────────────
-            # Match the context lines as a needle to find insertion point, then
-            # insert + lines immediately after the matched context block.
-            if context_lines_text:
-                ctx_needle = [_normal(t) for t in context_lines_text]
+        # ── Pure insertion: no remove lines ───────────────────────────────────
+        if not remove_texts:
+            add_lines = [dl.text for dl in hunk.lines if dl.kind == "add"]
+            if context_texts:
+                # Use context lines as a contiguous needle to find insertion point
+                ctx_needle = [_normal(t) for t in context_texts]
                 ctx_matches = [
-                    start for start in range(len(file_lines) - len(ctx_needle) + 1)
-                    if [_normal(file_lines[start + i]) for i in range(len(ctx_needle))] == ctx_needle
+                    s for s in range(len(file_lines) - len(ctx_needle) + 1)
+                    if [_normal(file_lines[s + i]) for i in range(len(ctx_needle))] == ctx_needle
                 ]
                 if not ctx_matches:
                     raise DiffProtocolError(
-                        f"Hunk {number} for '{operation.path}': the context lines were not found "
+                        f"Hunk {number} for '{operation.path}': context lines were not found "
                         "in the file. Cannot locate the insertion point."
                     )
                 if len(ctx_matches) != 1:
                     raise DiffProtocolError(
-                        f"Hunk {number} for '{operation.path}' is ambiguous: context lines match "
-                        f"{len(ctx_matches)} locations. Add more unique context lines to pinpoint "
-                        "the insertion point."
+                        f"Hunk {number} for '{operation.path}' is ambiguous: context lines "
+                        f"match {len(ctx_matches)} locations. Add more unique context lines "
+                        "to pinpoint the insertion point."
                     )
-                # Find the first + line position within the hunk to split context
-                # into before-insertion and after-insertion groups.
-                add_lines = [dl.text for dl in hunk.lines if dl.kind == "add"]
-                ctx_start = ctx_matches[0]
-                # Count context lines before the first + line in the hunk
-                pre_ctx_count = 0
+                # Count context lines before the first + to find the split point
+                pre_ctx = 0
                 for dl in hunk.lines:
                     if dl.kind == "context":
-                        pre_ctx_count += 1
+                        pre_ctx += 1
                     elif dl.kind == "add":
                         break
-                insertion_point = ctx_start + pre_ctx_count
-                new_lines = [t + "\n" for t in add_lines]
+                ip = ctx_matches[0] + pre_ctx
                 working = "".join(
-                    file_lines[:insertion_point] + new_lines + file_lines[insertion_point:]
+                    file_lines[:ip] + [t + "\n" for t in add_lines] + file_lines[ip:]
                 )
             else:
-                # No context at all: append to end of file
-                add_lines = [dl.text + "\n" for dl in hunk.lines if dl.kind == "add"]
-                working = working + "".join(add_lines)
+                # No context, no removes: plain append
+                working = working + "".join(t + "\n" for t in add_lines)
             continue
 
-        # ── Phase 1: locate the region via hard anchors ──────────────────────
-        candidates = _find_hard_anchor_matches(file_lines, remove_lines_text)
+        # ── Phase 1: find candidate regions ───────────────────────────────────
+        candidates = _find_region_candidates(file_lines, remove_texts)
 
         if not candidates:
             raise DiffProtocolError(
                 f"Hunk {number} for '{operation.path}': the deleted lines (-) were not found "
-                "verbatim in the file. Verify the - lines exactly match the current file "
-                "content and regenerate the diff."
+                "in the file. Verify the - lines exactly match the current file content "
+                "and regenerate the diff."
             )
 
         if len(candidates) == 1:
-            winner = candidates[0]
+            region_start, region_end = candidates[0]
         else:
-            # Disambiguate using soft context scoring
-            region_len = len(remove_lines_text)
+            # Disambiguate with context scoring
             scores = [
-                _score_context(file_lines, c, c + region_len, hunk)
-                for c in candidates
+                _score_region(file_lines, rs, re, hunk)
+                for rs, re in candidates
             ]
             max_score = max(scores)
-            winners = [c for c, s in zip(candidates, scores) if s == max_score]
+            winners = [
+                (rs, re) for (rs, re), s in zip(candidates, scores) if s == max_score
+            ]
+
+            if len(winners) > 1:
+                # Tie-breaker: prefer the tightest (shortest) region
+                min_len = min(re - rs for rs, re in winners)
+                winners = [(rs, re) for rs, re in winners if re - rs == min_len]
 
             if len(winners) != 1:
                 raise DiffProtocolError(
                     f"Hunk {number} for '{operation.path}' is ambiguous: "
                     f"{len(candidates)} regions match the - lines and "
-                    f"{len(winners)} of them tie on context score ({max_score} point(s)). "
+                    f"multiple of them tie on context score ({max_score} point(s)). "
                     "Add more unique space-prefixed context lines above or below the "
                     "changed block to make one region score higher than the rest."
                 )
-            winner = winners[0]
+            region_start, region_end = winners[0]
 
-        # ── Phase 2: apply the edit at the confirmed region ──────────────────
-        # winner = index of the first - line.  Compute render_start by counting
-        # leading context lines (those before the first - in the hunk).
-        leading_ctx = 0
-        for dl in hunk.lines:
-            if dl.kind == "context":
-                leading_ctx += 1
-            elif dl.kind == "remove":
-                break
+        # ── Phase 2: apply the edit ────────────────────────────────────────────
+        working = "".join(_apply_hunk(file_lines, hunk, region_start, region_end))
 
-        render_start = winner - leading_ctx
-        # Total file lines consumed: all non-add hunk lines
-        total_old_span = sum(1 for dl in hunk.lines if dl.kind != "add")
-
-        replacement = _render(hunk, file_lines, render_start)
-        working = "".join(
-            file_lines[:render_start] + replacement + file_lines[render_start + total_old_span:]
-        )
     return working

@@ -220,6 +220,62 @@ class HardAnchorSoftContextTests(unittest.TestCase):
         self.assertNotIn("log('b')", result)
         self.assertIn("return data", result)
 
+    # ── Disjoint removes (context lines between - lines) ──────────────────────
+
+    def test_disjoint_removes_with_context_line_between_them(self):
+        """A hunk that removes line 2 and line 4, with line 3 as unchanged
+        context between them.  This is the trace_2 failure case: the model
+        emits a valid unified diff but the old algorithm rejected it because
+        it searched for the - lines as a back-to-back block."""
+        file_content = (
+            "def hello():\n"
+            "    print(\"Hello\")\n"
+            "    print(\"World\")\n"
+            "    print(\"Everyone\")\n"
+        )
+        operation = parse_operations(
+            "diff --git a/greet.py b/greet.py\n"
+            "--- a/greet.py\n"
+            "+++ b/greet.py\n"
+            "@@ -1,4 +1,4 @@\n"
+            " def hello():\n"
+            "-    print(\"Hello\")\n"
+            "+    print(\"Hi\")\n"
+            "     print(\"World\")\n"
+            "-    print(\"Everyone\")\n"
+            "+    print(\"All\")\n"
+        )[0][0]
+        result = apply_operation(operation, file_content, True)
+        self.assertIn('print("Hi")', result)
+        self.assertIn('print("All")', result)
+        self.assertNotIn('print("Hello")', result)
+        self.assertNotIn('print("Everyone")', result)
+        self.assertIn('print("World")', result)
+
+    def test_ambiguous_disjoint_removes_are_rejected(self):
+        """Same disjoint hunk but the file contains the pattern twice —
+        must be rejected with an 'ambiguous' message."""
+        single = (
+            "def hello():\n"
+            "    print(\"Hello\")\n"
+            "    print(\"World\")\n"
+            "    print(\"Everyone\")\n"
+        )
+        operation = parse_operations(
+            "diff --git a/greet.py b/greet.py\n"
+            "--- a/greet.py\n"
+            "+++ b/greet.py\n"
+            "@@ -1,4 +1,4 @@\n"
+            " def hello():\n"
+            "-    print(\"Hello\")\n"
+            "+    print(\"Hi\")\n"
+            "     print(\"World\")\n"
+            "-    print(\"Everyone\")\n"
+            "+    print(\"All\")\n"
+        )[0][0]
+        with self.assertRaisesRegex(DiffProtocolError, "ambiguous"):
+            apply_operation(operation, single + single, True)
+
 
 if __name__ == "__main__":
     unittest.main()
