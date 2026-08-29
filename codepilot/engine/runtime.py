@@ -34,7 +34,11 @@ from typing import Dict, List, Optional, Any, Union
 from ..core.prompt import SystemPromptParts
 
 from ..core.agent_file import AgentConfig
-from ..core.diff_protocol import DiffOperation, DiffProtocolError, apply_operation, parse_operations
+from ..core.conflict_protocol import (
+    BlockOperation, ConflictProtocolError, ParseError,
+    apply_block, parse_blocks,
+    format_parse_error, format_apply_error,
+)
 from ..core.context import ContextManager
 from ..core.memory import (
     MemoryManager, MemoryConfig,
@@ -137,11 +141,11 @@ class AsyncRuntime:
         #  Per-step ephemeral state                                            #
         # ------------------------------------------------------------------ #
         self._execution_buffer: List[str]       = []
-        # A failed filesystem diff may be large.  Retain the parsed operation so
+        # A failed block operation may be large.  Retain the parsed operation so
         # the next script can repair permissions and replay it without asking the
         # model to reproduce content.
-        self._diff_cache: dict[int, DiffOperation] = {}
-        self._diff_cache_counter: int = 0
+        self._block_cache: dict[int, BlockOperation] = {}
+        self._block_cache_counter: int = 0
         self._runtime_script_path = Path.home() / ".codepilot" / "runtime" / RUNTIME_SCRIPT_NAME
         self._reset_runtime_script()
 
@@ -370,12 +374,11 @@ class AsyncRuntime:
                 self._append_execution_result(f"PROVIDER ERROR: {error_msg}")
                 continue
 
-            # 4. Parse self-contained diff operations.  Natural Markdown with no
-            # diff is a conversational response; the old positional payload
-            # protocol is intentionally no longer recognised.
-            # parse_operations is fault-tolerant: it returns (ops, parse_errors)
-            # so a single malformed diff block does not abort the good ones.
-            operations, parse_errors = parse_operations(response_text)
+            # 4. Parse conflict-marker blocks.  Natural text with no blocks is
+            # a conversational response.  parse_blocks is fault-tolerant: it
+            # returns (ops, errors) so a single malformed block does not abort
+            # the good ones.
+            operations, parse_errors = parse_blocks(response_text)
 
             # 4.5 Fire observability hook with the exact raw LLM generation
             # BEFORE any execution side effects. This is the place in the pipeline
@@ -391,9 +394,9 @@ class AsyncRuntime:
             # These tags are never valid in an assistant turn — strip them so the
             # model does not reinforce the pattern on the next inference step.
             stored_response = re.sub(r"\s*</task_\d+>", "", response_text)
-            
+
             stored_response = stored_response.strip()
-            
+
             self.messages.append({"role": _ROLE_ASSISTANT, "content": stored_response})
 
             # Schedule cache TTL refresh (Anthropic only)
@@ -401,24 +404,21 @@ class AsyncRuntime:
             self._schedule_cache_timer()
 
             if not operations and not parse_errors:
-                # No diff at all — conversational reply. Already streamed to user.
+                # No blocks at all — conversational reply. Already streamed to user.
                 break
 
-            # 5. Apply all workspace diffs, then execute the ephemeral script.
+            # 5. Apply all workspace blocks, then execute the ephemeral script.
             self._execution_buffer = []
 
-            # Feed back parse errors for each malformed diff block BEFORE applying
+            # Feed back parse errors for each malformed block BEFORE applying
             # the good ones.  This preserves the left-to-right reading order in
             # [EXECUTION RESULT] so the model sees positional context.
-            for pos, target, exc in parse_errors:
-                err_msg = self._format_diff_error(str(exc))
-                # Prepend position so the model can correlate with its own output.
-                self._append_execution(
-                    f"[diff #{pos} for '{target}'] PARSE FAILED: {err_msg}"
-                )
+            for err in parse_errors:
+                err_msg = format_parse_error(err)
+                self._append_execution(err_msg)
                 self.hooks.emit(EventType.RUNTIME_ERROR, error=err_msg)
 
-            await self._apply_diff_operations(operations)
+            await self._apply_block_operations(operations)
             script = self._runtime_script_path.read_text(encoding="utf-8")
             if script:
                 await self._execute(script)
@@ -549,21 +549,21 @@ class AsyncRuntime:
         Inject a synthetic 'Pre-Flight Diagnostic' sequence into an empty session.
         This provides the LLM with real environment context (OS, Python) while
         serving as a flawless few-shot example of:
-        1. Emitting a valid ```diff-fenced unified diff for codepilot.py.
+        1. Emitting a valid conflict-marker block for codepilot.py.
         2. Chaining terminal commands with '&&' instead of raw newlines.
         3. Properly closing a task with task(finish=True) in a separate step.
-        The synthetic messages use the current diff protocol so the model
+        The synthetic messages use the current protocol so the model
         pattern-matches the correct format from turn zero.
         """
         import platform
         import sys
-        
+
         is_windows = platform.system() == "Windows"
         cmd = "python --version && ver" if is_windows else "python3 --version && uname -s -r -m"
-        
+
         py_ver = sys.version.split()[0]
         os_info = f"{platform.system()} {platform.release()} {platform.machine()}"
-        
+
         output_body = (
             f"Python {py_ver}\n"
             f"{os_info}\n"
@@ -579,13 +579,11 @@ class AsyncRuntime:
                 "role": _ROLE_ASSISTANT,
                 "content": (
                     "I will check the operating system and Python environment to ensure I have the correct context before proceeding.\n\n"
-                    "```diff\n"
-                    "diff --git a/codepilot.py b/codepilot.py\n"
-                    "--- /dev/null\n"
-                    "+++ b/codepilot.py\n"
-                    "@@ -0,0 +1,1 @@\n"
-                    f'+execute("main", "{cmd}", timeout=5)\n'
-                    "```"
+                    "codepilot.py\n"
+                    "<<<<<<< SEARCH\n"
+                    "=======\n"
+                    f'execute("main", "{cmd}", timeout=5)\n'
+                    ">>>>>>> REPLACE"
                 )
             },
             {
@@ -596,13 +594,11 @@ class AsyncRuntime:
                 "role": _ROLE_ASSISTANT,
                 "content": (
                     "Environment verified successfully. I am standing by for the user's first task.\n\n"
-                    "```diff\n"
-                    "diff --git a/codepilot.py b/codepilot.py\n"
-                    "--- /dev/null\n"
-                    "+++ b/codepilot.py\n"
-                    "@@ -0,0 +1,1 @@\n"
-                    "+task(finish=True)\n"
-                    "```"
+                    "codepilot.py\n"
+                    "<<<<<<< SEARCH\n"
+                    "=======\n"
+                    "task(finish=True)\n"
+                    ">>>>>>> REPLACE"
                 )
             },
             {
@@ -610,7 +606,7 @@ class AsyncRuntime:
                 "content": "[EXECUTION RESULT]\n[task] Task marked as complete."
             }
         ])
-        
+
         # Reset task counter so the user's first actual prompt becomes [Task 1]
         self._task_counter = 0
 
@@ -621,11 +617,11 @@ class AsyncRuntime:
     def _append_execution(self, text: str):
         self._execution_buffer.append(text)
 
-    def _cache_diff(self, operation: DiffOperation) -> int:
-        """Store a failed, parsed diff operation for lossless retry."""
-        self._diff_cache_counter += 1
-        cache_id = self._diff_cache_counter
-        self._diff_cache[cache_id] = operation
+    def _cache_block(self, operation: BlockOperation) -> int:
+        """Store a failed, parsed block operation for lossless retry."""
+        self._block_cache_counter += 1
+        cache_id = self._block_cache_counter
+        self._block_cache[cache_id] = operation
         return cache_id
 
     def _reset_runtime_script(self) -> None:
@@ -639,40 +635,42 @@ class AsyncRuntime:
             raise PermissionError(f"'{path}' is outside workspace '{work_dir}'.")
         return candidate
 
-    async def _apply_diff_operations(self, operations: list[DiffOperation]) -> None:
-        """Apply each independent diff with existing TOOL_CALL/RESULT hooks."""
+    async def _apply_block_operations(self, operations: list[BlockOperation]) -> None:
+        """Apply each conflict-marker block with TOOL_CALL/RESULT hooks."""
         for operation in operations:
-            if operation.path.replace("\\", "/") == RUNTIME_SCRIPT_NAME:
+            norm_path = operation.path.replace("\\", "/")
+
+            # ── codepilot.py (ephemeral action script) ────────────────────────
+            if norm_path == RUNTIME_SCRIPT_NAME:
                 try:
-                    source = apply_operation(operation, "", exists=False)
+                    source = apply_block(operation, "")
                     self._runtime_script_path.write_text(source, encoding="utf-8")
-                    result = f"[diff] runtime script prepared ({len(source)} bytes)."
+                    result = f"[block] codepilot.py runtime script prepared ({len(source)} bytes)."
                     self._append_execution(result)
-                    self.hooks.emit(EventType.TOOL_RESULT, tool="diff", result=result)
-                except DiffProtocolError as exc:
-                    # codepilot.py-specific: always a /dev/null creation diff,
-                    # so only creation-specific errors can appear here.
+                    self.hooks.emit(EventType.TOOL_RESULT, tool="block", result=result)
+                except ConflictProtocolError as exc:
                     result = (
-                        f"[diff:codepilot.py] REJECTED: {exc} "
-                        "Regenerate the complete codepilot.py diff using `--- /dev/null` "
-                        "and only `+` lines. No script ran this step."
+                        f"[block:codepilot.py] REJECTED: {exc} "
+                        "Use an empty SEARCH section to write the full script content. "
+                        "No script ran this step."
                     )
                     self._append_execution(result)
-                    self.hooks.emit(EventType.TOOL_RESULT, tool="diff", result=result)
+                    self.hooks.emit(EventType.TOOL_RESULT, tool="block", result=result)
                 except OSError as exc:
                     result = (
-                        f"[diff:codepilot.py] OS ERROR: {exc}. "
-                        "The runtime script directory may be missing. "
-                        "Regenerate the codepilot.py /dev/null diff; no script ran."
+                        f"[block:codepilot.py] OS ERROR: {exc}. "
+                        "The runtime script directory may be missing or have wrong permissions. "
+                        "Re-emit the codepilot.py block with an empty SEARCH section; no script ran."
                     )
                     self._append_execution(result)
-                    self.hooks.emit(EventType.TOOL_RESULT, tool="diff", result=result)
+                    self.hooks.emit(EventType.TOOL_RESULT, tool="block", result=result)
                 continue
 
+            # ── Workspace file ────────────────────────────────────────────────
             self.hooks.emit(
-                EventType.TOOL_CALL, tool="diff",
-                args={"path": operation.path, "hunks": len(operation.hunks)},
-                label=f"Applying diff to {operation.path}...",
+                EventType.TOOL_CALL, tool="block",
+                args={"path": operation.path, "mode": "write" if operation.is_creation else "edit"},
+                label=f"Applying block to {operation.path}...",
             )
             try:
                 path = self._safe_diff_path(operation.path)
@@ -680,144 +678,146 @@ class AsyncRuntime:
 
                 if not exists and not operation.is_creation:
                     result = (
-                        f"[diff] REJECTED: '{operation.path}' does not exist. "
-                        "You cannot apply an edit diff to a non-existent file. "
-                        "If you intended to create it, use a '--- /dev/null' creation diff."
+                        f"[block] REJECTED: '{operation.path}' does not exist. "
+                        "You cannot edit a non-existent file. "
+                        "Use an empty SEARCH section to create/write it from scratch."
                     )
                     self._append_execution(result)
-                    self.hooks.emit(EventType.TOOL_RESULT, tool="diff", result=result)
+                    self.hooks.emit(EventType.TOOL_RESULT, tool="block", result=result)
                     continue
 
-                tool_cfg = self._tool_config("diff")
+                tool_cfg = self._tool_config("block")
                 if tool_cfg.get("require_permission", False):
-                    action_type = "Create/Override" if operation.is_creation else "Edit"
+                    action_type = "Write" if operation.is_creation else "Edit"
                     perm = self.hooks.emit(
-                        EventType.PERMISSION_REQUEST, tool="diff",
+                        EventType.PERMISSION_REQUEST, tool="block",
                         description=f"{action_type} File: {operation.path}",
                     )
                     approved = bool(perm) if perm is not None else (
                         input(f"\n[Permission] {action_type}: {operation.path}\nApprove? [y/N]: ").strip().lower() in ("y", "yes")
                     )
                     if not approved:
-                        result = f"[diff] REJECTED: Permission denied to {action_type.lower()} '{operation.path}'"
+                        result = f"[block] REJECTED: Permission denied to {action_type.lower()} '{operation.path}'"
                         self._append_execution(result)
-                        self.hooks.emit(EventType.TOOL_RESULT, tool="diff", result=result)
+                        self.hooks.emit(EventType.TOOL_RESULT, tool="block", result=result)
                         continue
 
                 current = path.read_text(encoding="utf-8") if exists else ""
-                new_content = apply_operation(operation, current, exists)
+                new_content = apply_block(operation, current)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(new_content, encoding="utf-8")
                 if hasattr(self, "_watcher"):
                     self._watcher.register(str(path))
-                
+
                 if not exists:
-                    result = f"[diff] '{operation.path}' created ({len(operation.hunks)} hunk(s), {len(new_content)} bytes). (Missing parent directories auto-created)."
+                    result = f"[block] '{operation.path}' created ({len(new_content)} bytes). Parent directories auto-created if needed."
                 else:
-                    result = f"[diff] '{operation.path}' updated ({len(operation.hunks)} hunk(s), {len(new_content)} bytes)."
-                
+                    result = f"[block] '{operation.path}' updated ({len(new_content)} bytes)."
+
                 self._append_execution(result)
-                self.hooks.emit(EventType.TOOL_RESULT, tool="diff", result=result)
-            except DiffProtocolError as exc:
-                e = str(exc).lower()
-                if "not found" in e:
-                    # Hard anchors (- lines) not present in file verbatim.
-                    result = (
-                        f"[diff] REJECTED: '{operation.path}' unchanged. {exc} "
-                        "The - lines in this hunk must exactly match the current file content. "
-                        "Read the file with view_file(), correct the - lines to match what is "
-                        "actually there, then regenerate the diff."
-                    )
-                elif "ambiguous" in e:
-                    # Hard anchors found in multiple places; context scoring tied.
-                    result = (
-                        f"[diff] REJECTED: '{operation.path}' unchanged. {exc} "
-                        "Add more unique space-prefixed context lines above or below the "
-                        "changed block so that only one region scores highest."
-                    )
-                else:
-                    # Structurally invalid (e.g., creation diff with wrong lines).
-                    result = (
-                        f"[diff] REJECTED: '{operation.path}' unchanged. {exc} "
-                        "Regenerate it from scratch."
-                    )
-                self._append_execution(result)
-                self.hooks.emit(EventType.TOOL_RESULT, tool="diff", result=result)
-            except OSError as exc:
-                cache_id = self._cache_diff(operation)
+                self.hooks.emit(EventType.TOOL_RESULT, tool="block", result=result)
+
+            except ConflictProtocolError as exc:
+                err_msg = format_apply_error(operation, exc)
+                cache_id = self._cache_block(operation)
                 result = (
-                    f"[diff] OS ERROR: '{operation.path}' unchanged: {exc}\n"
-                    f"Diff cached as diff_cache_id={cache_id} — do not regenerate content. "
-                    f"Fix the OS condition in codepilot.py then call retry_diff({cache_id}) "
-                    f"or retry_diff({cache_id}, path='correct/path') if the target path was wrong."
+                    f"{err_msg}\n"
+                    f"Block cached as block_cache_id={cache_id}. "
+                    f"Fix the SEARCH content and call retry_block({cache_id}), "
+                    "or re-emit the block with corrected SEARCH text."
                 )
                 self._append_execution(result)
-                self.hooks.emit(EventType.TOOL_RESULT, tool="diff", result=result)
-            except Exception as exc:
-                result = f"[diff] UNEXPECTED ERROR: '{operation.path}' unchanged: {type(exc).__name__}: {exc}."
-                self._append_execution(result)
-                self.hooks.emit(EventType.TOOL_RESULT, tool="diff", result=result)
+                self.hooks.emit(EventType.TOOL_RESULT, tool="block", result=result)
 
-    def retry_diff(self, diff_cache_id: int, path: Optional[str] = None) -> None:
-        """Retry a cached diff after fixing an OS error; optional path corrects a bad target path."""
-        operation = self._diff_cache.get(diff_cache_id)
+            except OSError as exc:
+                cache_id = self._cache_block(operation)
+                result = (
+                    f"[block] OS ERROR: '{operation.path}' unchanged: {exc}\n"
+                    f"Block cached as block_cache_id={cache_id} — do not regenerate content. "
+                    f"Fix the OS condition in codepilot.py then call retry_block({cache_id}) "
+                    f"or retry_block({cache_id}, path='correct/path') if the target path was wrong."
+                )
+                self._append_execution(result)
+                self.hooks.emit(EventType.TOOL_RESULT, tool="block", result=result)
+
+            except Exception as exc:
+                result = f"[block] UNEXPECTED ERROR: '{operation.path}' unchanged: {type(exc).__name__}: {exc}."
+                self._append_execution(result)
+                self.hooks.emit(EventType.TOOL_RESULT, tool="block", result=result)
+
+    def retry_block(self, block_cache_id: int, path: Optional[str] = None) -> None:
+        """Retry a cached block operation after fixing an OS or apply error.
+
+        Parameters
+        ----------
+        block_cache_id : the id returned in the [EXECUTION RESULT] when a block
+                         operation failed due to an OS error.
+        path           : optional — override the target path if the original
+                         path was wrong.
+        """
+        operation = self._block_cache.get(block_cache_id)
         if operation is None:
-            self._append_execution(f"[diff] ERROR: diff_cache_id={diff_cache_id} is not available.")
+            self._append_execution(
+                f"[block] ERROR: block_cache_id={block_cache_id} is not available. "
+                "The cache entry may have already been consumed or never existed."
+            )
             return
         # This method runs from codepilot.py synchronously; use the same single
         # operation logic without an event-loop roundtrip.
         try:
             if path is not None:
                 operation = replace(operation, path=path)
-            path = self._safe_diff_path(operation.path)
-            exists = path.exists()
+            resolved_path = self._safe_diff_path(operation.path)
+            exists = resolved_path.exists()
 
             if not exists and not operation.is_creation:
                 self._append_execution(
-                    f"[diff] REJECTED: '{operation.path}' does not exist. "
-                    "Cannot retry an edit diff on a non-existent file."
+                    f"[block] REJECTED: '{operation.path}' does not exist. "
+                    "Cannot retry an edit block on a non-existent file. "
+                    "Use an empty SEARCH section to create it."
                 )
                 return
 
-            tool_cfg = self._tool_config("diff")
+            tool_cfg = self._tool_config("block")
             if tool_cfg.get("require_permission", False):
-                action_type = "Create/Override" if operation.is_creation else "Edit"
+                action_type = "Write" if operation.is_creation else "Edit"
                 perm = self.hooks.emit(
-                    EventType.PERMISSION_REQUEST, tool="diff",
+                    EventType.PERMISSION_REQUEST, tool="block",
                     description=f"{action_type} File: {operation.path}",
                 )
                 approved = bool(perm) if perm is not None else (
                     input(f"\n[Permission] {action_type}: {operation.path}\nApprove? [y/N]: ").strip().lower() in ("y", "yes")
                 )
                 if not approved:
-                    result = f"[diff] REJECTED: Permission denied to {action_type.lower()} '{operation.path}'"
+                    result = f"[block] REJECTED: Permission denied to {action_type.lower()} '{operation.path}'"
                     self._append_execution(result)
-                    self.hooks.emit(EventType.TOOL_RESULT, tool="diff", result=result)
+                    self.hooks.emit(EventType.TOOL_RESULT, tool="block", result=result)
                     return
 
-            current = path.read_text(encoding="utf-8") if exists else ""
-            new_content = apply_operation(operation, current, exists)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(new_content, encoding="utf-8")
-            self._diff_cache.pop(diff_cache_id, None)
-            
+            current = resolved_path.read_text(encoding="utf-8") if exists else ""
+            new_content = apply_block(operation, current)
+            resolved_path.parent.mkdir(parents=True, exist_ok=True)
+            resolved_path.write_text(new_content, encoding="utf-8")
+            self._block_cache.pop(block_cache_id, None)
+
             if not exists:
-                result = f"[diff] '{operation.path}' created from diff_cache_id={diff_cache_id}."
+                result = f"[block] '{operation.path}' created from block_cache_id={block_cache_id}."
             else:
-                result = f"[diff] '{operation.path}' updated from diff_cache_id={diff_cache_id}."
-                
+                result = f"[block] '{operation.path}' updated from block_cache_id={block_cache_id}."
+
             self._append_execution(result)
-            self.hooks.emit(EventType.TOOL_RESULT, tool="diff", result=result)
-        except DiffProtocolError as exc:
+            self.hooks.emit(EventType.TOOL_RESULT, tool="block", result=result)
+
+        except ConflictProtocolError as exc:
             self._append_execution(
-                f"[diff] REJECTED: cached diff {diff_cache_id} no longer matches the current file: {exc} "
-                "Read the current file with view_file() and generate a fresh diff; "
-                "the cached operation was retained for reference."
+                f"[block] REJECTED: cached block {block_cache_id} cannot apply: {exc} "
+                "Read the current file with view_file() and re-emit a fresh block "
+                "with corrected SEARCH content."
             )
         except OSError as exc:
             self._append_execution(
-                f"[diff] OS ERROR: cached diff {diff_cache_id} still failing: {exc}. "
-                "Fix the environment condition and call retry_diff again."
+                f"[block] OS ERROR: cached block {block_cache_id} still failing: {exc}. "
+                "Fix the environment condition and call retry_block again."
             )
 
     def _tool_config(self, tool_name: str) -> dict:
@@ -901,8 +901,8 @@ class AsyncRuntime:
         capabilities like filesystem, terminal, or semantic search.
         """
         # Runtime control
-        self.registry.register("task",                  self._task_control)
-        self.registry.register("retry_diff",            self.retry_diff)
+        self.registry.register("task",          self._task_control)
+        self.registry.register("retry_block",   self.retry_block)
 
         # Sub-agent tools — only registered when enabled in config
         if self.config.sub_agents.enabled:
@@ -1152,12 +1152,12 @@ class AsyncRuntime:
     @staticmethod
     def _extract_trailing_text(
         response_text: str,
-        operations: list[DiffOperation],
+        operations: list[BlockOperation],
     ) -> str:
         """Extract raw text after the last parsed block.
 
         This text is the agent's final summary — streamed to the user after
-        execution completes, replacing the old ```completion block.
+        execution completes.
         """
         if not operations:
             return ""
@@ -1166,28 +1166,30 @@ class AsyncRuntime:
         if start < 0:
             return ""
         trailing = response_text[start + len(last):].strip()
-        return trailing.strip("`").strip()
+        return trailing
 
     # ------------------------------------------------------------------ #
-    #  Streaming inference                                                 #
+    #  Streaming inference — conflict-marker protocol                      #
     # ------------------------------------------------------------------ #
 
-    # Primary trigger: the ```diff opening fence. Buffering starts here so the
-    # fence itself is never streamed to the user as raw text.
-    _DIFF_FENCE_OPEN_RE = re.compile(r"```diff\n")
-    # Fallback trigger: bare diff --git header when the model omits the fence.
-    # The parser handles fenceless diffs fine; we just need to stop streaming.
-    _DIFF_HEADER_RE = re.compile(r"^diff --git a/.+? b/.+?$", re.MULTILINE)
-    # Kept for backward compatibility with _find_control_fence / _emit_prefence_text.
-    _CONTROL_FENCE_RE = _DIFF_HEADER_RE
-    # Matches a standalone closing ``` fence line: newline + ``` + optional spaces + newline.
-    # Used by the second-block early-abort logic to track the last clean clip point.
-    _CLOSE_FENCE_RE = re.compile(r"\n```[ \t]*\n")
-    # Hold-back: buffer enough chars to avoid prematurely emitting a partial marker.
-    _HOLDBACK = len("diff --git a/x b/x")
-    # The abort sentinel for a second codepilot.py action script in one generation.
-    # Only codepilot.py diffs are restricted; multi-file workspace diffs are fine.
-    _CODEPILOT_DIFF_HEADER = "diff --git a/codepilot.py b/codepilot.py"
+    # Opening marker: 5–9 '<' signs optionally followed by SEARCH/S... suffix.
+    # We compile without MULTILINE because the state machine processes the
+    # holdback string with .search() on the raw accumulated buffer.
+    _OPEN_MARKER_RE = re.compile(
+        r"(?:^|\n)([ \t]*<{5,9}[ \t]*(?:[Ss]\w*)?[ \t]*)(?:\n|$)"
+    )
+    # Closing marker: 5–9 '>' signs optionally followed by REPLACE/R... suffix.
+    _CLOSE_MARKER_RE = re.compile(
+        r"(?:^|\n)([ \t]*>{5,9}[ \t]*(?:[Rr]\w*)?[ \t]*)(?:\n|$)"
+    )
+    # Path line candidate: a non-blank line that is NOT a protocol marker.
+    # Used to detect the path line while still in 'streaming' state.
+    _PATH_LINE_RE = re.compile(r"[^\s<>=]")
+    # Hold-back: buffer enough chars to detect a partial opening marker.
+    _HOLDBACK = 12  # enough to catch '<<<<<<<' mid-arrival
+    # Sentinel for the codepilot.py early-abort logic.
+    # Detected as 'codepilot.py\n<<<' or 'codepilot.py\r\n<<<' in the buffer.
+    _CODEPILOT_BLOCK_SENTINEL = "codepilot.py"
 
     async def _stream_inference(
         self, system_prompt: Union[str, SystemPromptParts], messages: List[Dict] = None, force_thinking: bool = False
@@ -1196,68 +1198,78 @@ class AsyncRuntime:
         Stream the LLM response token by token — 3-state machine:
 
           'streaming'   — accumulate text; emit to the user in real time.
-                          Watch for ```diff fence (primary) or bare diff --git
-                          header (fallback) to transition to 'buffering'.
-                          Also watches for <thinking> open tag.
+                          Watch for the opening conflict-marker (<<<<<<<<)
+                          to transition to 'buffering'.  Also watches for
+                          the <thinking> open tag.
           'thinking'    — inside <thinking>...</thinking>. Emit chunks to
                           THINKING_STREAM only. Never forward to STREAM.
                           Never include in the returned response text.
-          'buffering'   — diff content detected: accumulate silently until
-                          generation finishes OR a second codepilot.py diff
-                          header is detected (early-abort fires, stream is
-                          clipped at the last clean closing-fence boundary).
+          'buffering'   — conflict-marker block detected: accumulate silently
+                          until generation finishes OR a second codepilot.py
+                          block is detected (early-abort fires, stream is
+                          clipped at the last clean >>>>>>> REPLACE boundary).
 
-        Detection order (streaming → buffering transition):
-          1. ```diff\n  — PRIMARY. The opening fence triggers buffering before
-             the diff --git line arrives, so the fence itself is never leaked
-             to the user stream as raw Markdown text.
-          2. diff --git a/... b/... — FALLBACK. When the model emits a diff
-             without a ```diff fence wrapper, the bare header triggers buffering
-             so the parser can still find and apply the operation.
+        Streaming → buffering transition:
+          The path line (e.g. "src/main.py") immediately precedes the
+          opening marker.  We buffer as far back as the path line so that
+          the path is never leaked to the user terminal.  The holdback
+          window keeps the last _HOLDBACK chars un-emitted while scanning.
 
-        Early-abort (second codepilot.py diff):
-          Only a second `diff --git a/codepilot.py b/codepilot.py` triggers
-          the abort — not every second diff --git, because emitting multiple
-          independent workspace-file diffs in one step is intentional and valid.
-          When the abort fires we clip the accumulated buffer at
-          last_clean_clip_pos (the char position right after the closing ```
-          of the last fully-completed diff block) so history always contains
-          a syntactically complete response. The model never sees the cut.
+        Early-abort (second codepilot.py block):
+          Only a second codepilot.py block triggers the abort.  Multiple
+          independent workspace-file blocks in one step are valid and
+          intentional.  When the abort fires we clip at last_clean_clip_pos
+          (the char position right after the last '>>>>>>> REPLACE' line)
+          so history always contains a syntactically complete response.
 
-        Returns the complete response text (thinking stripped) for pipeline processing.
+        Returns the complete response text (thinking stripped) for pipeline
+        processing.
         """
         msgs = messages if messages is not None else self.messages
         chunks:            list = []   # full response chunks (thinking stripped)
         pre_fence_emitted: int  = 0
         state:             str  = "streaming"
 
-        # Holdback buffer for partial tag/fence detection
+        # Holdback buffer for partial tag / marker detection
         holdback: str = ""
 
-        # --- Second-block abort tracking (active only in 'buffering' state) ---
-        # Tracks the position in the joined chunks string right after the last
-        # closing ``` fence we have seen. Updated every time a line that is
-        # exactly ``` (a closing fence) is completed inside 'buffering'.
+        # ── Second-block abort tracking ───────────────────────────────────────
+        # last_clean_clip_pos: char position right after the last complete
+        # '>>>>>>> REPLACE' line; used as abort clip point.
         last_clean_clip_pos: int = 0
-        # Sentinel string for the codepilot.py action-script diff header.
-        # Only a SECOND occurrence of this exact header triggers the abort;
-        # the first occurrence is what triggered buffering.
-        _CODEPILOT_HDR     = self._CODEPILOT_DIFF_HEADER  # "diff --git a/codepilot.py b/codepilot.py"
-        _SECOND_HDR_HOLDBACK = len(_CODEPILOT_HDR)  # safe look-ahead window
-        # Whether the first codepilot.py diff has been seen yet.
-        _first_codepilot_seen: bool = False
-        # Position in accumulated past which we scan for the second header.
-        _first_ctrl_end: int = 0
+        # We detect a second codepilot.py block by scanning for the pattern
+        # 'codepilot.py\n<{5,9}' after the first one ended.
+        _CP_SENTINEL    = self._CODEPILOT_BLOCK_SENTINEL  # "codepilot.py"
+        _CP_HOLDBACK    = len(_CP_SENTINEL) + 12            # safe look-ahead window
+        _first_cp_seen: bool = False
+        # Position past the end of the first codepilot.py open-marker; scan
+        # for the second block only after this offset.
+        _first_cp_end: int = 0
 
-        def _second_codepilot_pos(buf: str, search_from: int) -> int:
-            """Return start-index of the second codepilot.py diff header, or -1."""
-            return buf.find(_CODEPILOT_HDR, search_from)
-
-        # Whether buffering was triggered by a ```diff fence (vs. bare header fallback).
-        # Tracked so we know what to look for as the primary detector.
-        _fence_triggered: bool = False
-        # The ```diff opening string for primary detection.
-        _DIFF_FENCE = "```diff\n"
+        def _find_second_codepilot(buf: str, search_from: int) -> int:
+            """
+            Find the start of a second codepilot.py block open-marker.
+            Returns the position of 'codepilot.py' or -1 if not found.
+            Pattern: 'codepilot.py' followed (possibly with \r\n or \n) by
+            a line of <<<< markers.
+            """
+            pos = search_from
+            while True:
+                cp_pos = buf.find(_CP_SENTINEL, pos)
+                if cp_pos == -1:
+                    return -1
+                # Look for a <<< marker on the next non-blank line
+                after = buf[cp_pos + len(_CP_SENTINEL):]
+                # Skip at most one \r?\n
+                nl = after.find("\n")
+                if nl == -1:
+                    return -1
+                next_line = after[nl + 1:]
+                if self._OPEN_MARKER_RE.match(next_line) or (
+                    next_line.lstrip().startswith("<" * 5)
+                ):
+                    return cp_pos
+                pos = cp_pos + len(_CP_SENTINEL)
 
         async for chunk in self.provider.chat_stream(
             messages=msgs,
@@ -1268,31 +1280,22 @@ class AsyncRuntime:
         ):
             holdback += chunk
 
-            # Strip hallucinated <codepilot>/<\/codepilot> XML wrapper tags.
-            # Some models (e.g. deepseek-v4-flash) wrap their ```codepilot fence in
-            # XML tags despite the system prompt prohibiting it. We strip them here
-            # before the state machine runs so they never reach the STREAM event /
-            # user terminal. The tags carry no information — the fence itself is the
-            # signal the parser needs.
+            # Strip hallucinated XML wrapper tags some models emit.
             holdback = holdback.replace("<codepilot>", "").replace("</codepilot>", "")
 
             while holdback:
+                # ── THINKING state ────────────────────────────────────────────
                 if state == "thinking":
                     end_idx = holdback.find("</thinking>")
                     if end_idx != -1:
-                        # Emit whatever thinking text precedes the closing tag
                         thinking_chunk = holdback[:end_idx]
                         if thinking_chunk:
                             self.hooks.emit(EventType.THINKING_STREAM, thinking=thinking_chunk)
-                        # Consume the closing tag and everything after
                         holdback = holdback[end_idx + len("</thinking>"):]
-                        # Strip leading newline that follows </thinking>
                         if holdback.startswith("\n"):
                             holdback = holdback[1:]
                         state = "streaming"
                     else:
-                        # Check for a partial closing tag at the end of holdback
-                        # (e.g. holdback ends with "</think" — wait for more chunks)
                         partial = "</thinking>"
                         safe_end = len(holdback)
                         for k in range(1, len(partial)):
@@ -1305,42 +1308,45 @@ class AsyncRuntime:
                         break
 
                 else:  # state == "streaming" or "buffering"
-                    # Check for <thinking> open tag first
+                    # ── Check for <thinking> open tag first ───────────────────
                     think_idx = holdback.find("<thinking>")
                     if think_idx != -1:
-                        # Emit/buffer everything before the tag
                         pre_think = holdback[:think_idx]
-                        if pre_think and state == "streaming":
-                            accumulated_so_far = "".join(chunks) + pre_think
-                            m = self._CONTROL_FENCE_RE.search(accumulated_so_far)
-                            if m:
-                                ctrl_pos = m.start()
-                                if self._stream and ctrl_pos > pre_fence_emitted:
-                                    self.hooks.emit(EventType.STREAM,
-                                                    text=accumulated_so_far[pre_fence_emitted:ctrl_pos])
-                                state = "buffering"
-                                chunks.append(pre_think)
-                                pre_fence_emitted = len("".join(chunks))
+                        if pre_think:
+                            if state == "streaming":
+                                # Check if a conflict-marker is hiding in pre_think
+                                accumulated_so_far = "".join(chunks) + pre_think
+                                open_m = self._OPEN_MARKER_RE.search(accumulated_so_far)
+                                if open_m:
+                                    # Emit up to just before the path line
+                                    # (path line is the last newline-separated
+                                    # token before the marker).
+                                    emit_to = self._path_line_start(
+                                        accumulated_so_far, open_m.start()
+                                    )
+                                    if self._stream and emit_to > pre_fence_emitted:
+                                        self.hooks.emit(EventType.STREAM,
+                                                        text=accumulated_so_far[pre_fence_emitted:emit_to])
+                                    state = "buffering"
+                                    chunks.append(pre_think)
+                                    pre_fence_emitted = len("".join(chunks))
+                                else:
+                                    chunks.append(pre_think)
+                                    accumulated_so_far = "".join(chunks)
+                                    safe_end = len(accumulated_so_far) - self._HOLDBACK
+                                    if self._stream and safe_end > pre_fence_emitted:
+                                        self.hooks.emit(EventType.STREAM,
+                                                        text=accumulated_so_far[pre_fence_emitted:safe_end])
+                                        pre_fence_emitted = safe_end
                             else:
                                 chunks.append(pre_think)
-                                accumulated_so_far = "".join(chunks)
-                                safe_end = len(accumulated_so_far) - self._HOLDBACK
-                                if self._stream and safe_end > pre_fence_emitted:
-                                    self.hooks.emit(EventType.STREAM,
-                                                    text=accumulated_so_far[pre_fence_emitted:safe_end])
-                                    pre_fence_emitted = safe_end
-                        elif pre_think:
-                            chunks.append(pre_think)
-
                         holdback = holdback[think_idx + len("<thinking>"):]
-                        # Strip leading newline inside thinking tag
                         if holdback.startswith("\n"):
                             holdback = holdback[1:]
                         state = "thinking"
                         continue
 
-                    # No <thinking> tag — process normally
-                    # Check for partial <thinking> at end of holdback
+                    # ── Guard partial <thinking> at end of holdback ───────────
                     tag = "<thinking>"
                     safe_end_hold = len(holdback)
                     for k in range(1, len(tag)):
@@ -1349,223 +1355,134 @@ class AsyncRuntime:
                             break
 
                     to_process = holdback[:safe_end_hold]
-                    holdback = holdback[safe_end_hold:]
+                    holdback   = holdback[safe_end_hold:]
 
                     if not to_process:
                         break
 
+                    # ── BUFFERING state ───────────────────────────────────────
                     if state == "buffering":
                         chunks.append(to_process)
                         accumulated = "".join(chunks)
 
-                        # -------------------------------------------------------- #
-                        # Second codepilot.py diff early-abort detection            #
-                        #                                                            #
-                        # Scan the safe window for a second occurrence of the       #
-                        # codepilot.py diff header. Multiple workspace-file diffs   #
-                        # in one step are ALLOWED; only a second codepilot.py       #
-                        # action-script diff is forbidden (model hasn't seen the    #
-                        # first one's execution result yet).                        #
-                        # -------------------------------------------------------- #
-                        safe_scan_end = len(accumulated) - _SECOND_HDR_HOLDBACK
-                        if _first_codepilot_seen and safe_scan_end > _first_ctrl_end:
-                            second_pos = _second_codepilot_pos(accumulated, _first_ctrl_end)
+                        # ── Second codepilot.py block early-abort ─────────────
+                        safe_scan_end = len(accumulated) - _CP_HOLDBACK
+                        if _first_cp_seen and safe_scan_end > _first_cp_end:
+                            second_pos = _find_second_codepilot(accumulated, _first_cp_end)
                             if second_pos != -1 and second_pos < safe_scan_end:
-                                # Second codepilot.py diff detected — abort.
-                                # Clip at the last clean fence boundary we recorded.
+                                # Clip at last clean >>>>>>> REPLACE boundary
                                 if last_clean_clip_pos > 0:
-                                    clip_str = accumulated[:last_clean_clip_pos]
-                                    chunks = [clip_str]
+                                    chunks = [accumulated[:last_clean_clip_pos]]
                                 holdback = "\x00ABORT\x00"
                                 break
 
-                        # -------------------------------------------------------- #
-                        # Mark first codepilot.py diff as seen (once)              #
-                        # -------------------------------------------------------- #
-                        if not _first_codepilot_seen:
-                            cp_pos = accumulated.find(_CODEPILOT_HDR)
-                            if cp_pos != -1:
-                                _first_codepilot_seen = True
-                                # Start scanning for the second one after this header
-                                _first_ctrl_end = cp_pos + len(_CODEPILOT_HDR)
+                        # ── Mark first codepilot.py block (once) ──────────────
+                        if not _first_cp_seen:
+                            cp_start = accumulated.find(_CP_SENTINEL)
+                            if cp_start != -1:
+                                # Confirm it is followed by an open-marker line
+                                rest = accumulated[cp_start + len(_CP_SENTINEL):]
+                                nl = rest.find("\n")
+                                if nl != -1:
+                                    nxt = rest[nl + 1:]
+                                    if nxt.lstrip().startswith("<" * 5):
+                                        _first_cp_seen = True
+                                        open_end_m = self._OPEN_MARKER_RE.search(
+                                            accumulated, cp_start
+                                        )
+                                        _first_cp_end = (
+                                            open_end_m.end()
+                                            if open_end_m
+                                            else cp_start + len(_CP_SENTINEL) + nl + 12
+                                        )
 
-                        # -------------------------------------------------------- #
-                        # Track last clean clip position                            #
-                        #                                                            #
-                        # A "clean clip point" is right after a closing ``` line.  #
-                        # -------------------------------------------------------- #
-                        for close_m in self._CLOSE_FENCE_RE.finditer(accumulated):
+                        # ── Track last clean clip position (>>>>>>> REPLACE) ───
+                        for close_m in self._CLOSE_MARKER_RE.finditer(accumulated):
                             candidate = close_m.end()
                             if candidate > last_clean_clip_pos:
                                 last_clean_clip_pos = candidate
 
                         break
 
-                    # state == "streaming" — check for buffering trigger.
+                    # ── STREAMING state — watch for conflict-marker open ───────
                     chunks.append(to_process)
                     accumulated = "".join(chunks)
 
-                    # -------------------------------------------------------- #
-                    # Primary trigger: ```diff\n fence                         #
-                    # Buffering starts at the backtick, so the fence itself    #
-                    # is never emitted to the user stream as raw text.         #
-                    # -------------------------------------------------------- #
-                    fence_m = self._DIFF_FENCE_OPEN_RE.search(accumulated)
-                    if fence_m:
-                        # Emit everything BEFORE the opening fence.
-                        ctrl_pos = fence_m.start()
-                        if self._stream and ctrl_pos > pre_fence_emitted:
+                    open_m = self._OPEN_MARKER_RE.search(accumulated)
+                    if open_m:
+                        # Emit everything up to (but not including) the path line
+                        # that precedes the opening marker.
+                        emit_to = self._path_line_start(accumulated, open_m.start())
+                        if self._stream and emit_to > pre_fence_emitted:
                             self.hooks.emit(EventType.STREAM,
-                                            text=accumulated[pre_fence_emitted:ctrl_pos])
+                                            text=accumulated[pre_fence_emitted:emit_to])
                         state = "buffering"
-                        _fence_triggered = True
-                        # Scanner starts after the fence open; codepilot.py header
-                        # will be detected inside the buffered block below.
-                        _first_ctrl_end = fence_m.end()
+                        # _first_ctrl_end not needed — we scan from 0 each time
+                        # (the codepilot.py detector rescans the full buffer).
                     else:
-                        # ---------------------------------------------------- #
-                        # Fallback trigger: bare diff --git header (no fence)   #
-                        # ---------------------------------------------------- #
-                        hdr_m = self._DIFF_HEADER_RE.search(accumulated)
-                        if hdr_m:
-                            ctrl_pos = hdr_m.start()
-                            if self._stream and ctrl_pos > pre_fence_emitted:
-                                self.hooks.emit(EventType.STREAM,
-                                                text=accumulated[pre_fence_emitted:ctrl_pos])
-                            state = "buffering"
-                            _first_ctrl_end = hdr_m.end()
-                            # If this bare header IS the codepilot.py header, mark it seen.
-                            if _CODEPILOT_HDR in accumulated[hdr_m.start():hdr_m.end() + 1]:
-                                _first_codepilot_seen = True
-                                _first_ctrl_end = hdr_m.start() + len(_CODEPILOT_HDR)
-                        else:
-                            safe_end = len(accumulated) - self._HOLDBACK
-                            if self._stream and safe_end > pre_fence_emitted:
-                                self.hooks.emit(EventType.STREAM,
-                                                text=accumulated[pre_fence_emitted:safe_end])
-                                pre_fence_emitted = safe_end
+                        # Emit safely — hold back enough to catch a partial marker
+                        safe_end = len(accumulated) - self._HOLDBACK
+                        if self._stream and safe_end > pre_fence_emitted:
+                            self.hooks.emit(EventType.STREAM,
+                                            text=accumulated[pre_fence_emitted:safe_end])
+                            pre_fence_emitted = safe_end
                     break
 
-            # ------------------------------------------------------------------ #
-            # Check if the inner loop requested a stream abort                   #
-            # ------------------------------------------------------------------ #
+            # ── Check for inner-loop abort sentinel ───────────────────────────
             if holdback == "\x00ABORT\x00":
                 holdback = ""
                 break
 
-        # ------------------------------------------------------------------ #
-        # Flush holdback remainder                                            #
-        # ------------------------------------------------------------------ #
+        # ── Flush holdback remainder ──────────────────────────────────────────
         if holdback and state != "thinking" and holdback != "\x00ABORT\x00":
             chunks.append(holdback)
 
-        # ------------------------------------------------------------------ #
-        # Final flush — only needed for pure conversational responses.       #
-        # ------------------------------------------------------------------ #
+        # ── Final flush — pure conversational responses ───────────────────────
         accumulated = "".join(chunks)
 
         if state == "streaming":
-            # No codepilot block at all — pure conversation, flush everything.
             remaining = accumulated[pre_fence_emitted:]
             if self._stream and remaining:
                 self.hooks.emit(EventType.STREAM, text=remaining)
 
         return accumulated
 
-    @classmethod
-    def _find_control_fence(cls, text: str) -> int:
-        """Find the character position of a line-anchored ```codepilot fence.
-
-        Returns the position of the opening ```, or -1 if not found.
+    @staticmethod
+    def _path_line_start(accumulated: str, marker_pos: int) -> int:
         """
-        m = cls._CONTROL_FENCE_RE.search(text)
-        return m.start() if m else -1
+        Return the character position in *accumulated* where the path line
+        immediately before the conflict-marker at *marker_pos* begins.
 
-    def _emit_prefence_text(self, response_text: str):
-        """Emit pre-fence text as STREAM events (non-streaming mode).
-
-        Trailing text after the codepilot/payload blocks is emitted by run()
-        after _execute() completes, not here.
+        The path line is the last non-blank line before *marker_pos*.  We
+        suppress it from the user stream so file paths are never leaked.
+        If no such line exists, return *marker_pos* (nothing extra to suppress).
         """
-        fence_pos = self._find_control_fence(response_text)
-        if fence_pos > 0:
-            pre_text = response_text[:fence_pos].strip()
+        pre = accumulated[:marker_pos]
+        # Walk backwards over any trailing newline then the path line itself
+        pre_stripped = pre.rstrip("\n\r")
+        last_nl = pre_stripped.rfind("\n")
+        if last_nl == -1:
+            # The path line starts at char 0
+            return 0
+        return last_nl + 1
+
+    def _emit_pre_block_text(self, response_text: str) -> None:
+        """Emit text that precedes any conflict-marker block as STREAM events.
+
+        Finds the first path line (the non-blank line before the first <<<<<)
+        and emits everything before it.  Used in non-streaming mode.
+        """
+        open_m = self._OPEN_MARKER_RE.search(response_text)
+        if open_m:
+            emit_to = self._path_line_start(response_text, open_m.start())
+            pre_text = response_text[:emit_to].strip()
             if pre_text:
                 self.hooks.emit(EventType.STREAM, text=pre_text)
-        elif fence_pos == -1 and response_text.strip():
-            # No control block at all — emit everything (display/chat)
+        elif response_text.strip():
+            # No block at all — emit everything (conversational reply)
             self.hooks.emit(EventType.STREAM, text=response_text.strip())
 
-    @staticmethod
-    def _format_diff_error(error: str) -> str:
-        """
-        Return a terse, failure-class-aware correction for a DiffProtocolError
-        raised by parse_operations().
 
-        The model's response has already been stored in history.  This message
-        appears as [EXECUTION RESULT] so the model sees exactly what it did wrong
-        and what the minimum fix is.  Every word here costs a token on the retry.
-        """
-        e = error.lower()
-
-        # --- No @@ hunk marker at all --- #
-        if "no @@ hunk marker" in e:
-            return (
-                f"DIFF PARSE ERROR: {error}\n"
-                "Every diff block needs at least one `@@ ... @@` line between "
-                "the `--- / +++` headers and the hunk body. "
-                "The @@ numbers are ignored; any value is accepted."
-            )
-
-        # --- Malformed hunk line (bad prefix) --- #
-        if "malformed hunk line" in e:
-            return (
-                f"DIFF PARSE ERROR: {error}\n"
-                "Every hunk body line must start with exactly one character: "
-                "space (context), `+` (addition), or `-` (deletion). "
-                "No other prefixes are valid."
-            )
-
-        # --- Missing or bad target path --- #
-        if "missing a writable" in e or "missing" in e:
-            return (
-                f"DIFF PARSE ERROR: {error}\n"
-                "The `+++ b/<path>` line is required and must contain a real workspace path. "
-                "For file creation use `--- /dev/null`. For codepilot.py always use "
-                "`--- /dev/null` and `+++ b/codepilot.py`."
-            )
-
-        # --- Deletion diff (not supported) --- #
-        if "deletion diff" in e or "not supported" in e:
-            return (
-                f"DIFF PARSE ERROR: {error}\n"
-                "File deletion via `+++ /dev/null` is not supported. "
-                "To remove a file call `execute(\"main\", \"rm <path>\")` from codepilot.py."
-            )
-
-        # --- Creation diff has non-add lines --- #
-        if "creation diff" in e and "only +" in e:
-            return (
-                f"DIFF PARSE ERROR: {error}\n"
-                "A creation diff (`--- /dev/null`) must contain only `+` lines — "
-                "no context (space) or deletion (`-`) lines."
-            )
-
-        # --- Empty hunk --- #
-        if "empty hunk" in e:
-            return (
-                f"DIFF PARSE ERROR: {error}\n"
-                "The hunk body between `@@` markers is empty. "
-                "Include at least one `+` or `-` line."
-            )
-
-        # --- Generic fallback --- #
-        return (
-            f"DIFF PARSE ERROR: {error}\n"
-            "Emit each file change as a self-contained `diff --git a/<p> b/<p>` block "
-            "with `---`, `+++`, `@@`, and hunk lines prefixed by space/+/-. "
-            "For codepilot.py use `--- /dev/null` and only `+` lines."
-        )
 
     # ------------------------------------------------------------------ #
     #  Sandbox + execution                                                 #
