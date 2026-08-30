@@ -5,7 +5,7 @@ export function PageHowItWorks() {
     <>
       <PageHeader
         title="How It Works"
-        subtitle="CodePilot uses a code-as-interface paradigm. Instead of the LLM describing actions in JSON, it writes Python code that the runtime executes directly."
+        subtitle="CodePilot uses a search/replace-native paradigm. Instead of the LLM describing actions in JSON, it emits conflict-marker text blocks that the runtime applies directly to files and executes as tool calls."
       />
 
       <Section title="Each agent step">
@@ -58,16 +58,18 @@ Done. Updated TIMEOUT to 60s in config.py.`}</Code>
       </Section>
 
       <Section title="Chat/explanation (no execution)">
+        <p>
+          When a turn is purely conversational — no file to touch, no command to run — the agent's response is just
+          natural-language markdown. There is no conflict-marker block at all, so the runtime treats it as final text
+          and the loop exits without touching the workspace.
+        </p>
         <Code lang="text">{`Sure! Here's how the config loader handles missing files:
 
-\`\`\`python
-# Display block — never executed
 def load(path: str) -> dict:
     if not os.path.exists(path):
         return {}   # returns empty dict as default
     with open(path) as f:
         return json.load(f)
-\`\`\`
 
 The fallback is an empty dict, so callers always get a valid dict — no None checks needed.`}</Code>
       </Section>
@@ -139,14 +141,14 @@ runtime.run("Diagnose the CI pipeline for the latest failure and stage the fix."
       <Section title="What gets streamed">
         <p>The runtime streams natural-language text around the execution protocol:</p>
         <ol style={{ paddingLeft: 20, color: "var(--text-soft)", lineHeight: 2 }}>
-          <li><strong>Pre-control text</strong> — everything before the <code>{"`"}codepilot{"`"}</code> block streams as the LLM generates it.</li>
+          <li><strong>Pre-block text</strong> — everything before the first conflict-marker block (<code>&lt;path&gt;</code> or <code>codepilot.py</code>) streams as the LLM generates it.</li>
           <li><strong>Final text</strong> — after a successful <code>task(finish=True)</code>, trailing natural-language text is emitted after tools finish.</li>
         </ol>
         <p style={{ marginTop: 12 }}>
-          Everything between the two windows (the codepilot block, payload blocks) is buffered silently while tools execute.
+          Everything between the two windows — the SEARCH/REPLACE blocks and the <code>codepilot.py</code> block — is buffered silently while the runtime applies file edits and executes tools.
         </p>
         <p>
-          For <strong>chat/question responses</strong> (no <code>codepilot</code> block at all), the entire response streams token-by-token and the loop exits cleanly.
+          For <strong>chat/question responses</strong> (no conflict-marker block at all), the entire response streams token-by-token and the loop exits cleanly.
         </p>
       </Section>
 
@@ -199,18 +201,20 @@ export function PageCodeAsInterface() {
     <>
       <PageHeader
         title="Code-as-Interface"
-        subtitle="Understand the philosophy behind treating execution blocks as the primary interface between the model and the environment."
+        subtitle="Understand the philosophy behind treating SEARCH/REPLACE conflict-marker blocks as the primary interface between the model and the environment."
       />
 
       <Section title="Philosophy & Cognitive Span">
         <p>
           Traditional agent systems constrain models inside narrow, structured JSON schemas or rigid function-calling definitions.
           CodePilot reverses this: the model is given a <strong>code-as-interface</strong> runtime.
-          The model writes arbitrary Python code that executes directly in the workspace environment.
+          Workspace mutations are raw SEARCH/REPLACE conflict-marker blocks headed by a file path, and tool calls
+          are arbitrary Python written into a single ephemeral <code>codepilot.py</code> block per step — no JSON
+          arguments, no escaped strings, no schema validation round-trip.
         </p>
         <ul style={{ paddingLeft: 20, color: "var(--text-soft)", lineHeight: 2 }}>
-          <li><strong>Large Cognitive Span:</strong> Rather than executing single tools sequentially, the model can reason, write logic loops, import standard libraries, handle exceptions with try-except, and perform complex scripting operations in a single step.</li>
-          <li><strong>Flexibility:</strong> The agent can combine built-in tool calls with raw, custom Python code to diagnose problems or inspect outputs dynamically.</li>
+          <li><strong>Large Cognitive Span:</strong> Inside <code>codepilot.py</code>, the model can reason, write logic loops, import standard libraries, handle exceptions with try-except, and perform complex scripting operations in a single step — not just call single tools sequentially.</li>
+          <li><strong>Flexibility:</strong> The agent can combine built-in tool calls with raw, custom Python code inside <code>codepilot.py</code> to diagnose problems or inspect outputs dynamically, while file edits stay separate, reviewable SEARCH/REPLACE blocks.</li>
         </ul>
       </Section>
 
