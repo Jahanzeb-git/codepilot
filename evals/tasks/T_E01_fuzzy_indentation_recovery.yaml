@@ -1,0 +1,33 @@
+id: T_E01_fuzzy_indentation_recovery
+description: "Tests the 2-pass fuzzy SEARCH matcher when indentation is inconsistent"
+
+setup:
+  files:
+    - path: "insertion_sort.py"
+      content: |
+        def insertion_sort(arr):
+            for i in range(1, len(arr)):
+                key = arr[i]
+                j = i - 1
+                while j >= 0 and arr[j] > key:
+                    arr[j + 1] = arr[j]
+                    j -= 1
+                arr[j + 1] = key
+            return arr
+
+prompt: |
+  In insertion_sort.py, add a docstring to the insertion_sort function
+  immediately after the def line. The docstring should say:
+    "Sorts a list in ascending order using insertion sort. O(n^2) time."
+  Edit the file and call task(finish=True).
+
+assertions:
+  max_steps: 3
+  max_tool_errors: 0
+  max_parse_errors: 0
+  must_finish_cleanly: true
+  files_must_exist:
+    - insertion_sort.py
+  verifier: "file_verifiers.InsertionSortDocstringVerifier"
+
+use_llm_judge: false

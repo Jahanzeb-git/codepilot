@@ -1,0 +1,31 @@
+id: T_F03_file_edit_multi_region
+description: "Fix three separate buggy functions in a single file, one agentic step"
+
+setup:
+  files:
+    - path: "calculator.py"
+      content: |
+        def add(a, b):
+            return a - b  # bug: subtract instead of add
+
+        def subtract(a, b):
+            return a + b  # bug: add instead of subtract
+
+        def multiply(a, b):
+            return a / b  # bug: divide instead of multiply
+
+prompt: |
+  The file calculator.py has three deliberately broken functions.
+  Fix all three in a SINGLE agentic step using three separate SEARCH/REPLACE
+  blocks, then call task(finish=True).
+
+assertions:
+  max_steps: 2
+  max_tool_errors: 0
+  max_parse_errors: 0
+  must_finish_cleanly: true
+  files_must_exist:
+    - calculator.py
+  verifier: "file_verifiers.CalculatorVerifier"
+
+use_llm_judge: false

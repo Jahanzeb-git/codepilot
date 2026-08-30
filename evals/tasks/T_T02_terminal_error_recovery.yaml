@@ -1,0 +1,28 @@
+id: T_T02_terminal_error_recovery
+description: "Command fails with exit code 1; model must detect and recover autonomously"
+
+setup:
+  files:
+    - path: "app.py"
+      content: |
+        import sys
+        # Intentional syntax error
+        def main(
+            print("this won't parse")
+
+        main()
+
+prompt: |
+  Run app.py with python3. If it fails, inspect the error, fix the syntax
+  issue in app.py so it runs cleanly and prints something, then verify it
+  works. Call task(finish=True) once it runs successfully.
+
+assertions:
+  max_steps: 4
+  max_tool_errors: 1
+  max_parse_errors: 0
+  must_finish_cleanly: true
+  verifier: "terminal_verifiers.ErrorRecoveryVerifier"
+
+use_llm_judge: true
+judge_focus: "Did the model correctly read the error output from [EXECUTION RESULT] to identify the syntax error, or did it hallucinate the fix without reading the actual traceback?"

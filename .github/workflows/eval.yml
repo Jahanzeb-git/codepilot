@@ -1,0 +1,54 @@
+name: CodePilot Eval Suite
+
+# Triggers:
+#   - pull_request to main → mandatory eval gate before merge
+#   - workflow_dispatch → manual trigger from GitHub Actions UI
+#
+# Does NOT trigger on:
+#   - tag pushes (v*) — those trigger publish.yml for PyPI only
+#   - direct pushes to main — PRs are required
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  eval:
+    name: "Eval Suite · ${{ github.head_ref || 'manual' }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install codepilot + eval dependencies
+        run: pip install -e ".[evals]"
+
+      - name: Dry-run (validate YAML task files only — zero LLM calls)
+        run: python3 evals/harness.py --dry-run
+
+      - name: Run Eval Suite against pinned model
+        env:
+          # Agent model: qwen3.8-flash (pinned in evals/baseline.json)
+          # Judge model: qwen3.8-max (different from agent — prevents self-preference bias)
+          # Both use the same DashScope key
+          DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+        run: |
+          python3 evals/harness.py \
+            --baseline evals/baseline.json \
+            --fail-on-regression \
+            --concurrency 2
+
+      - name: Upload Eval Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report-${{ github.run_number }}
+          path: evals/report/latest_run.json
+          retention-days: 30

@@ -1,0 +1,39 @@
+# Eval Harness AgentFile — used exclusively by evals/harness.py
+# work_dir is overridden programmatically by the harness per task.
+
+name: "CodepilotEvalAgent"
+role: "Senior Software Engineer under evaluation"
+
+model:
+  provider: "alibaba"
+  name: "qwen3-235b-a22b"       # qwen3.8-flash — smallest capable Qwen3 model
+  api_key_env: "DASHSCOPE_API_KEY"
+  temperature: 0.0
+  max_tokens: 8192
+
+# qwen3.8-flash is not in model_profiles, so declare context window explicitly
+memory:
+  max_context_tokens: 128000
+
+runtime:
+  work_dir: "."
+  max_steps: 15
+  unsafe_mode: false
+
+tools:
+  - name: execute
+    enabled: true
+  - name: view_file
+    enabled: true
+  - name: list_dir
+    enabled: true
+  - name: find_file
+    enabled: true
+  - name: task
+    enabled: true
+  - name: semantic_search
+    enabled: false
+  - name: mcp
+    enabled: false
+  - name: sub_agents
+    enabled: false

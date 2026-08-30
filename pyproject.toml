@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codepilot-ai"
-version = "0.9.34"
+version = "0.9.35"
 description = "A code-native agentic framework for embedding robust agentic runtime into software components."
 readme = "README.md"
 authors = [
@@ -36,6 +36,10 @@ dependencies = [
 [project.optional-dependencies]
 db = [
     "sqlalchemy>=2.0",
+]
+evals = [
+    "pyyaml>=6.0",
+    "openai>=1.0",
 ]
 
 [project.urls]

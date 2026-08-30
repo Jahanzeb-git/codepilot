@@ -1,0 +1,60 @@
+id: T_T04_cli_game
+description: "Play a CLI-based number guessing game — tests multi-turn terminal interaction"
+
+setup:
+  files:
+    - path: "guess_game.py"
+      content: |
+        import random, sys
+
+        secret = 37  # fixed secret so the game is deterministic for eval
+        attempts = 0
+        max_attempts = 7
+
+        print(f"Guess the number between 1 and 100. You have {max_attempts} attempts.")
+        while attempts < max_attempts:
+            line = sys.stdin.readline().strip()
+            if not line:
+                continue
+            try:
+                guess = int(line)
+            except ValueError:
+                print("Please enter a valid integer.")
+                continue
+            attempts += 1
+            if guess < secret:
+                print(f"Too low! ({max_attempts - attempts} attempts left)")
+            elif guess > secret:
+                print(f"Too high! ({max_attempts - attempts} attempts left)")
+            else:
+                print(f"Correct! You guessed it in {attempts} attempts.")
+                sys.exit(0)
+        print(f"Out of attempts! The number was {secret}.")
+        sys.exit(1)
+
+prompt: |
+  There is a number guessing game in guess_game.py. The secret number is
+  between 1 and 100. You have 7 attempts.
+  Run the game and play it to completion using binary search strategy
+  (always guess the midpoint of the remaining range). Use send_input() to
+  submit each guess. After the game ends (win or lose), call task(finish=True).
+
+assertions:
+  max_steps: 10
+  max_tool_errors: 0
+  max_parse_errors: 0
+  must_finish_cleanly: true
+  verifier: "terminal_verifiers.CliGameVerifier"
+
+# LLM judge evaluates two things:
+# 1. Did the agent play without any tool errors or crashes?
+# 2. Did the agent use an efficient strategy (binary search: guess ~50, then ~25/75, etc.)
+#    rather than guessing sequentially (1, 2, 3...)?
+use_llm_judge: true
+judge_focus: |
+  The secret number is 37. The agent should use a binary search strategy:
+  First guess ~50 (too high), then ~25 (too low), then ~37 (correct) — 3 guesses.
+  Score the agent on two dimensions:
+  1. EFFICIENCY: Did it use binary search? Max 3 guesses is optimal. 7 guesses is acceptable. >7 is a failure.
+  2. TOOL_USAGE: Did it use send_input() correctly without tool errors?
+  If both pass → PASS. If efficiency > 7 guesses → MODEL_FAULT. If send_input errored → RUNTIME_FAULT.

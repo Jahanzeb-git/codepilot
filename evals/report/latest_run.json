@@ -1,0 +1,140 @@
+{
+  "generated_at": "2026-08-30T18:02:16.805788+00:00",
+  "pinned_model": "qwen3-235b-a22b",
+  "total": 12,
+  "passed": 0,
+  "results": [
+    {
+      "task_id": "T_C01_conversational",
+      "verdict": "PENDING",
+      "verdict_reason": "dry-run",
+      "total_steps": 0,
+      "total_tool_errors": 0,
+      "total_parse_errors": 0,
+      "total_protocol_violations": 0,
+      "finished_cleanly": false,
+      "regression": false
+    },
+    {
+      "task_id": "T_E01_fuzzy_indentation_recovery",
+      "verdict": "PENDING",
+      "verdict_reason": "dry-run",
+      "total_steps": 0,
+      "total_tool_errors": 0,
+      "total_parse_errors": 0,
+      "total_protocol_violations": 0,
+      "finished_cleanly": false,
+      "regression": false
+    },
+    {
+      "task_id": "T_F01_file_create_single",
+      "verdict": "PENDING",
+      "verdict_reason": "dry-run",
+      "total_steps": 0,
+      "total_tool_errors": 0,
+      "total_parse_errors": 0,
+      "total_protocol_violations": 0,
+      "finished_cleanly": false,
+      "regression": false
+    },
+    {
+      "task_id": "T_F02_file_edit_single_region",
+      "verdict": "PENDING",
+      "verdict_reason": "dry-run",
+      "total_steps": 0,
+      "total_tool_errors": 0,
+      "total_parse_errors": 0,
+      "total_protocol_violations": 0,
+      "finished_cleanly": false,
+      "regression": false
+    },
+    {
+      "task_id": "T_F03_file_edit_multi_region",
+      "verdict": "PENDING",
+      "verdict_reason": "dry-run",
+      "total_steps": 0,
+      "total_tool_errors": 0,
+      "total_parse_errors": 0,
+      "total_protocol_violations": 0,
+      "finished_cleanly": false,
+      "regression": false
+    },
+    {
+      "task_id": "T_F04_multi_file_one_shot",
+      "verdict": "PENDING",
+      "verdict_reason": "dry-run",
+      "total_steps": 0,
+      "total_tool_errors": 0,
+      "total_parse_errors": 0,
+      "total_protocol_violations": 0,
+      "finished_cleanly": false,
+      "regression": false
+    },
+    {
+      "task_id": "T_F05_edit_bad_search",
+      "verdict": "PENDING",
+      "verdict_reason": "dry-run",
+      "total_steps": 0,
+      "total_tool_errors": 0,
+      "total_parse_errors": 0,
+      "total_protocol_violations": 0,
+      "finished_cleanly": false,
+      "regression": false
+    },
+    {
+      "task_id": "T_P01_protocol_no_fences",
+      "verdict": "PENDING",
+      "verdict_reason": "dry-run",
+      "total_steps": 0,
+      "total_tool_errors": 0,
+      "total_parse_errors": 0,
+      "total_protocol_violations": 0,
+      "finished_cleanly": false,
+      "regression": false
+    },
+    {
+      "task_id": "T_T01_terminal_simple",
+      "verdict": "PENDING",
+      "verdict_reason": "dry-run",
+      "total_steps": 0,
+      "total_tool_errors": 0,
+      "total_parse_errors": 0,
+      "total_protocol_violations": 0,
+      "finished_cleanly": false,
+      "regression": false
+    },
+    {
+      "task_id": "T_T02_terminal_error_recovery",
+      "verdict": "PENDING",
+      "verdict_reason": "dry-run",
+      "total_steps": 0,
+      "total_tool_errors": 0,
+      "total_parse_errors": 0,
+      "total_protocol_violations": 0,
+      "finished_cleanly": false,
+      "regression": false
+    },
+    {
+      "task_id": "T_T03_terminal_background_process",
+      "verdict": "PENDING",
+      "verdict_reason": "dry-run",
+      "total_steps": 0,
+      "total_tool_errors": 0,
+      "total_parse_errors": 0,
+      "total_protocol_violations": 0,
+      "finished_cleanly": false,
+      "regression": false
+    },
+    {
+      "task_id": "T_T04_cli_game",
+      "verdict": "PENDING",
+      "verdict_reason": "dry-run",
+      "total_steps": 0,
+      "total_tool_errors": 0,
+      "total_parse_errors": 0,
+      "total_protocol_violations": 0,
+      "finished_cleanly": false,
+      "regression": false
+    }
+  ]
+}

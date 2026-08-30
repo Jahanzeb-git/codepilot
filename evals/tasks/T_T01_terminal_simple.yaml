@@ -1,0 +1,21 @@
+id: T_T01_terminal_simple
+description: "Run a shell command and verify it completed successfully"
+
+setup:
+  files:
+    - path: "hello.py"
+      content: |
+        print("Hello from eval!")
+
+prompt: |
+  Run the file hello.py using python3 and confirm it prints correctly.
+  Call task(finish=True) after confirming the output.
+
+assertions:
+  max_steps: 2
+  max_tool_errors: 0
+  max_parse_errors: 0
+  must_finish_cleanly: true
+  verifier: "terminal_verifiers.SimpleCommandVerifier"
+
+use_llm_judge: false

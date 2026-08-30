@@ -1,0 +1,92 @@
+{
+  "_note": "Golden baseline. Change DELIBERATELY — never auto-updated by CI. Bump when intentionally improving thresholds.",
+  "_pinned_model": "qwen3-235b-a22b",
+  "_pinned_provider": "alibaba",
+  "_version": 2,
+  "tasks": {
+    "T_F01_file_create_single": {
+      "max_steps": 2,
+      "max_tool_errors": 0,
+      "max_parse_errors": 0,
+      "must_finish_cleanly": true,
+      "description": "Create a single new file — agent writes file then verifies + finishes"
+    },
+    "T_F02_file_edit_single_region": {
+      "max_steps": 2,
+      "max_tool_errors": 0,
+      "max_parse_errors": 0,
+      "must_finish_cleanly": true,
+      "description": "Edit a single region in an existing file"
+    },
+    "T_F03_file_edit_multi_region": {
+      "max_steps": 2,
+      "max_tool_errors": 0,
+      "max_parse_errors": 0,
+      "must_finish_cleanly": true,
+      "description": "Edit three non-overlapping regions in one file, one shot"
+    },
+    "T_F04_multi_file_one_shot": {
+      "max_steps": 2,
+      "max_tool_errors": 0,
+      "max_parse_errors": 0,
+      "must_finish_cleanly": true,
+      "description": "Create two new files and edit one existing file, all in a single step"
+    },
+    "T_F05_edit_bad_search": {
+      "max_steps": 3,
+      "max_tool_errors": 1,
+      "max_parse_errors": 1,
+      "must_finish_cleanly": true,
+      "description": "Ambiguous SEARCH triggers ConflictProtocolError — model must recover"
+    },
+    "T_T01_terminal_simple": {
+      "max_steps": 2,
+      "max_tool_errors": 0,
+      "max_parse_errors": 0,
+      "must_finish_cleanly": true,
+      "description": "Run a command and verify return_code 0"
+    },
+    "T_T02_terminal_error_recovery": {
+      "max_steps": 4,
+      "max_tool_errors": 1,
+      "max_parse_errors": 0,
+      "must_finish_cleanly": true,
+      "description": "Command fails; model detects and recovers"
+    },
+    "T_T03_terminal_background_process": {
+      "max_steps": 4,
+      "max_tool_errors": 0,
+      "max_parse_errors": 0,
+      "must_finish_cleanly": true,
+      "description": "Start background server, verify it responds via curl"
+    },
+    "T_T04_cli_game": {
+      "max_steps": 10,
+      "max_tool_errors": 0,
+      "max_parse_errors": 0,
+      "must_finish_cleanly": true,
+      "description": "Play CLI guessing game via send_input — judge evaluates strategy efficiency"
+    },
+    "T_P01_protocol_no_fences": {
+      "max_steps": 2,
+      "max_tool_errors": 0,
+      "max_parse_errors": 0,
+      "must_finish_cleanly": true,
+      "description": "File creation — fence violations are a SOFT metric only, not a hard fail"
+    },
+    "T_C01_conversational": {
+      "max_steps": 1,
+      "max_tool_errors": 0,
+      "max_parse_errors": 0,
+      "must_finish_cleanly": false,
+      "description": "Pure conversational prompt — verifies agent emits zero file/tool blocks"
+    },
+    "T_E01_fuzzy_indentation_recovery": {
+      "max_steps": 3,
+      "max_tool_errors": 0,
+      "max_parse_errors": 0,
+      "must_finish_cleanly": true,
+      "description": "Add docstring to insertion_sort — tests 2-pass fuzzy SEARCH matcher"
+    }
+  }
+}

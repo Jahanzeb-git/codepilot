@@ -1,0 +1,25 @@
+id: T_C01_conversational
+description: "Conversational prompt — verifies agent responds in text only with zero file mutations"
+
+setup:
+  files: []
+
+# Deliberately ask a clear conversational question that requires NO file action.
+# The eval is NOT judging the quality of the answer (that is model quality, not runtime).
+# It IS testing: does the runtime correctly handle a generation with zero conflict blocks?
+# The workspace must remain empty after the agent responds.
+prompt: |
+  What does the CodePilot conflict-marker protocol do differently from a
+  standard git diff format? Answer briefly in plain text.
+
+assertions:
+  max_steps: 1
+  max_tool_errors: 0
+  max_parse_errors: 0
+  # must_finish_cleanly is false — conversational reply ends without task(finish=True)
+  must_finish_cleanly: false
+  verifier: "file_verifiers.ConversationalVerifier"
+
+# LLM judge ONLY checks one thing: did the model answer conversationally
+# without emitting any conflict blocks? It does NOT score answer quality.
+use_llm_judge: false

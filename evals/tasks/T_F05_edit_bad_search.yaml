@@ -1,0 +1,41 @@
+id: T_F05_edit_bad_search
+description: "SEARCH match fails due to ambiguous content — tests ConflictProtocolError + recovery"
+
+setup:
+  files:
+    - path: "greeter.py"
+      content: |
+        def greet(name):
+            # greet the user
+            return f"Hello, {name}!"
+
+        def farewell(name):
+            # greet the user goodbye
+            return f"Goodbye, {name}!"
+
+# The file has TWO comments that both say "# greet the user" — one in greet()
+# and one in farewell(). If the model does a SEARCH on just the comment line alone
+# it hits an ambiguous match, triggering ConflictProtocolError.
+# The task naturally produces a recovery scenario without harness injection.
+prompt: |
+  In greeter.py:
+  1. Change greet() to return "Hi, {name}! Welcome."
+  2. Change farewell() to return "See you later, {name}!"
+  Edit both functions and call task(finish=True).
+
+assertions:
+  max_steps: 3
+  max_tool_errors: 1
+  max_parse_errors: 1
+  must_finish_cleanly: true
+  files_must_exist:
+    - greeter.py
+  verifier: "file_verifiers.GreeterVerifier"
+
+use_llm_judge: true
+judge_focus: |
+  The file has two identical comment lines (# greet the user).
+  Did the model use enough surrounding context in its SEARCH block to uniquely
+  identify each function region? If it hit an ambiguous match error, did it
+  correctly recover by adding more unique surrounding lines?
+  Judge ONLY the recovery strategy — not the final code quality.

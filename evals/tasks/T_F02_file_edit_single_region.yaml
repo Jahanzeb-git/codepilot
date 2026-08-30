@@ -1,0 +1,28 @@
+id: T_F02_file_edit_single_region
+description: "Edit a single buggy function in an existing file"
+
+setup:
+  files:
+    - path: "math_utils.py"
+      content: |
+        def square(n):
+            return n + n  # bug: should be n * n
+
+        def cube(n):
+            return n * n * n
+
+prompt: |
+  The function square() in math_utils.py has a bug — it adds instead of
+  multiplying. Fix only the square() function body. Edit the file in a
+  single agentic step, then call task(finish=True).
+
+assertions:
+  max_steps: 2
+  max_tool_errors: 0
+  max_parse_errors: 0
+  must_finish_cleanly: true
+  files_must_exist:
+    - math_utils.py
+  verifier: "file_verifiers.MathUtilsVerifier"
+
+use_llm_judge: false

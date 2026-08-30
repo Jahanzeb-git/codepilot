@@ -1,0 +1,29 @@
+id: T_F04_multi_file_one_shot
+description: "Create two new files and edit one existing file, all in a single agentic step"
+
+setup:
+  files:
+    - path: "config.py"
+      content: |
+        DEBUG = False
+        VERSION = "0.0.1"
+
+prompt: |
+  In a SINGLE agentic step:
+  1. Create a new file called models.py with a simple Python dataclass User(name: str, age: int).
+  2. Create a new file called utils.py with a function greet(user) that returns "Hello, {user.name}!".
+  3. Edit config.py to change VERSION from "0.0.1" to "1.0.0".
+  Do all three in one shot, then call task(finish=True).
+
+assertions:
+  max_steps: 2
+  max_tool_errors: 0
+  max_parse_errors: 0
+  must_finish_cleanly: true
+  files_must_exist:
+    - models.py
+    - utils.py
+    - config.py
+  verifier: "file_verifiers.MultiFileVerifier"
+
+use_llm_judge: false

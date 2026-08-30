@@ -1,0 +1,23 @@
+id: T_F01_file_create_single
+description: "Create a single new Python file with a correct implementation"
+
+setup:
+  files: []
+
+prompt: |
+  Create a file called binary_search.py containing a correct Python
+  implementation of binary search. The function signature must be:
+    def binary_search(arr: list, target: int) -> int
+  It should return the index of target if found, or -1 if not found.
+  After creating the file, call task(finish=True).
+
+assertions:
+  max_steps: 2
+  max_tool_errors: 0
+  max_parse_errors: 0
+  must_finish_cleanly: true
+  files_must_exist:
+    - binary_search.py
+  verifier: "file_verifiers.BinarySearchVerifier"
+
+use_llm_judge: false

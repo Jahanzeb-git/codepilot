@@ -1,0 +1,26 @@
+id: T_P01_protocol_no_fences
+description: "File creation — records whether model wrapped blocks in markdown fences (soft metric)"
+
+setup:
+  files: []
+
+prompt: |
+  Create a file called notes.txt with the following exact content:
+    Line 1: Hello World
+    Line 2: This is a test
+  Call task(finish=True) after creating it.
+
+assertions:
+  max_steps: 2
+  max_tool_errors: 0
+  max_parse_errors: 0
+  must_finish_cleanly: true
+  files_must_exist:
+    - notes.txt
+  # NOTE: protocol_violations (markdown fences) are a SOFT metric only.
+  # The runtime strips fences via the 100-char holdback buffer so they never
+  # cause functional breakage. A fence violation does NOT fail this task —
+  # it is recorded in the EvalTrace for trend analysis only.
+  verifier: "file_verifiers.NotesVerifier"
+
+use_llm_judge: false
