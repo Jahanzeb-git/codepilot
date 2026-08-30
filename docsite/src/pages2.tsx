@@ -11,19 +11,19 @@ export function PageHowItWorks() {
       <Section title="Each agent step">
         <ol style={{ paddingLeft: 20, color: "var(--text-soft)", lineHeight: 2 }}>
           <li>LLM receives the system prompt (refreshed every step) + full conversation history</li>
-          <li>LLM writes a natural language reasoning paragraph (streamed to user in real time), then a <code>{"`"}codepilot{"`"}</code> block (Python code)</li>
-          <li>Runtime executes the code block in a sandboxed environment with bound tool functions</li>
+          <li>LLM writes a natural language reasoning paragraph (streamed to user in real time), then one or more <code>&lt;path&gt;</code> / SEARCH-REPLACE conflict-marker blocks</li>
+          <li>Runtime applies each file block against the current file content and executes the ephemeral <code>codepilot.py</code> block in a sandboxed environment with bound tool functions</li>
           <li>Execution result is appended to conversation history as <code>[EXECUTION RESULT]</code></li>
-          <li>Repeat until the agent calls <code>task(finish=True)</code> from a control block, hits <code>max_steps</code>, or is aborted</li>
+          <li>Repeat until the agent calls <code>task(finish=True)</code> inside <code>codepilot.py</code>, hits <code>max_steps</code>, or is aborted</li>
         </ol>
       </Section>
 
-      <Section title="The two block types">
+      <Section title="The block format">
         <Table
           headers={["Block", "Syntax", "Purpose"]}
           rows={[
-            [<strong>Control Block</strong>, <code>{"`"}``codepilot{"`"}``</code>, "The only block the runtime executes. Regular python blocks are display-only markdown."],
-            [<strong>Payload Blocks</strong>, <code>{"`"}``python filename=…{"`"}``</code>, "File content consumed by write_file() or edit_file() in order. Never executed."],
+            [<strong>File Block</strong>, <code>{"<path>"}</code> + <code>{"<<<<<<< SEARCH ... >>>>>>> REPLACE"}</code>, "Mutates or creates the named workspace file. Empty SEARCH means full overwrite/create."],
+            [<strong>codepilot.py Block</strong>, "Same conflict-marker syntax, path is always codepilot.py", "The ephemeral, executable action script. Always uses an empty SEARCH section — one per step."],
           ]}
         />
       </Section>
@@ -31,28 +31,28 @@ export function PageHowItWorks() {
       <Section title="Action step (more work needed)">
         <Code lang="text">{`Alright, let me read the file first to get the line numbers.
 
-\`\`\`codepilot
-# Reading before editing - exact line numbers required.
-read_file("routes/profile.py", start_line=35, end_line=65)
-\`\`\``}</Code>
+codepilot.py
+<<<<<<< SEARCH
+=======
+view_file("routes/profile.py", start_line=35, end_line=65)
+>>>>>>> REPLACE`}</Code>
       </Section>
 
       <Section title="Single-step task (action + finish)">
         <Code lang="text">{`Got it, updating the timeout value.
 
-\`\`\`codepilot
-# Simple single-line edit, no read needed.
-file_editor("config.py", mode="edit")
-task(finish=True)
-\`\`\`
-
-\`\`\`python filename=config.py
+config.py
 <<<<<<< SEARCH
 TIMEOUT = 30
 =======
 TIMEOUT = 60
 >>>>>>> REPLACE
-\`\`\`
+
+codepilot.py
+<<<<<<< SEARCH
+=======
+task(finish=True)
+>>>>>>> REPLACE
 
 Done. Updated TIMEOUT to 60s in config.py.`}</Code>
       </Section>
@@ -232,22 +232,24 @@ export function PageCodeAsInterface() {
         </p>
       </Section>
 
-      <Section title="The Solution: Payload Markdown Blocks">
+      <Section title="The Solution: SEARCH/REPLACE Conflict-Marker Blocks">
         <p>
-          CodePilot solves this by decoupling the tool execution parameters from the file payloads.
-          Instead of passing file contents as escaped arguments inside the tool call, the agent issues a clean Python command:
+          CodePilot solves this by decoupling file mutation from tool execution entirely. Instead of passing file
+          contents as an escaped argument inside a tool call, the agent emits a raw conflict-marker block headed by
+          the file's path — no JSON string wrapper, no argument at all:
         </p>
-        <Code lang="python">{`# The model issues this clean tool call - no nested content argument:
-file_editor("app.py", mode="create")`}</Code>
-        <p>
-          Then, it writes the raw, unescaped content inside a separate, natural **Payload Markdown Block** directly following the code block:
-        </p>
-        <Code lang="text">{`\`\`\`python filename=app.py
+        <Code lang="text">{`app.py
+<<<<<<< SEARCH
+=======
 def main():
     print("Hello World!")
-    # Raw text is written exactly as-is. 
+    # Raw text is written exactly as-is.
     # Bypasses quote and newline escaping entirely!
-\`\`\``}</Code>
+>>>>>>> REPLACE`}</Code>
+        <p>
+          An empty SEARCH section means create-or-fully-overwrite. A non-empty SEARCH section must uniquely match
+          the file's current content; the runtime replaces only that matched region with REPLACE.
+        </p>
         <Callout>
           <strong>Advantages:</strong>
           <ul style={{ paddingLeft: 20, marginTop: 8, lineHeight: 1.8 }}>

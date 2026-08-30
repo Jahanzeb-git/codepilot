@@ -25,7 +25,7 @@ CodePilot is a Python library for embedding autonomous software-engineering agen
 
 It is intentionally **not** a hosted chatbot UI. The package gives applications a runtime: model inference, tool execution, file editing, terminal control, persistence, hooks, and completion semantics. You bring the product surface, auth model, sandbox, database, and deployment strategy.
 
-**Version:** `0.9.31`
+**Version:** `0.9.35`
 
 Full user documentation lives at: **https://Jahanzeb-git.github.io/codepilot/**
 
@@ -140,19 +140,17 @@ flowchart LR
 
 ## Why Code-as-Interface
 
-Most agent frameworks force the model to express actions as JSON function calls. CodePilot uses a diff-native Code-as-Interface protocol: each workspace mutation is a self-contained unified diff, and tool calls live in a fresh ephemeral `codepilot.py` diff:
+Most agent frameworks force the model to express actions as JSON function calls. CodePilot uses a search/replace-native Code-as-Interface protocol: each workspace mutation is a self-contained conflict-marker block, and tool calls live in a fresh ephemeral `codepilot.py` block:
 
 ````markdown
 I will inspect the failing test first.
 
-```diff
-diff --git a/codepilot.py b/codepilot.py
---- /dev/null
-+++ b/codepilot.py
-@@ -0,0 +1,2 @@
-+view_file("tests/test_api.py")
-+execute("main", "pytest tests/test_api.py -q", timeout=30)
-```
+codepilot.py
+<<<<<<< SEARCH
+=======
+view_file("tests/test_api.py")
+execute("main", "pytest tests/test_api.py -q", timeout=30)
+>>>>>>> REPLACE
 ````
 
 The runtime executes only the generated ephemeral `codepilot.py` script. Ordinary Python markdown remains display text and is never executed.
@@ -161,37 +159,37 @@ This design is useful because software work is naturally procedural:
 
 - Agents often need several tool calls in a deliberate order.
 - Tool results need to feed control flow inside the same step.
-- File writes use reviewable, self-describing diffs instead of fragile escaped strings or positional payloads.
+- File writes use reviewable, content-addressed SEARCH/REPLACE blocks instead of fragile escaped strings or positional payloads.
 - Developers need observable execution results, not opaque function-call envelopes.
 
 The model still operates under a strict protocol:
 
-- `diff --git a/path b/path`: a complete file mutation.
-- `diff --git a/codepilot.py b/codepilot.py`: fresh executable tool script.
+- `<path>` on its own line immediately before `<<<<<<< SEARCH`: a complete file mutation.
+- `codepilot.py` with an empty SEARCH section: fresh executable tool script.
 - `task(finish=True)` in the script: explicit task-finished signal.
 
 This aligns with research showing that LLM agents benefit from interleaving reasoning and environment actions, as in ReAct, and from well-designed agent-computer interfaces for software engineering tasks.
 
 ## How File Editing Works
 
-Each hunk is applied by reconstructing its old and new blocks. The runtime ignores `@@` line counts, uniquely finds the old block in the current file while ignoring indentation, then replaces it with the new block. Context lines retain the file's actual indentation. A zero-match or multi-match hunk is rejected without guessing.
+Each block is applied by uniquely finding the SEARCH content in the current file, then replacing it with the REPLACE content. A zero-match or multi-match SEARCH section is rejected without guessing.
 
-```diff
-diff --git a/config.py b/config.py
---- a/config.py
-+++ b/config.py
-@@ -999,1 +999,1 @@
--TIMEOUT = 30
-+TIMEOUT = 60
+```
+config.py
+<<<<<<< SEARCH
+TIMEOUT = 30
+=======
+TIMEOUT = 60
+>>>>>>> REPLACE
 ```
 
-For creation or a complete rewrite, emit a pure-addition hunk. If an OS-level failure occurs after a large diff is parsed, CodePilot reports `diff_cache_id`; repair the condition in `codepilot.py` and call `retry_diff(id)` to replay the exact cached operation.
+For creation or a complete rewrite, leave the SEARCH section empty. If an OS-level failure occurs after a large block is parsed, CodePilot reports `block_cache_id`; repair the condition in `codepilot.py` and call `retry_block(id)` to replay the exact cached operation.
 
 Safety properties:
 
 - Paths are constrained to `runtime.work_dir` unless `unsafe_mode: true`.
-- Edits use unique content matching before mutation; hunk counts are never trusted.
-- Multiple hunks are applied against evolving in-memory content, then committed atomically per file diff.
+- Edits use unique content matching before mutation; SEARCH sections are never trusted to be positionally correct, only content-correct.
+- Multiple blocks are applied against evolving in-memory content, then committed atomically per file.
 - Tool results are appended back into the conversation as ground truth.
 
 ## How Terminal Tools Work

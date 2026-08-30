@@ -10,7 +10,7 @@ export function PageIntroduction({ nav }: { nav: (p: PageId) => void }) {
         <div className="hero-flex">
           {/* ── Left: text content ── */}
           <div className="hero-content">
-            <div className="hero-eyebrow">CodePilot v0.9.21</div>
+            <div className="hero-eyebrow">CodePilot v0.9.35</div>
             <h1 className="hero-title">Embeddable Autonomous<br />Agent Framework</h1>
             <p className="hero-desc">
               CodePilot is an <strong>Embeddable Autonomous Agent (EAA)</strong> framework for software engineering tasks.
@@ -61,7 +61,7 @@ export function PageIntroduction({ nav }: { nav: (p: PageId) => void }) {
           {
             icon: <BookOpen size={18} />,
             title: "Code-as-Interface Runtime",
-            desc: "The model writes executable Python in a codepilot block. No brittle JSON schemas or generic function-calling wrappers.",
+            desc: "The model expresses every action as a SEARCH/REPLACE conflict-marker block. No brittle JSON schemas or generic function-calling wrappers.",
           },
           {
             icon: <Zap size={18} />,
@@ -85,12 +85,13 @@ export function PageIntroduction({ nav }: { nav: (p: PageId) => void }) {
       <Section title="What is CodePilot?">
         <p>
           CodePilot uses a <strong>code-as-interface</strong> runtime: the model streams natural language to the user,
-          writes executable Python in a <code>codepilot</code> control block, side-loads file payloads when needed, and
-          completes work by calling <code>task(finish=True)</code> from the control block.
+          then emits one or more SEARCH/REPLACE conflict-marker blocks — each headed by a <code>&lt;path&gt;</code> line —
+          to mutate workspace files or run code via the ephemeral <code>codepilot.py</code> block, and
+          completes work by calling <code>task(finish=True)</code> inside that script.
         </p>
         <p>
           Instead of forcing the model through brittle JSON schemas or generic function-calling wrappers, the model
-          writes real Python that the runtime executes directly in a sandboxed environment.
+          emits raw conflict-marker text that the runtime applies directly against the current file content.
         </p>
         <Callout>
           <strong>Cross-Platform:</strong> CodePilot runs on Linux, macOS, and Windows 10 1809+ (ConPTY required).
