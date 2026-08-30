@@ -1186,7 +1186,7 @@ class AsyncRuntime:
     # Used to detect the path line while still in 'streaming' state.
     _PATH_LINE_RE = re.compile(r"[^\s<>=]")
     # Hold-back: buffer enough chars to detect a partial opening marker.
-    _HOLDBACK = 12  # enough to catch '<<<<<<<' mid-arrival
+    _HOLDBACK = 100  # 100 chars to safely hide path line + optional ```language fence
     # Sentinel for the codepilot.py early-abort logic.
     # Detected as 'codepilot.py\n<<<' or 'codepilot.py\r\n<<<' in the buffer.
     _CODEPILOT_BLOCK_SENTINEL = "codepilot.py"
@@ -1461,10 +1461,18 @@ class AsyncRuntime:
         # Walk backwards over any trailing newline then the path line itself
         pre_stripped = pre.rstrip("\n\r")
         last_nl = pre_stripped.rfind("\n")
-        if last_nl == -1:
-            # The path line starts at char 0
-            return 0
-        return last_nl + 1
+        path_start = last_nl + 1 if last_nl != -1 else 0
+        
+        # Check if the line before the path line is a markdown fence
+        if path_start > 0:
+            pre_path = pre[:path_start].rstrip("\n\r")
+            if pre_path:
+                prev_nl = pre_path.rfind("\n")
+                prev_start = prev_nl + 1 if prev_nl != -1 else 0
+                if pre_path[prev_start:].strip().startswith("```"):
+                    return prev_start
+                    
+        return path_start
 
     def _emit_pre_block_text(self, response_text: str) -> None:
         """Emit text that precedes any conflict-marker block as STREAM events.
