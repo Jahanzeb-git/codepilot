@@ -212,6 +212,12 @@ async def run_task(task_spec: dict, dry_run: bool = False) -> dict:
         tracer = EvalTracer(task_id=task_id, model=model_name)
         tracer.attach(runtime.hooks)
 
+        # Attach raw transcript logger for debugging
+        from transcript import TranscriptLogger
+        report_dir = _EVALS_DIR / "report"
+        t_logger = TranscriptLogger(task_id=task_id, report_dir=report_dir)
+        t_logger.attach(runtime.hooks)
+
         # Run the agent
         try:
             await runtime.run(prompt)

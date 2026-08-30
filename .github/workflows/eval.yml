@@ -50,5 +50,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: eval-report-${{ github.run_number }}
-          path: evals/report/latest_run.json
+          path: evals/report/
           retention-days: 30

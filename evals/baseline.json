@@ -1,6 +1,6 @@
 {
   "_note": "Golden baseline. Change DELIBERATELY — never auto-updated by CI. Bump when intentionally improving thresholds.",
-  "_pinned_model": "qwen3-235b-a22b",
+  "_pinned_model": "qwen3.8-flash",
   "_pinned_provider": "alibaba",
   "_version": 2,
   "tasks": {
