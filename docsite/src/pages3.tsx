@@ -212,20 +212,6 @@ read_file("app/models.py", start_line=1, end_line=50)`}</Code>
         />
       </Section>
 
-      <Section title="write_file">
-        <p>Creates a new file or edits a specified line range of an existing file. Designed to work in tandem with Payload Markdown Blocks to bypass string escaping issues.</p>
-        <Code lang="python">{`# LLM control block:
-write_file("config.py", start_line=12, end_line=15, mode="edit")`}</Code>
-        <Table
-          headers={["Parameter", "Type", "Description"]}
-          rows={[
-            [<code>path</code>, "str", "Relative path to file."],
-            [<code>start_line</code>, "int", "1-based line to start editing (defaults to 1 for write mode)."],
-            [<code>end_line</code>, "int", "Ending line to edit (defaults to EOF for write mode)."],
-            [<code>mode</code>, "str", <>Either <code>"write"</code> (overwrite entire file) or <code>"edit"</code> (replace specific range).</>],
-          ]}
-        />
-      </Section>
     </>
   );
 }

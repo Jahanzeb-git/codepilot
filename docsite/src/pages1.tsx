@@ -10,7 +10,7 @@ export function PageIntroduction({ nav }: { nav: (p: PageId) => void }) {
         <div className="hero-flex">
           {/* ── Left: text content ── */}
           <div className="hero-content">
-            <div className="hero-eyebrow">CodePilot v0.9.35</div>
+            <div className="hero-eyebrow">CodePilot v0.9.36</div>
             <h1 className="hero-title">Embeddable Autonomous<br />Agent Framework</h1>
             <p className="hero-desc">
               CodePilot is an <strong>Embeddable Autonomous Agent (EAA)</strong> framework for software engineering tasks.

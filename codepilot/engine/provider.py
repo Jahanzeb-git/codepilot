@@ -479,8 +479,7 @@ class AnthropicProvider(LLMProvider):
 class AlibabaProvider(LLMProvider):
     """
     Alibaba Cloud DashScope (Qwen) — uses OpenAI client.
-    System prompt is cached automatically (no explicit blocks needed).
-    Conversational messages use explicit cache_control on the last assistant message.
+    Context caching is handled server-side by DashScope without explicit cache blocks.
     """
 
     def __init__(self, api_key: str, model: str, thinking_enabled: bool = False):
@@ -497,7 +496,7 @@ class AlibabaProvider(LLMProvider):
 
     @classmethod
     def _add_rolling_breakpoint(cls, messages: List[Dict]) -> List[Dict]:
-        return _insert_cache_breakpoints(messages, ttl=None)
+        return messages
 
     def _build_kwargs(self, messages, system, temperature, max_tokens) -> dict:
         msgs = []
