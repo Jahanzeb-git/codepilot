@@ -846,6 +846,34 @@ class TerminalManager:
             label=f"Running `{command}`",
         )
 
+        # ---- cat Interception ----
+        cmd_stripped = command.strip()
+        if cmd_stripped.startswith("cat "):
+            parts = cmd_stripped.split()
+            # Intercept simple single-file cats without pipes or flags
+            if len(parts) == 2 and not parts[1].startswith("-"):
+                target_file = parts[1]
+                
+                # Resolve relative to the terminal's cwd
+                session = self._sessions.get(session_id)
+                if session and getattr(session, 'cwd', None):
+                    if not os.path.isabs(target_file):
+                        target_file = os.path.normpath(os.path.join(session.cwd, target_file))
+                
+                view_file_func = self.runtime.registry._tools.get("view_file")
+                if view_file_func:
+                    warning = (
+                        f"[terminal:{session_id}] Warning: 'cat' is not recommended for reading code because PTY line-wrapping "
+                        f"corrupts syntax. Automatically redirecting to 'view_file({target_file})'...\n"
+                    )
+                    self.runtime._append_execution(warning)
+                    self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="execute", result=warning)
+                    try:
+                        view_file_func(target_file)
+                        return warning + f"view_file('{target_file}') executed."
+                    except Exception:
+                        pass # Fallback to normal execution if view_file fails
+
         # ---- Permission gate ----
         tool_cfg = self.runtime._tool_config("execute")
         if tool_cfg.get("require_permission", False):

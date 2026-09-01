@@ -232,7 +232,7 @@ function Footer() {
           </a>{" "}
           and the community.
         </span>
-        <span>CodePilot v0.9.36 · MIT License</span>
+        <span>CodePilot v0.9.37 · MIT License</span>
       </div>
     </>
   );

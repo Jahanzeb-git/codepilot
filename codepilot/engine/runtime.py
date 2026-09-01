@@ -718,14 +718,7 @@ class AsyncRuntime:
                 self.hooks.emit(EventType.TOOL_RESULT, tool="block", result=result)
 
             except ConflictProtocolError as exc:
-                err_msg = format_apply_error(operation, exc)
-                cache_id = self._cache_block(operation)
-                result = (
-                    f"{err_msg}\n"
-                    f"Block cached as block_cache_id={cache_id}. "
-                    f"Fix the SEARCH content and call retry_block({cache_id}), "
-                    "or re-emit the block with corrected SEARCH text."
-                )
+                result = format_apply_error(operation, exc)
                 self._append_execution(result)
                 self.hooks.emit(EventType.TOOL_RESULT, tool="block", result=result)
 
