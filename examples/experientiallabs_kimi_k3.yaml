@@ -1,0 +1,50 @@
+# Example: Kimi K3 (with thinking/reasoning) via Experiential Labs
+# Base URL: https://api.experientiallabs.ai/v1  (OpenAI-compatible)
+#
+# Kimi K3 supports reasoning_effort — set thinking.enabled: true to activate it.
+# Chain-of-thought output is streamed as <thinking>...</thinking> blocks,
+# exactly like DeepSeek and Anthropic extended thinking modes.
+#
+# Setup:
+#   export EXPERIENTIAL_API_KEY=xpl_your_key_here
+#   codepilot run examples/experientiallabs_kimi_k3.yaml
+
+name: "ExperientialKimiK3"
+role: "Senior Software Engineer"
+
+model:
+  provider: "experientiallabs"
+  name: "kimi-k3"
+  api_key_env: "EXPERIENTIAL_API_KEY"
+  temperature: 0.0
+  # max_tokens resolved automatically from model_profiles (16_384 recommended).
+  thinking:
+    enabled: true
+    reasoning_effort: "high"   # "low" | "medium" | "high"
+
+# context window resolved automatically from model_profiles (128K tokens).
+# memory:
+#   max_context_tokens: 128000
+
+runtime:
+  work_dir: "."
+  max_steps: 20
+  unsafe_mode: false
+
+tools:
+  - name: execute
+    enabled: true
+  - name: view_file
+    enabled: true
+  - name: list_dir
+    enabled: true
+  - name: find_file
+    enabled: true
+  - name: task
+    enabled: true
+  - name: semantic_search
+    enabled: false
+  - name: mcp
+    enabled: false
+  - name: sub_agents
+    enabled: false

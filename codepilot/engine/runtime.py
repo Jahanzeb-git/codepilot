@@ -39,6 +39,7 @@ from ..core.conflict_protocol import (
     apply_block, parse_blocks,
     format_parse_error, format_apply_error,
 )
+from ..core.intent_gate import detect_action_intent, format_intent_gate_feedback
 from ..core.context import ContextManager
 from ..core.memory import (
     MemoryManager, MemoryConfig,
@@ -69,6 +70,12 @@ TAG_EXECUTION_RESULT = "[EXECUTION RESULT]"
 TAG_ENV_CHANGE       = "[ENVIRONMENT CHANGE]"
 CONTROL_BLOCK_FILENAME = "~/.codepilot/runtime/codepilot.py"
 RUNTIME_SCRIPT_NAME = "codepilot.py"
+
+# Max consecutive times the action-intent gate may re-prompt the model within a
+# single run() before we give up and treat the reply as conversational. Bounds
+# the pathological case where a model repeatedly emits a foreign action format;
+# without this cap the gate could burn the entire step budget in a tight loop.
+MAX_INTENT_GATE_RETRIES = 2
 
 # Background timer delay for upgrading Anthropic cache TTL to 1h.
 # Set to 4.5 minutes — just before the default 5min TTL expires.
@@ -146,6 +153,10 @@ class AsyncRuntime:
         # model to reproduce content.
         self._block_cache: dict[int, BlockOperation] = {}
         self._block_cache_counter: int = 0
+        # Consecutive action-intent-gate triggers in the current run() (reset
+        # whenever a step produces real operations/parse errors). Capped by
+        # MAX_INTENT_GATE_RETRIES to prevent a foreign-format loop.
+        self._intent_gate_retries: int = 0
         self._runtime_script_path = Path.home() / ".codepilot" / "runtime" / RUNTIME_SCRIPT_NAME
         self._reset_runtime_script()
 
@@ -404,8 +415,31 @@ class AsyncRuntime:
             self._schedule_cache_timer()
 
             if not operations and not parse_errors:
-                # No blocks at all — conversational reply. Already streamed to user.
+                # Zero parseable blocks. This is EITHER a genuine conversational
+                # reply OR a silently-dropped action — the model tried to act but
+                # used a format our conflict-marker parser cannot see (e.g. it
+                # reverted to its native SFT tool-calling syntax, or wrapped the
+                # action in a code fence). The action-intent gate disambiguates:
+                # on a strong action signal we feed a correction back and let the
+                # model re-emit in-protocol, instead of ending the turn on a no-op.
+                tool_names = (
+                    set(self.registry.as_sandbox_dict().keys())
+                    if getattr(self, "registry", None) else set()
+                )
+                intent = detect_action_intent(response_text, tool_names)
+                if intent and self._intent_gate_retries < MAX_INTENT_GATE_RETRIES:
+                    self._intent_gate_retries += 1
+                    feedback = format_intent_gate_feedback(intent)
+                    self.hooks.emit(EventType.RUNTIME_ERROR, error=f"INTENT GATE: {intent}")
+                    self._append_execution_result(feedback)
+                    continue
+                # No action intent (or retries exhausted) — genuine conversational
+                # reply. Already streamed to user.
+                self._intent_gate_retries = 0
                 break
+
+            # A real action step ran — reset the consecutive-gate counter.
+            self._intent_gate_retries = 0
 
             # 5. Apply all workspace blocks, then execute the ephemeral script.
             self._execution_buffer = []

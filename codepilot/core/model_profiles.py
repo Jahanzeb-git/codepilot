@@ -35,6 +35,16 @@ _PROFILES: dict[tuple[str, str], ModelProfile] = {
     ("deepseek", "deepseek-reasoner"): ModelProfile(65_536, 8_192),
     ("deepseek", "deepseek-v4-flash"): ModelProfile(1_000_000, 393_216),
     ("deepseek", "deepseek-v4-pro"): ModelProfile(1_000_000, 393_216),
+    # Experiential Labs gateway (https://api.experientiallabs.ai/v1),
+    # verified September 2026. Limits match the originating upstream model.
+    # Claude variants
+    ("experientiallabs", "claude-fable-5"): ModelProfile(1_000_000, 128_000),
+    ("experientiallabs", "claude-fable-5.1"): ModelProfile(1_000_000, 128_000),
+    ("experientiallabs", "claude-opus-5"): ModelProfile(1_000_000, 128_000),
+    ("experientiallabs", "claude-sonnet-5"): ModelProfile(1_000_000, 128_000),
+    ("experientiallabs", "claude-haiku-4-5"): ModelProfile(200_000, 64_000),
+    # Kimi K3 (Moonshot) — supports reasoning_effort
+    ("experientiallabs", "kimi-k3"): ModelProfile(128_000, 32_768, recommended_max_tokens=16_384),
 }
 
 

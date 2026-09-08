@@ -8,9 +8,12 @@ LLM provider abstraction layer for the CodePilot agentic runtime.
 
 Architectural Notes:
 Implements a unified async interface (LLMProvider) for OpenAI, Anthropic,
-AlibabaCloud/Qwen, and DeepSeek providers. Handles explicit prompt caching
-(cache_control breakpoints) for Anthropic and Alibaba, and extended thinking
-for Claude and DeepSeek.
+AlibabaCloud/Qwen, DeepSeek, and Experiential Labs providers. Handles
+explicit prompt caching (cache_control breakpoints) for Anthropic and
+Alibaba, and extended thinking for Claude and DeepSeek.
+Experiential Labs (https://api.experientiallabs.ai/v1) is an OpenAI-
+compatible gateway exposing 700+ models including Claude, Kimi K3, and
+others through a single API key.
 Rolling cache breakpoints are injected on the last assistant message to
 maximise token reuse across agentic steps without redundant re-processing.
 DeepSeek uses fully automatic server-side caching — no breakpoints needed.
@@ -740,6 +743,148 @@ class DeepSeekProvider(LLMProvider):
             yield "\n</thinking>\n"
 
 
+class ExperientialLabsProvider(LLMProvider):
+    """
+    Experiential Labs AI Gateway — OpenAI-compatible, base URL:
+    ``https://api.experientiallabs.ai/v1``.
+
+    The gateway exposes 700+ models (Claude, Kimi K3, Qwen, DeepSeek, …)
+    through the standard OpenAI ``/v1/chat/completions`` wire protocol, so
+    this provider is intentionally thin — just an AsyncOpenAI client with a
+    custom base_url.
+
+    Authentication:
+        API keys start with ``xpl_``.  Store yours in the env var referenced
+        by ``api_key_env`` (default: ``EXPERIENTIAL_API_KEY``).
+
+    Thinking / reasoning:
+        For models that support it (e.g. ``kimi-k3``) set
+        ``thinking.enabled: true`` in the agent YAML.  The provider will
+        include ``reasoning_effort`` in the request.  Streamed
+        ``reasoning_content`` deltas are wrapped in ``<thinking>…</thinking>``
+        tags so the runtime's state machine and conversation history work
+        identically to the other providers.
+
+    Context caching:
+        Handled server-side by the gateway — no explicit cache_control
+        annotations are required.
+    """
+
+    _BASE_URL = "https://api.experientiallabs.ai/v1"
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        thinking_enabled: bool = False,
+        reasoning_effort: str = "high",
+    ):
+        try:
+            from openai import AsyncOpenAI
+        except ImportError:
+            raise ImportError("Install the openai package: pip install openai")
+        self.client           = AsyncOpenAI(api_key=api_key, base_url=self._BASE_URL)
+        self.model            = model
+        self.thinking_enabled = thinking_enabled
+        self.reasoning_effort = reasoning_effort
+
+    # ------------------------------------------------------------------ #
+    #  Internal helpers                                                    #
+    # ------------------------------------------------------------------ #
+
+    def _build_kwargs(self, messages, system, temperature, max_tokens) -> dict:
+        """Build the common kwargs dict for a chat completions call."""
+        msgs = []
+        sys_text = self._system_str(system)
+        if sys_text:
+            msgs.append({"role": "system", "content": sys_text})
+        msgs.extend(messages)
+
+        kwargs: dict = dict(
+            model=self.model,
+            messages=msgs,
+            max_tokens=max_tokens,
+        )
+
+        if self.thinking_enabled:
+            # reasoning_effort is the standard OpenAI-compatible parameter
+            # used by models that support chain-of-thought (e.g. kimi-k3).
+            # Temperature is not meaningful during reasoning — omit it.
+            kwargs["reasoning_effort"] = self.reasoning_effort
+        else:
+            kwargs["temperature"] = temperature
+
+        return kwargs
+
+    # ------------------------------------------------------------------ #
+    #  chat (non-streaming)                                                #
+    # ------------------------------------------------------------------ #
+
+    async def chat(
+        self,
+        messages: List[Dict[str, str]],
+        system: Union[str, SystemPromptParts, None] = None,
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+        **kwargs,
+    ) -> str:
+        kwargs_api = self._build_kwargs(messages, system, temperature, max_tokens)
+        response = await self.client.chat.completions.create(**kwargs_api)
+
+        msg = response.choices[0].message
+        content           = msg.content or ""
+        reasoning_content = getattr(msg, "reasoning_content", None) or ""
+
+        if self.thinking_enabled and reasoning_content:
+            return f"<thinking>\n{reasoning_content}\n</thinking>\n{content}"
+        return content
+
+    # ------------------------------------------------------------------ #
+    #  chat_stream (streaming)                                             #
+    # ------------------------------------------------------------------ #
+
+    async def chat_stream(
+        self,
+        messages: List[Dict[str, str]],
+        system: Union[str, SystemPromptParts, None] = None,
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+        **kwargs,
+    ) -> AsyncIterator[str]:
+        kwargs_api = self._build_kwargs(messages, system, temperature, max_tokens)
+        kwargs_api["stream"] = True
+
+        stream = await self.client.chat.completions.create(**kwargs_api)
+
+        in_thinking = False
+
+        async for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+
+            # --- reasoning / thinking content (e.g. kimi-k3) ---
+            reasoning_chunk = getattr(delta, "reasoning_content", None)
+            if reasoning_chunk:
+                if not in_thinking:
+                    yield "<thinking>\n"
+                    in_thinking = True
+                yield reasoning_chunk
+                continue
+
+            # --- regular content ---
+            if in_thinking:
+                yield "\n</thinking>\n"
+                in_thinking = False
+
+            if delta.content:
+                yield delta.content
+
+        # Guard: close tag if stream ended while still in thinking.
+        if in_thinking:
+            yield "\n</thinking>\n"
+
+
 def get_provider(config) -> LLMProvider:
     provider_name = config.provider.lower()
     api_key = os.getenv(config.api_key_env)
@@ -774,8 +919,14 @@ def get_provider(config) -> LLMProvider:
             thinking_enabled=config.thinking.enabled,
             reasoning_effort=config.thinking.reasoning_effort,
         )
+    elif provider_name == "experientiallabs":
+        return ExperientialLabsProvider(
+            api_key, config.name,
+            thinking_enabled=config.thinking.enabled,
+            reasoning_effort=config.thinking.reasoning_effort,
+        )
     else:
         raise ValueError(
             f"Unsupported provider: '{provider_name}'. "
-            "Choose from: 'anthropic', 'openai', 'alibaba', 'deepseek'."
+            "Choose from: 'anthropic', 'openai', 'alibaba', 'deepseek', 'experientiallabs'."
         )

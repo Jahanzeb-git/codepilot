@@ -42,7 +42,7 @@ class ThinkingConfig(BaseModel):
 
 
 class ModelConfig(BaseModel):
-    provider: str = Field(..., description="LLM provider: 'anthropic', 'openai', 'gemini', 'alibaba', or 'deepseek'")
+    provider: str = Field(..., description="LLM provider: 'anthropic', 'openai', 'gemini', 'alibaba', 'deepseek', or 'experientiallabs'")
     name: str = Field(..., description="Model identifier, e.g. 'claude-3-5-sonnet-20241022'")
     api_key_env: str = Field(default="OPENAI_API_KEY", description="Name of the env var holding the API key")
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)

@@ -1,0 +1,46 @@
+# Example: Claude Sonnet 5 via Experiential Labs
+# Base URL: https://api.experientiallabs.ai/v1  (OpenAI-compatible)
+#
+# Setup:
+#   export EXPERIENTIAL_API_KEY=xpl_your_key_here
+#   codepilot run examples/experientiallabs_claude.yaml
+
+name: "ExperientialClaude"
+role: "Senior Software Engineer"
+
+model:
+  provider: "experientiallabs"
+  name: "claude-sonnet-5"
+  api_key_env: "EXPERIENTIAL_API_KEY"
+  temperature: 0.0
+  # max_tokens is resolved automatically from model_profiles (128_000 output max).
+  # Override here only if you need a smaller limit:
+  # max_tokens: 8192
+
+# context window is resolved automatically from model_profiles (1M tokens).
+# Override only if you want a smaller history budget:
+# memory:
+#   max_context_tokens: 200000
+
+runtime:
+  work_dir: "."
+  max_steps: 20
+  unsafe_mode: false
+
+tools:
+  - name: execute
+    enabled: true
+  - name: view_file
+    enabled: true
+  - name: list_dir
+    enabled: true
+  - name: find_file
+    enabled: true
+  - name: task
+    enabled: true
+  - name: semantic_search
+    enabled: false
+  - name: mcp
+    enabled: false
+  - name: sub_agents
+    enabled: false
