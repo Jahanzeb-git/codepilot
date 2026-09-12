@@ -9,7 +9,7 @@ Every workspace is its own Firecracker microVM. Not a shared container, not a na
 No account, no signup. You need Docker — that's it.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Jahanzeb-git/codepilot-cloud/main/distribution/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jahanzeb-git/codepilot/main/cloud/distribution/install.sh | bash
 ```
 
 That installs the `codepilot-workspace` command. Then from any project directory:

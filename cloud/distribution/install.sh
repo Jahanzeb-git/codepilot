@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Installs the `codepilot-workspace` command to /usr/local/bin.
-# Usage:  curl -fsSL https://raw.githubusercontent.com/Jahanzeb-git/codepilot-cloud/main/distribution/install.sh | bash
+# Usage:  curl -fsSL https://raw.githubusercontent.com/Jahanzeb-git/codepilot/main/cloud/distribution/install.sh | bash
 set -euo pipefail
 
-RAW_URL="https://raw.githubusercontent.com/Jahanzeb-git/codepilot-cloud/main/distribution/codepilot-workspace"
+RAW_URL="https://raw.githubusercontent.com/Jahanzeb-git/codepilot/main/cloud/distribution/codepilot-workspace"
 DEST="/usr/local/bin/codepilot-workspace"
 
 echo "Installing codepilot-workspace to $DEST ..."
