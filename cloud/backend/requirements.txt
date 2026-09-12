@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+pydantic[email]
+sqlalchemy
+asyncpg
+authlib
+argon2-cffi
+httpx
+python-dotenv
+python-multipart
+websockets

@@ -1,0 +1,78 @@
+/*
+  Two themes only — "dark" and "light" — deliberately matching Monaco's
+  built-in `vs-dark` and `vs` themes so <html data-theme="..."> and
+  monaco.editor.setTheme(...) always agree. No custom editor themes,
+  no per-component color drift.
+*/
+
+:root,
+[data-theme="dark"] {
+  --bg-0: #1e1e1e;      /* editor background (vs-dark) */
+  --bg-1: #252526;      /* panels: explorer, agent, settings */
+  --bg-2: #2d2d2d;      /* raised surfaces: cards, inputs */
+  --bg-3: #333333;      /* hover */
+  --bg-4: #3a3d41;      /* active / selected */
+  --border: #2b2b2b;
+  --border-strong: #454545;
+  --fg-0: #cccccc;      /* primary text */
+  --fg-1: #969696;      /* secondary text */
+  --fg-2: #6a6a6a;      /* muted / disabled */
+  --accent: #0078d4;
+  --accent-fg: #ffffff;
+  --accent-hover: #1a86d9;
+  --ok: #89d185;
+  --warn: #cca700;
+  --err: #f14c4c;
+  --code-bg: #1e1e1e;
+  --scrollbar: #4b4b4b55;
+  --shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+  --sidebar-w: 48px;
+  --monaco-theme: "vs-dark";
+}
+
+[data-theme="light"] {
+  --bg-0: #ffffff;
+  --bg-1: #f3f3f3;
+  --bg-2: #ececec;
+  --bg-3: #e4e4e4;
+  --bg-4: #d6ebff;
+  --border: #e0e0e0;
+  --border-strong: #c8c8c8;
+  --fg-0: #1e1e1e;
+  --fg-1: #5f5f5f;
+  --fg-2: #8a8a8a;
+  --accent: #0066b8;
+  --accent-fg: #ffffff;
+  --accent-hover: #0078d4;
+  --ok: #2e7d32;
+  --warn: #9a6700;
+  --err: #cd3131;
+  --code-bg: #f3f3f3;
+  --scrollbar: #64646455;
+  --shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  --sidebar-w: 48px;
+  --monaco-theme: "vs";
+}
+
+* { box-sizing: border-box; }
+
+html, body, #app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg-0);
+  color: var(--fg-0);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", Ubuntu, sans-serif;
+  font-size: 13px;
+  overflow: hidden;
+}
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+code, pre, .mono {
+  font-family: "SF Mono", Menlo, Consolas, "Cascadia Code", monospace;
+}

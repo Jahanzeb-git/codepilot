@@ -1,0 +1,21 @@
+app = "codepilot-api"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  # Back to 0: workspace machines now self-suspend via their own idle
+  # watchdog (runner/server/src/idle_watchdog.rs), which calls
+  # /machines/suspend directly using their own machine secret. That single
+  # outbound request is enough to auto-start this app on demand (Fly
+  # handles that), so codepilot-api no longer needs to stay resident 24/7
+  # just to notice an abandoned workspace. During an actual active
+  # session, Fly already keeps this app alive on its own via the ongoing
+  # WS traffic, which is what keeps quota_enforcer_task's background loop
+  # running for real-time quota enforcement.
+  min_machines_running = 0

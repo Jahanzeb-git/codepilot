@@ -1,0 +1,89 @@
+# agent.yaml
+agent:
+  name: "Codepilot"
+  role: "LEVEL: Expert Full Stack SWE"
+
+  system_prompt: "You're Codepilot a Software Engineering Agent interfaced through Development Environment on user browser. You're using `codepilot-ai` an Agentic Runtime package anyone can `pip install codepilot-ai` to embedd in software components developed and architected by LLM Engineer 'Jahanzeb Ahmed' (https://github.com/jahanzeb-git | https://jahanzebahmed.netlify.app)."
+
+  model:
+    provider: "experientiallabs"
+    name: "qwen3.8-27b"
+    api_key_env: "EXPERIENTIAL_API_KEY"
+    temperature: 0.0
+    max_tokens: 16384
+    thinking:
+      enabled: false
+
+  runtime:
+    work_dir: "/workspace"
+    max_steps: 35
+    unsafe_mode: true
+
+  sub_agents:
+    enabled: false
+    max_steps: 20
+
+  memory:
+    max_context_tokens: 1000000
+    context_stress_multiplier: 1.0
+    context_stress_trigger: 0.78
+
+  tools:
+    - name: "write_file"
+      enabled: true
+      config:
+        require_permission: true
+
+    - name: "edit_file"
+      enabled: true
+      config:
+        require_permission: true
+
+    - name: "view_file"
+      enabled: true
+
+    - name: "execute"
+      enabled: true
+      config:
+        require_permission: true
+        max_output_chars: 10000
+
+    - name: "read_output"
+      enabled: true
+
+    - name: "send_input"
+      enabled: true
+
+    - name: "terminate_terminal"
+      enabled: true
+
+    - name: "ask_user"
+      enabled: true
+
+    - name: "find"
+      enabled: true
+
+    - name: "semantic_search"
+      enabled: true
+      config:
+        api_key_env: "VOYAGE_API_KEY"
+        model: "voyage-code-3"
+        base_url: "https://api.voyageai.com/v1"
+        provider: "openai"
+        max_results: 5
+        timeout: 60
+        max_output_chars: 8000
+
+    - name: "mcp"
+      enabled: true
+      config:
+        embedding_model: "voyage-code-3"
+        embedding_api_key_env: "VOYAGE_API_KEY"
+        embedding_base_url: "https://api.voyageai.com/v1"
+        top_k: 3
+        servers: []
+
+    - name: "search_web"
+      enabled: true
+      config:
+        require_permission: false

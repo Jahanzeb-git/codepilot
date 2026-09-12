@@ -1,0 +1,286 @@
+#!/usr/bin/env bash
+# codepilot-workspace — launches the local self-hosted Codepilot workspace.
+#
+# What this does, in order:
+#   1. Detects your OS, installs Docker if it's missing (Linux only —
+#      macOS requires Docker Desktop's own GUI installer, see below).
+#   2. Seeds ~/.codepilot/agent.yaml and ~/.codepilot/app/sessions/ on the
+#      HOST the first time you ever run this, so settings and sessions
+#      persist across container restarts/upgrades.
+#   3. Runs (or restarts) the container, bind-mounting those plus your
+#      current directory as the workspace.
+#   4. Opens it in a chrome-less app window if Chrome/Chromium/Edge is
+#      found, otherwise your default browser.
+#
+# This script only ever touches files under ~/.codepilot and the current
+# directory on your machine — it does not modify anything inside this repo.
+
+set -euo pipefail
+
+# ---- configuration ----------------------------------------------------
+IMAGE="${CODEPILOT_IMAGE:-ghcr.io/jahanzeb-git/codepilot-workspace:latest}"
+CONTAINER_NAME="codepilot-workspace"
+HOST_PORT="${CODEPILOT_PORT:-8080}"
+CODEPILOT_HOME="$HOME/.codepilot"
+AGENT_YAML="$CODEPILOT_HOME/agent.yaml"
+SESSIONS_DIR="$CODEPILOT_HOME/app/sessions"
+# The project you're working on. Defaults to wherever you ran this command
+# from — `cd my-project && codepilot-workspace` mounts my-project.
+WORKSPACE_DIR="${CODEPILOT_WORKSPACE_DIR:-$PWD}"
+URL="http://localhost:${HOST_PORT}"
+
+OS="$(uname -s)"
+
+log() { echo "[codepilot] $*"; }
+
+# ---- 1. Docker -----------------------------------------------------------
+
+ensure_docker_installed() {
+  if command -v docker >/dev/null 2>&1; then
+    return
+  fi
+  log "Docker not found."
+  case "$OS" in
+    Linux)
+      log "Installing Docker via the official convenience script (needs sudo)…"
+      curl -fsSL https://get.docker.com | sh
+      sudo usermod -aG docker "$USER" || true
+      log "Docker installed. If this is the first time docker was installed for"
+      log "your user, log out and back in (or run 'newgrp docker'), then re-run this command."
+      exit 0
+      ;;
+    Darwin)
+      if command -v brew >/dev/null 2>&1; then
+        log "Installing Docker Desktop via Homebrew…"
+        brew install --cask docker
+      else
+        log "Homebrew not found. Please install Docker Desktop manually:"
+        log "  https://www.docker.com/products/docker-desktop/"
+        exit 1
+      fi
+      log "Opening Docker Desktop for its one-time setup — finish that, then re-run this command."
+      open -a Docker
+      exit 0
+      ;;
+    *)
+      log "Unsupported OS: $OS. Please install Docker manually: https://docs.docker.com/get-docker/"
+      exit 1
+      ;;
+  esac
+}
+
+wait_for_docker_daemon() {
+  if docker info >/dev/null 2>&1; then
+    return
+  fi
+  log "Docker is installed but not running — starting it…"
+  case "$OS" in
+    Darwin) open -a Docker ;;
+    Linux) sudo systemctl start docker 2>/dev/null || true ;;
+  esac
+  printf "[codepilot] waiting for Docker"
+  for _ in $(seq 1 30); do
+    docker info >/dev/null 2>&1 && { echo; return; }
+    printf "."
+    sleep 2
+  done
+  echo
+  log "Docker didn't start in time. Start it manually and re-run this command." >&2
+  exit 1
+}
+
+# ---- 2. Seed persistent host files -------------------------------------
+
+seed_defaults() {
+  mkdir -p "$CODEPILOT_HOME" "$SESSIONS_DIR"
+
+  # Bind-mounting a single file that doesn't exist yet on the host is a
+  # classic Docker footgun: Docker silently creates a DIRECTORY at that
+  # path instead, which breaks the container. We avoid that by always
+  # making sure this file exists (with real default content) before the
+  # first `docker run`.
+  if [ ! -s "$AGENT_YAML" ]; then
+    log "First run — writing default agent.yaml to $AGENT_YAML"
+    cat > "$AGENT_YAML" << 'YAML_EOF'
+# agent.yaml
+agent:
+  name: "Codepilot"
+  role: "LEVEL: Expert Full Stack Software Engineer"
+  system_prompt: "You're Codepilot an agentic software assistance interfaced through IDE on user browser. Your agentic runtime is based on `codepilot-ai` library developed and architected by LLM Engineer 'Jahanzeb Ahmed (jahanzebahmed.mail@gmail.com | https://github.com/jahanzeb-git/)' anyone can just `pip install codepilot-ai` to embed in software components. You must smartly work and wise about token usage but solve TASK(s) at your own pace."
+
+  model:
+    provider: "experientiallabs"
+    name: "qwen3.8-27b"
+    api_key_env: "EXPERIENTIAL_API_KEY"
+    temperature: 1.0
+    max_tokens: 65536
+    thinking:
+      enabled: false
+
+  runtime:
+    work_dir: "/workspace"
+    max_steps: 35
+    unsafe_mode: true
+
+  sub_agents:
+    enabled: false
+    max_steps: 20
+
+  memory:
+    max_context_tokens: 100000
+    context_stress_multiplier: 1.0
+    context_stress_trigger: 0.78
+
+  tools:
+    - name: "write_file"
+      enabled: true
+      config:
+        require_permission: true
+
+    - name: "edit_file"
+      enabled: true
+      config:
+        require_permission: true
+
+    - name: "view_file"
+      enabled: true
+
+    - name: "execute"
+      enabled: true
+      config:
+        require_permission: true
+        max_output_chars: 10000
+
+    - name: "read_output"
+      enabled: true
+
+    - name: "send_input"
+      enabled: true
+
+    - name: "terminate_terminal"
+      enabled: true
+
+    - name: "ask_user"
+      enabled: true
+
+    - name: "find"
+      enabled: true
+
+    - name: "semantic_search"
+      enabled: true
+      config:
+        api_key_env: "VOYAGE_API_KEY"
+        model: "voyage-code-3"
+        base_url: "https://api.voyageai.com/v1"
+        provider: "openai"
+        max_results: 5
+        timeout: 60
+        max_output_chars: 8000
+
+    - name: "mcp"
+      enabled: true
+      config:
+        embedding_model: "voyage-code-3"
+        embedding_api_key_env: "VOYAGE_API_KEY"
+        embedding_base_url: "https://api.voyageai.com/v1"
+        top_k: 3
+        servers: []
+
+    - name: "search_web"
+      enabled: true
+      config:
+        require_permission: false
+YAML_EOF
+  fi
+}
+
+# ---- 3. Run the container -----------------------------------------------
+
+run_container() {
+  if docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
+    log "Already running."
+    return
+  fi
+  if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
+    log "Restarting existing container…"
+    docker start "$CONTAINER_NAME" >/dev/null
+    return
+  fi
+
+  log "Starting codepilot-workspace (pulling the image if this is the first run)…"
+  # DEEPSEEK_API_KEY / VOYAGE_API_KEY / TAVILY_API_KEY are set to a
+  # non-empty placeholder ON PURPOSE: agent_server.py reads these at
+  # startup and would error on a genuinely missing var, but we don't want
+  # to ship a real default key either — you add your own from inside the
+  # Settings UI once it's running.
+  docker run -d \
+    --name "$CONTAINER_NAME" \
+    -p "${HOST_PORT}:8080" \
+    -v "$AGENT_YAML:/opt/codepilot/agent.yaml" \
+    -v "$SESSIONS_DIR:/root/.codepilot/sessions" \
+    --mount "type=bind,source=${WORKSPACE_DIR},target=/workspace" \
+    -e EXPERIENTIAL_API_KEY="not-configured" \
+    -e DEEPSEEK_API_KEY="not-configured" \
+    -e VOYAGE_API_KEY="not-configured" \
+    -e TAVILY_API_KEY="not-configured" \
+    "$IMAGE" >/dev/null
+}
+
+wait_for_server() {
+  printf "[codepilot] waiting for the workspace to come up"
+  for _ in $(seq 1 60); do
+    if curl -fsS "$URL" >/dev/null 2>&1; then
+      echo
+      return
+    fi
+    printf "."
+    sleep 1
+  done
+  echo
+  log "Still not responding after 60s — check 'docker logs $CONTAINER_NAME'." >&2
+}
+
+# ---- 4. Open a tab-less app window ----------------------------------------
+
+open_app_window() {
+  local browser=""
+  case "$OS" in
+    Darwin)
+      for cand in "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+                  "/Applications/Chromium.app/Contents/MacOS/Chromium" \
+                  "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"; do
+        [ -x "$cand" ] && browser="$cand" && break
+      done
+      ;;
+    Linux)
+      for cand in google-chrome google-chrome-stable chromium chromium-browser microsoft-edge; do
+        command -v "$cand" >/dev/null 2>&1 && browser="$(command -v "$cand")" && break
+      done
+      ;;
+  esac
+
+  if [ -n "$browser" ]; then
+    # --app= is what gives the tab-less, address-bar-less window.
+    "$browser" --app="$URL" --new-window >/dev/null 2>&1 &
+    disown
+  else
+    log "No Chrome/Chromium/Edge found — opening your default browser instead."
+    case "$OS" in
+      Darwin) open "$URL" ;;
+      Linux) xdg-open "$URL" >/dev/null 2>&1 || log "Open $URL manually." ;;
+    esac
+  fi
+}
+
+main() {
+  ensure_docker_installed
+  wait_for_docker_daemon
+  seed_defaults
+  run_container
+  wait_for_server
+  open_app_window
+  log "Running at $URL"
+  log "Stop it any time with: docker stop $CONTAINER_NAME"
+}
+
+main "$@"
