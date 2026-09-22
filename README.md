@@ -8,7 +8,8 @@
 [![Python](https://img.shields.io/pypi/pyversions/codepilot-ai)](https://pypi.org/project/codepilot-ai/)
 [![License](https://img.shields.io/badge/license-MIT-black)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-black)](https://Jahanzeb-git.github.io/codepilot/)
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template?template=https%3A%2F%2Fgithub.com%2FJahanzeb-git%2Fcodepilot)
+[![Deploy to Koyeb](https://www.koyeb.com/static/images/deploy/button.svg)](https://app.koyeb.com/deploy?type=docker&image=ghcr.io%2Fjahanzeb-git%2Fcodepilot-workspace%3Alatest&ports=8080%3Bhttp)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Jahanzeb-git/codepilot)
 
 <video src="https://github.com/user-attachments/assets/ccbe27b1-22ab-4f54-b212-90719251c771" controls width="100%"></video>
 

@@ -4,11 +4,12 @@ Quick disambiguation because I keep confusing people with the name: **CodePilot*
 
 Every workspace is its own Firecracker microVM. Not a shared container, not a namespace trick — an actual isolated machine per user, spun up on demand and thrown away when nobody's using it.
 
-## Deploy with 1-Click on Railway
+## Deploy with 1-Click (100% Free Tiers)
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template?template=https%3A%2F%2Fgithub.com%2FJahanzeb-git%2Fcodepilot)
+[![Deploy to Koyeb](https://www.koyeb.com/static/images/deploy/button.svg)](https://app.koyeb.com/deploy?type=docker&image=ghcr.io%2Fjahanzeb-git%2Fcodepilot-workspace%3Alatest&ports=8080%3Bhttp)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Jahanzeb-git/codepilot)
 
-Deploy CodePilot Workspaces live to your Railway account in seconds. Railway builds the container, exposes port `8080`, and runs the workspace IDE out-of-the-box.
+Deploy CodePilot Workspaces live to your Koyeb or Render account in seconds. Both platforms pull the pre-built Docker image, expose port `8080`, and run the workspace IDE out-of-the-box with **100% free tiers**.
 
 ---
 
