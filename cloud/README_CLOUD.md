@@ -4,6 +4,14 @@ Quick disambiguation because I keep confusing people with the name: **CodePilot*
 
 Every workspace is its own Firecracker microVM. Not a shared container, not a namespace trick — an actual isolated machine per user, spun up on demand and thrown away when nobody's using it.
 
+## Deploy with 1-Click on Railway
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template?template=https%3A%2F%2Fgithub.com%2FJahanzeb-git%2Fcodepilot)
+
+Deploy CodePilot Workspaces live to your Railway account in seconds. Railway builds the container, exposes port `8080`, and runs the workspace IDE out-of-the-box.
+
+---
+
 ## Run it locally (self-hosted)
 
 No account, no signup. You need Docker — that's it.
