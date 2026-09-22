@@ -1,5 +1,7 @@
 #!/bin/bash
 # entrypoint.sh
+# This script is lagacy & stale entrypoint for Machine runner but replaced by initd/main.go as initd process by pre-compiled binary. It is kept for reference and backward compatibility.
+# License: MIT License
 
 # This function will be called when the container receives a shutdown signal (SIGTERM)
 cleanup() {
