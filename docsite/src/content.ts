@@ -350,15 +350,15 @@ export const sections: DocSection[] = [
   },
   {
     id: "deployment",
-    title: "Ship the library, demo the product surface.",
-    eyebrow: "Deployment",
+    title: "Run anywhere: Cloud, Web, or Daemonless Local Workspaces.",
+    eyebrow: "Deployment & Distribution",
     description:
-      "The package stays reusable, while the hosted documentation and demo workspace prove the system works end to end.",
-    icon: Gauge,
+      "CodePilot is designed to run in highly restrictive low-level environments or fully scaled cloud platforms.",
+    icon: Package,
     points: [
-      "Docs deploy as a static GitHub Pages site.",
-      "The hosted workspace can run code-server plus a runtime daemon.",
-      "The same runtime can later power VS Code, desktop, or API experiences.",
+      "Cloud Workspaces (Fly.io): Ephemeral microVMs running full isolated rootfs via Firecracker.",
+      "Cloud Web App: Hosted at codepilotdev.netlify.app connecting to Fly proxies.",
+      "Local Workspace (codepilot-workspace): Daemonless, docker-less Linux containerization using CLONE_NEWPID/UTS/NS and Cgroups v2.",
     ],
   },
   {

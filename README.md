@@ -31,7 +31,34 @@ It is intentionally **not** a hosted chatbot UI. The package gives applications 
 
 Full user documentation lives at: **https://Jahanzeb-git.github.io/codepilot/**
 
-## Quick Start
+## ⚡ CodePilot Workspace (Daemonless Containerization)
+
+In addition to the Python library, this repository ships **CodePilot Workspace** — a self-contained, daemonless Linux containerization engine written in Go. It allows developers to run the full CodePilot agentic IDE locally **without relying on the Docker daemon**. 
+
+Built for systems engineers and low-level virtualization environments (like Unikraft), the unified Go binary directly pulls OCI images, flattens them, and constructs isolated environments using pure Linux kernel primitives:
+
+- **Namespaces:** `CLONE_NEWPID`, `CLONE_NEWUTS`, `CLONE_NEWNS` for process, hostname, and mount isolation.
+- **Resource Control:** Cgroups v2 for deterministic memory and process limits.
+- **Zero-Dependency:** Uses `go-containerregistry` to stream and extract GHCR image layers concurrently without any host container runtime.
+- **Process Lifecycle:** Tracks container state purely via `/proc/<pid>/exe` symlink verification, eliminating stale PID recycling bugs.
+
+### Quick Start (Linux)
+
+Install the pre-compiled binary:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Jahanzeb-git/codepilot/main/cloud/distribution/install.sh | bash
+```
+
+Launch the workspace from any local directory:
+
+```bash
+cd ~/my-project
+codepilot-workspace
+```
+*(Pulls the OS rootfs on first run, provisions the container, and opens a chromeless app-window IDE instantly bound to your local files).*
+
+## Quick Start (Python Library)
 
 Create an `agent.yaml`:
 
@@ -311,6 +338,7 @@ CodePilot’s design is influenced by agent and tool-use research:
 - [Toolformer: Language Models Can Teach Themselves to Use Tools](https://arxiv.org/abs/2302.04761) studies when models should call tools, what arguments to pass, and how to incorporate results.
 - [SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering](https://arxiv.org/abs/2405.15793) argues that software agents benefit from purpose-built interfaces for navigating repositories, editing files, and running programs.
 - [Voyager: An Open-Ended Embodied Agent with Large Language Models](https://arxiv.org/abs/2305.16291) demonstrates the value of agents that accumulate skills while acting in an external environment.
+- [Unikraft: Fast, Specialized Unikernels](https://unikraft.org/) and the rise of daemonless virtualization principles inspired the zero-dependency, pure Linux namespace architecture of `codepilot-workspace`.
 
 CodePilot translates those ideas into a small Python library focused on practical software work: ephemeral executable scripts, content-addressed diff edits, persistent terminals, observable hooks, and pluggable session storage.
 
