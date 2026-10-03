@@ -11,7 +11,7 @@
 #      current directory as the workspace.
 #   4. Opens it in a chrome-less app window if Chrome/Chromium/Edge is
 #      found, otherwise your default browser.
-#
+# 
 # This script only ever touches files under ~/.codepilot and the current
 # directory on your machine — it does not modify anything inside this repo.
 
@@ -27,7 +27,7 @@ SESSIONS_DIR="$CODEPILOT_HOME/app/sessions"
 # The project you're working on. Defaults to wherever you ran this command
 # from — `cd my-project && codepilot-workspace` mounts my-project.
 WORKSPACE_DIR="${CODEPILOT_WORKSPACE_DIR:-$PWD}"
-URL="http://localhost:${HOST_PORT}"
+URL="http://localhost:${HOST_PORT}"ooo
 
 OS="$(uname -s)"
 
@@ -126,7 +126,7 @@ agent:
     enabled: false
     max_steps: 20
 
-  memory:
+  memory:COPY runner/agent.yaml /opt/codepilot/agent.yaml
     max_context_tokens: 100000
     context_stress_multiplier: 1.0
     context_stress_trigger: 0.78

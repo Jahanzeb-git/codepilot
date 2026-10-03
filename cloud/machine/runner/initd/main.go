@@ -77,7 +77,7 @@ func cleanup() error {
 
 	var errs []error
 
-	if snapshotDaemonProc != nil {
+	if snapshotDaemonProc != nil { 
 		fmt.Println("[INFO] notifying B2 snapshot daemon to sync...")
 		if err := signalProcess("snapshot-daemon", snapshotDaemonProc, sig); err != nil {
 			errs = append(errs, err)
