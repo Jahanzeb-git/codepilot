@@ -171,6 +171,11 @@ func HandleAgentConfig() {
 // returned, not the info result. as it was, first-boot restore from B2
 // basically never ran.
 func SnapshotFilesystem() {
+	if os.Getenv("CODEPILOT_LOCAL") == "true" {
+		fmt.Println("[INFO] Local workspace detected. Skipping B2 snapshot synchronization.")
+		return
+	}
+
 	_, err := os.Stat("/.rootfs_initialized")
 	if os.IsNotExist(err) {
 		fmt.Println("[INFO] new rootfs detected. downloading workspace from B2...")

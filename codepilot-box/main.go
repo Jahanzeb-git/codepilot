@@ -158,6 +158,12 @@ func main() {
 // ---------------------------------------------------------------------------
 
 func setup() {
+	if os.Geteuid() != 0 {
+		fmt.Fprintf(os.Stderr, "[codepilot] fatal: CodePilot Workspace requires root privileges to create Linux namespaces and cgroups.\n")
+		fmt.Fprintf(os.Stderr, "[codepilot] Please run: sudo codepilot-workspace\n")
+		os.Exit(1)
+	}
+
 	printBanner()
 
 	// 1. Already running? Just open the browser.
@@ -279,12 +285,14 @@ func child() {
 	must(os.MkdirAll(filepath.Join(rootfsPath, "workspace"), 0755))
 	must(os.MkdirAll(filepath.Join(rootfsPath, "opt/codepilot"), 0755))
 	must(os.MkdirAll(filepath.Join(rootfsPath, "root/.codepilot/sessions"), 0755))
+	must(os.MkdirAll(filepath.Join(rootfsPath, "dev"), 0755))
+	must(os.MkdirAll(filepath.Join(rootfsPath, "sys"), 0755))
 
 	// ---- Bind-mounts — MUST happen BEFORE chroot ----
 	//
-	// MS_BIND glues a host path into the rootfs directory. Same physical disk
-	// blocks — no copying. Two-way live mirror. Must be done before chroot
-	// because after chroot we can no longer see host paths.
+	// Make our new mount namespace strictly private so our mounts don't
+	// leak back out to the host OS.
+	must(syscall.Mount("", "/", "", syscall.MS_PRIVATE|syscall.MS_REC, ""))
 
 	// 1. User's current project directory → /workspace inside container
 	must(syscall.Mount(workspaceDir, filepath.Join(rootfsPath, "workspace"), "", syscall.MS_BIND, ""))
@@ -295,8 +303,15 @@ func child() {
 	// 3. Persistent sessions directory
 	must(syscall.Mount(sessionsPath, filepath.Join(rootfsPath, "root/.codepilot/sessions"), "", syscall.MS_BIND, ""))
 
+	// 4. Critical pseudo-filesystems (fixes "open /dev/null: no such file or directory")
+	must(syscall.Mount("/dev", filepath.Join(rootfsPath, "dev"), "", syscall.MS_BIND|syscall.MS_REC, ""))
+	must(syscall.Mount("/sys", filepath.Join(rootfsPath, "sys"), "", syscall.MS_BIND|syscall.MS_REC, ""))
+
 	// Set container hostname (visible to processes inside the UTS namespace).
 	_ = syscall.Sethostname([]byte("codepilot-workspace"))
+
+	// Signal initd that this is a local daemonless run, so it skips B2 logic.
+	_ = os.Setenv("CODEPILOT_LOCAL", "true")
 
 	// Placeholder env vars. User configures real keys via the Settings UI.
 	_ = os.Setenv("EXPERIENTIAL_API_KEY", "not-configured")
@@ -557,13 +572,9 @@ func printBanner() {
 	)
 
 	fmt.Println()
-	fmt.Printf("%s  ┌─────────────────────────────────────────────┐%s\n", cyan, reset)
-	fmt.Printf("%s  │%s                                             %s│%s\n", cyan, reset, cyan, reset)
-	fmt.Printf("%s  │%s  %s⚡  C O D E P I L O T  W O R K S P A C E%s   %s│%s\n", cyan, reset, bold, reset, cyan, reset)
-	fmt.Printf("%s  │%s  %sAI Development Environment · v1.0%s         %s│%s\n", cyan, reset, dim, reset, cyan, reset)
-	fmt.Printf("%s  │%s  %sLinux · No Docker · No Daemon%s             %s│%s\n", cyan, reset, dim, reset, cyan, reset)
-	fmt.Printf("%s  │%s                                             %s│%s\n", cyan, reset, cyan, reset)
-	fmt.Printf("%s  └─────────────────────────────────────────────┘%s\n", cyan, reset)
+	fmt.Printf("  %s█%s %s⚡ C O D E P I L O T   W O R K S P A C E%s\n", cyan, reset, bold, reset)
+	fmt.Printf("  %s█%s %sAI Development Environment · v1.0%s\n", cyan, reset, dim, reset)
+	fmt.Printf("  %s█%s %sLinux · No Docker · No Daemon%s\n", cyan, reset, dim, reset)
 	fmt.Println()
 }
 
