@@ -307,6 +307,15 @@ func child() {
 	must(syscall.Mount("/dev", filepath.Join(rootfsPath, "dev"), "", syscall.MS_BIND|syscall.MS_REC, ""))
 	must(syscall.Mount("/sys", filepath.Join(rootfsPath, "sys"), "", syscall.MS_BIND|syscall.MS_REC, ""))
 
+	// 5. Fresh devpts for the new PID namespace! 
+	// Without this, bash crashes instantly because it tries to use the host's 
+	// /dev/pts which doesn't understand the container's isolated PIDs.
+	must(os.MkdirAll(filepath.Join(rootfsPath, "dev", "pts"), 0755))
+	must(syscall.Mount("devpts", filepath.Join(rootfsPath, "dev", "pts"), "devpts", 0, "newinstance,ptmxmode=0666"))
+	
+	// Ensure /dev/ptmx uses the container's new devpts instance, not the host's
+	must(syscall.Mount(filepath.Join(rootfsPath, "dev", "pts", "ptmx"), filepath.Join(rootfsPath, "dev", "ptmx"), "", syscall.MS_BIND, ""))
+
 	// Set container hostname (visible to processes inside the UTS namespace).
 	_ = syscall.Sethostname([]byte("codepilot-workspace"))
 
