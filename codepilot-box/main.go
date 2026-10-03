@@ -312,6 +312,7 @@ func child() {
 
 	// Signal initd that this is a local daemonless run, so it skips B2 logic.
 	_ = os.Setenv("CODEPILOT_LOCAL", "true")
+	_ = os.Setenv("STATIC_PATH", "/opt/codepilot/frontend/dist")
 
 	// Placeholder env vars. User configures real keys via the Settings UI.
 	_ = os.Setenv("EXPERIENTIAL_API_KEY", "not-configured")
