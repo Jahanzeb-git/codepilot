@@ -289,3 +289,32 @@ async def stream_events(websocket: WebSocket):
     </>
   );
 }
+
+export function PageDeployment() {
+  return (
+    <>
+      <PageHeader
+        title="Deployment & Distribution"
+        subtitle="Run anywhere: Cloud, Web, or Daemonless Local Workspaces."
+      />
+
+      <Section>
+        <p>
+          CodePilot is designed to run in highly restrictive low-level environments or fully scaled cloud platforms. The architecture takes inspiration from daemonless virtualization principles, such as Unikraft, to provide secure and zero-dependency isolation.
+        </p>
+
+        <ul style={{ paddingLeft: "1.5rem", lineHeight: "1.6", marginTop: "1rem" }}>
+          <li style={{ marginBottom: "0.5rem" }}>
+            <strong>Cloud Workspaces (Fly.io):</strong> Ephemeral microVMs running full isolated rootfs via Firecracker.
+          </li>
+          <li style={{ marginBottom: "0.5rem" }}>
+            <strong>Cloud Web App:</strong> Hosted at <code>codepilotdev.netlify.app</code> connecting to Fly proxies.
+          </li>
+          <li style={{ marginBottom: "0.5rem" }}>
+            <strong>Local Workspace (codepilot-workspace):</strong> Daemonless, docker-less Linux containerization using <code>CLONE_NEWPID</code>, <code>CLONE_NEWUTS</code>, and <code>CLONE_NEWNS</code> along with Cgroups v2.
+          </li>
+        </ul>
+      </Section>
+    </>
+  );
+}

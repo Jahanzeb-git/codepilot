@@ -30,6 +30,7 @@ export type PageId =
   | "aborting"
   | "cli-pattern"
   | "web-server"
+  | "deployment"
   | "api-reference";
 
 export type NavGroup = {
@@ -91,6 +92,7 @@ export const navGroups: NavGroup[] = [
       { id: "aborting", label: "Aborting the Agent" },
       { id: "cli-pattern", label: "Building a CLI" },
       { id: "web-server", label: "Web Server Integration" },
+      { id: "deployment", label: "Deployment & Distribution" },
     ],
   },
   {

@@ -8,7 +8,7 @@ import {
   PageChatMode, PageWorkspaceChanges, PageMcpSupport,
   PageSessionPersistence, PageContextMemory, PageResumingSession, PageResettingSession,
   PageHooks, PagePermissionGating, PageMidTaskInjection, PageMultiOperation,
-  PageCustomTools, PageAborting, PageCLIPattern, PageWebServer, PageAPIReference,
+  PageCustomTools, PageAborting, PageCLIPattern, PageWebServer, PageDeployment, PageAPIReference,
 } from "./PageContent";
 import "./styles.css";
 
@@ -85,6 +85,7 @@ export function App() {
     aborting: <PageAborting />,
     "cli-pattern": <PageCLIPattern />,
     "web-server": <PageWebServer />,
+    deployment: <PageDeployment />,
     "api-reference": <PageAPIReference />,
   };
 

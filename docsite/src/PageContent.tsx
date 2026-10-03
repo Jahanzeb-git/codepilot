@@ -3,5 +3,5 @@ export { PageHowItWorks, PageBasicUsage, PageCodeAsInterface, PageStreaming, Pag
 export { PageTerminalTools, PageFileHandling, PageSearchTools, PageContextArchiving, PageUserInteraction, PageChatMode, PageWorkspaceChanges, PageMcpSupport } from "./pages3";
 export { PageSessionPersistence, PageContextMemory, PageResumingSession, PageResettingSession } from "./pages4";
 export { PageHooks, PagePermissionGating, PageMidTaskInjection, PageMultiOperation } from "./pages5";
-export { PageCustomTools, PageAborting, PageCLIPattern, PageWebServer } from "./pages6";
+export { PageCustomTools, PageAborting, PageCLIPattern, PageWebServer, PageDeployment } from "./pages6";
 export { PageAPIReference } from "./pages7";
