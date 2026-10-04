@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/crane"
+	"golang.org/x/sys/unix"
 )
 
 // ---------------------------------------------------------------------------
@@ -350,9 +351,9 @@ func redirectContainerStdio() {
 	logFile, err := os.OpenFile("/tmp/codepilot-runtime.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	must(err)
 
-	must(syscall.Dup2(int(stdin.Fd()), 0))
-	must(syscall.Dup2(int(logFile.Fd()), 1))
-	must(syscall.Dup2(int(logFile.Fd()), 2))
+	must(unix.Dup2(int(stdin.Fd()), 0))
+	must(unix.Dup2(int(logFile.Fd()), 1))
+	must(unix.Dup2(int(logFile.Fd()), 2))
 }
 
 // ---------------------------------------------------------------------------
