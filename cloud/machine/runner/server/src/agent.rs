@@ -14,7 +14,6 @@ use crate::state::AppState;
 /// - On EOF / error: reconnect after 2s (covers runtime re-init inode swaps).
 pub async fn run_agent_bridge(state: Arc<AppState>, mut inbound_rx: mpsc::UnboundedReceiver<Vec<u8>>) {
     let sock = state.config.agent_runtime_sock.clone();
-    let clients = state.agent_clients.clone();
 
     loop {
         match UnixStream::connect(&sock).await {
@@ -29,7 +28,7 @@ pub async fn run_agent_bridge(state: Arc<AppState>, mut inbound_rx: mpsc::Unboun
                             Ok(0) | Err(_) => break,
                             Ok(n) => {
                                 let msg = Message::Binary(buf[..n].to_vec());
-                                for c in clients.iter() {
+                                for c in state.agent_clients.iter() {
                                     let _ = c.value().send(msg.clone());
                                 }
                             }
