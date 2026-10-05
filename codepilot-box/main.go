@@ -281,7 +281,7 @@ func child() {
 	//
 	// Make our new mount namespace strictly private so our mounts don't
 	// leak back out to the host OS.
-	must(syscall.Mount("", "/", "", syscall.MS_PRIVATE|syscall.MS_REC, ""))
+	must(syscall.Mount("", "/", "", syscall.MS_PRIVATE|syscall.MS_REC, "")) // MS_PRIVATE (CRITICAL) otherwise leak to host. DENGEROUS!
 
 	// 1. User's current project directory → /workspace inside container
 	must(syscall.Mount(workspaceDir, filepath.Join(rootfsPath, "workspace"), "", syscall.MS_BIND, ""))
@@ -293,7 +293,18 @@ func child() {
 	must(syscall.Mount(sessionsPath, filepath.Join(rootfsPath, "root/.codepilot/sessions"), "", syscall.MS_BIND, ""))
 
 	// 4. Critical pseudo-filesystems (fixes "open /dev/null: no such file or directory")
-	must(syscall.Mount("/dev", filepath.Join(rootfsPath, "dev"), "", syscall.MS_BIND|syscall.MS_REC, ""))
+	// bind mounting virtual devices using tempfs
+	must(syscall.Mount("tmpfs", filepath.Join(rootfsPath, "dev"), "tmpfs", 0, "mode=0755"))
+
+	bind_files := []string{"null", "zero", "full", "random", "urandom", "tty"}
+	for _, i := range bind_files {
+		f, err := os.Create(filepath.Join(rootfsPath, "dev", i)) // creating a file on container
+		if err == nil {
+			f.Close() // close descriptor
+		}
+		must(syscall.Mount(fmt.Sprintf("/dev/%s", i), filepath.Join(rootfsPath, "dev", i), "", syscall.MS_BIND, ""))
+	}
+
 	must(syscall.Mount("/sys", filepath.Join(rootfsPath, "sys"), "", syscall.MS_BIND|syscall.MS_REC, ""))
 
 	// 5. Fresh devpts for the new PID namespace!
