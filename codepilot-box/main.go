@@ -41,10 +41,13 @@ import (
 const (
 	imageRef   = "ghcr.io/jahanzeb-git/codepilot-workspace:latest"
 	rootfsPath = "/var/lib/codepilot/rootfs"
-	pidFile    = "/tmp/codepilot.pid"
-	selfBinary = "/usr/local/bin/codepilot-workspace"
-	hostPort   = 8080
-	cgroupDir  = "/sys/fs/cgroup/codepilot-workspace"
+	// rootfsStamp records the OCI digest the rootfs was extracted from, so a
+	// new runtime release can be picked up without deleting it by hand.
+	rootfsStamp = ".codepilot-rootfs-digest"
+	pidFile     = "/tmp/codepilot.pid"
+	selfBinary  = "/usr/local/bin/codepilot-workspace"
+	hostPort    = 8080
+	cgroupDir   = "/sys/fs/cgroup/codepilot-workspace"
 )
 
 // agentYAML is written to ~/.codepilot/agent.yaml on the very first run.
@@ -423,26 +426,80 @@ func redirectContainerStdio() {
 }
 
 // ---------------------------------------------------------------------------
-// pullSetup — pull OCI image from GHCR and extract into rootfsPath
+// pullSetup — keep the rootfs in sync with the published runtime image
 // ---------------------------------------------------------------------------
 
+// rootfsNeedsUpdate reports whether the extracted rootfs is out of date.
+// A missing or unreadable stamp counts as stale: installs created before the
+// stamp existed must refresh once to pick up the current runtime.
+func rootfsNeedsUpdate(stampPath, desired string) bool {
+	current, err := os.ReadFile(stampPath)
+	if err != nil {
+		return true
+	}
+	return strings.TrimSpace(string(current)) != desired
+}
+
+// pullSetup ensures rootfsPath holds the image currently published at imageRef.
+//
+// Setup used to bail out as soon as the directory existed, which meant every
+// runtime release required knowing to `rm -rf /var/lib/codepilot/rootfs`.
+// The stamp file makes the check explicit: same digest → nothing to do, new
+// digest → extract into a staging directory and swap it in.
+//
+// Workspace files live on a bind mount and sessions/config live under
+// ~/.codepilot, so replacing the rootfs does not touch user data.
 func pullSetup() error {
-	if _, err := os.Stat(rootfsPath); err == nil {
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("checking rootfs: %w", err)
+	desired, digestErr := crane.Digest(imageRef)
+
+	_, statErr := os.Stat(rootfsPath)
+	rootfsExists := statErr == nil
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("checking rootfs: %w", statErr)
 	}
 
-	if err := os.MkdirAll(rootfsPath, 0755); err != nil {
-		return fmt.Errorf("creating rootfs dir: %w", err)
+	if digestErr != nil {
+		// Offline or registry hiccup. An existing rootfs is still usable;
+		// a fresh install genuinely needs the image.
+		if rootfsExists {
+			fmt.Printf("  warning: could not check for runtime updates: %v\n", digestErr)
+			return nil
+		}
+		return fmt.Errorf("resolving image %s: %w", imageRef, digestErr)
 	}
 
+	if rootfsExists {
+		if !rootfsNeedsUpdate(filepath.Join(rootfsPath, rootfsStamp), desired) {
+			return nil
+		}
+		fmt.Println("  Runtime update available.")
+	} else if err := os.MkdirAll(filepath.Dir(rootfsPath), 0755); err != nil {
+		return fmt.Errorf("creating rootfs parent: %w", err)
+	}
 	fmt.Printf("  Pulling base image %s...\n", imageRef)
 
 	img, err := crane.Pull(imageRef)
 	if err != nil {
+		// Keep the last known-good rootfs rather than bricking an install
+		// because GHCR briefly failed.
+		if rootfsExists {
+			fmt.Printf("  warning: runtime update failed, keeping current rootfs: %v\n", err)
+			return nil
+		}
 		return fmt.Errorf("pulling image: %w", err)
 	}
+
+	// Extract next to the live rootfs, then swap. Renames stay on one
+	// filesystem, so the visible window where rootfsPath is missing is tiny.
+	staging := rootfsPath + ".new"
+	backup := rootfsPath + ".old"
+	if err := os.RemoveAll(staging); err != nil {
+		return fmt.Errorf("cleaning staging dir: %w", err)
+	}
+	if err := os.MkdirAll(staging, 0755); err != nil {
+		return fmt.Errorf("creating staging dir: %w", err)
+	}
+	defer os.RemoveAll(staging)
 
 	reader, writer := io.Pipe()
 	go func() {
@@ -450,10 +507,33 @@ func pullSetup() error {
 	}()
 
 	fmt.Print("  Extracting rootfs...")
-	if err := extractTar(reader, rootfsPath); err != nil {
+	if err := extractTar(reader, staging); err != nil {
 		return fmt.Errorf("extracting rootfs: %w", err)
 	}
+	if err := os.WriteFile(filepath.Join(staging, rootfsStamp), []byte(desired), 0644); err != nil {
+		return fmt.Errorf("writing rootfs stamp: %w", err)
+	}
 	fmt.Print("\r\033[K  Extracting rootfs... done.\n")
+
+	if err := os.RemoveAll(backup); err != nil {
+		return fmt.Errorf("cleaning previous rootfs: %w", err)
+	}
+	if rootfsExists {
+		if err := os.Rename(rootfsPath, backup); err != nil {
+			return fmt.Errorf("moving current rootfs aside: %w", err)
+		}
+	}
+	if err := os.Rename(staging, rootfsPath); err != nil {
+		if rootfsExists {
+			_ = os.Rename(backup, rootfsPath)
+		}
+		return fmt.Errorf("activating new rootfs: %w", err)
+	}
+	if err := os.RemoveAll(backup); err != nil {
+		// Not fatal: the new rootfs is live and the backup is just disk.
+		fmt.Printf("  warning: could not remove old rootfs at %s: %v\n", backup, err)
+	}
+
 	return nil
 }
 
