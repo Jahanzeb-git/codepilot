@@ -51,10 +51,11 @@ from dataclasses import dataclass, field
 import json
 import os
 import re
-from typing import Any, AsyncIterator, Dict, List, Optional, Union
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
 
 from ..core.prompt import SystemPromptParts
 from ..core.tool_protocol import (
+    StreamingToolCallAccumulator,
     ToolCall,
     format_messages_for_provider,
     parse_tool_arguments,
@@ -313,6 +314,13 @@ _KEY_REQUIRED_ROUTES = {
     "mistral", "groq", "cohere", "xai", "together_ai", "fireworks_ai",
     "perplexity", "deepinfra", "cerebras", "sambanova", "nvidia_nim",
 }
+
+#: Routes that must stay on the non-streaming path.
+#:
+#: Anthropic's extended thinking replays *signed* thinking blocks, and those
+#: signatures are only guaranteed to be complete on the full response. Streaming
+#: there would silently drop them and 400 the following turn.
+_NON_STREAM_ROUTES = {"anthropic"}
 
 #: Conventional environment variables checked when api_key_env is not set
 #: (or is set to the wrong provider's variable).
@@ -865,6 +873,8 @@ class LiteLLMProvider(LLMProvider):
         temperature: float = 0.0,
         max_tokens: int = 4096,
         force_thinking: bool = False,
+        on_text: Optional[Callable[[str], None]] = None,
+        on_thinking: Optional[Callable[[str], None]] = None,
         **kwargs,
     ) -> ToolCallResponse:
         litellm = _litellm()
@@ -884,8 +894,92 @@ class LiteLLMProvider(LLMProvider):
 
         request.update(kwargs)
 
+        # Token-level streaming: hand content/reasoning deltas to the caller as
+        # they arrive while still assembling complete tool calls. Without this
+        # the runtime can only emit the finished text as one blob, which is
+        # what the UI showed as "Working…" followed by a sudden dump.
+        if (on_text is not None or on_thinking is not None) and self._route not in _NON_STREAM_ROUTES:
+            request["stream"] = True
+            return await self._chat_with_tools_streamed(request, on_text, on_thinking)
+
         response = await litellm.acompletion(**self._skip_mcp_handler_if_tools(request))
         return self._parse_response(response)
+
+    async def _chat_with_tools_streamed(
+        self,
+        request: Dict[str, Any],
+        on_text: Optional[Callable[[str], None]] = None,
+        on_thinking: Optional[Callable[[str], None]] = None,
+    ) -> ToolCallResponse:
+        """Consume a streaming completion and assemble the full turn.
+
+        Text and reasoning are forwarded to the callbacks as deltas arrive.
+        Tool-call fragments are accumulated instead, because one call's JSON
+        arguments can be split across many chunks and only parse once the
+        stream ends.
+        """
+        litellm = _litellm()
+        stream = await litellm.acompletion(**self._skip_mcp_handler_if_tools(request))
+
+        accumulator = StreamingToolCallAccumulator()
+        text_parts: List[str] = []
+        reasoning_parts: List[str] = []
+        thinking_blocks: List[Any] = []
+        provider_fields: Dict[str, Any] = {}
+        stop_reason = ""
+        usage: Dict[str, int] = {}
+
+        async for chunk in stream:
+            chunk_usage = self._usage_dict(chunk)
+            if chunk_usage:
+                usage = chunk_usage
+
+            choices = _get_field(chunk, "choices", None) or []
+            if not choices:
+                continue
+            choice = choices[0]
+
+            finish = _get_field(choice, "finish_reason", None)
+            if finish:
+                stop_reason = str(finish)
+
+            delta = _get_field(choice, "delta", None)
+            if delta is None:
+                continue
+
+            reasoning = _get_field(delta, "reasoning_content", None)
+            if reasoning:
+                reasoning_parts.append(str(reasoning))
+                if on_thinking is not None:
+                    on_thinking(str(reasoning))
+
+            blocks = _get_field(delta, "thinking_blocks", None)
+            if blocks:
+                thinking_blocks.extend(_json_safe(blocks) or [])
+
+            fields = _get_field(delta, "provider_specific_fields", None)
+            if isinstance(fields, dict):
+                provider_fields.update(_json_safe(fields) or {})
+
+            tool_deltas = _get_field(delta, "tool_calls", None)
+            if tool_deltas:
+                accumulator.feed(tool_deltas)
+
+            text = _get_field(delta, "content", None)
+            if text:
+                text_parts.append(str(text))
+                if on_text is not None:
+                    on_text(str(text))
+
+        return ToolCallResponse(
+            text="".join(text_parts),
+            tool_calls=accumulator.finish(),
+            stop_reason=stop_reason,
+            thinking_blocks=thinking_blocks,
+            reasoning_content="".join(reasoning_parts) or None,
+            provider_specific_fields=provider_fields,
+            usage=usage,
+        )
 
     # ------------------------------------------------------------------ #
     #  Anthropic cache TTL refresh                                         #

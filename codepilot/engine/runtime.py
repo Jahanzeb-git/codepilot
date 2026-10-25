@@ -372,6 +372,27 @@ class AsyncRuntime:
 
             # 3. LLM inference with native function/tool schemas
             tools = self.registry.build_tool_schemas()
+            streamed_text = False
+
+            def _on_text(delta: str) -> None:
+                """Forward a content delta to the UI as it arrives."""
+                nonlocal streamed_text
+                streamed_text = True
+                self.hooks.emit(EventType.STREAM, text=delta)
+
+            def _on_thinking(delta: str) -> None:
+                """Chain-of-thought never goes to STREAM — kept separate."""
+                self.hooks.emit(EventType.THINKING_STREAM, thinking=delta)
+
+            # Only ask the provider to stream when the caller wants live
+            # output. Non-streaming consumers (CLI --no-stream) keep the old
+            # one-shot path, including Anthropic's signed thinking blocks.
+            stream_kwargs = (
+                {"on_text": _on_text, "on_thinking": _on_thinking}
+                if self._stream
+                else {}
+            )
+
             try:
                 response = await self.provider.chat_with_tools(
                     messages=rendered_msgs,
@@ -380,6 +401,7 @@ class AsyncRuntime:
                     temperature=self.config.model.temperature,
                     max_tokens=self.config.model.max_tokens,
                     force_thinking=force_thinking,
+                    **stream_kwargs,
                 )
             except Exception as exc:
                 error_msg = f"LLM provider error: {exc}"
@@ -387,8 +409,10 @@ class AsyncRuntime:
                 self._append_execution_result(f"PROVIDER ERROR: {error_msg}")
                 continue
 
-            # Stream model commentary to user if present
-            if response.text and self._stream:
+            # Token deltas already reached the UI while the stream was open.
+            # Only non-streaming routes (e.g. Anthropic's signed thinking
+            # blocks) need the finished text emitted as one block.
+            if response.text and self._stream and not streamed_text:
                 self.hooks.emit(EventType.STREAM, text=response.text)
 
             self.hooks.emit(EventType.LLM_RESPONSE, step=step, response=response.text or "")
@@ -930,9 +954,16 @@ class AsyncRuntime:
         """
         if finish:
             self._done = True
-            self._append_execution("[task] Task marked as complete.")
+            message = "[task] Task marked as complete."
         else:
-            self._append_execution("[task] No action taken (finish=False).")
+            message = "[task] No action taken (finish=False)."
+
+        self._append_execution(message)
+        # Emit a result so the tool message is never empty. Anthropic rejects
+        # empty tool_result blocks, and host UIs need a completion signal for
+        # the row they rendered when the call started.
+        self.hooks.emit(EventType.TOOL_RESULT, tool="task", result=message)
+        return message
 
     def _build_system_prompt(self, step: int = 0, max_steps: int = 0) -> SystemPromptParts:
         # Build sub-agent status block (empty when none active)

@@ -496,3 +496,134 @@ def test_refresh_cache_ttl_filters_foreign_continuity_fields(monkeypatch):
     assert assistant["content"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
     # Anthropic needs a trailing user turn.
     assert wire[-1]["role"] == "user"
+
+
+# ---------------------------------------------------------------------------
+# Streaming tool-call assembly
+# ---------------------------------------------------------------------------
+
+def _stream_chunk(*, content=None, reasoning=None, tool_calls=None, finish=None):
+    delta = SimpleNamespace(
+        content=content,
+        reasoning_content=reasoning,
+        tool_calls=tool_calls,
+        thinking_blocks=None,
+        provider_specific_fields=None,
+    )
+    return SimpleNamespace(
+        choices=[SimpleNamespace(delta=delta, finish_reason=finish)],
+        usage=None,
+    )
+
+
+def _async_iter(items):
+    async def gen():
+        for item in items:
+            yield item
+    return gen()
+
+
+def test_chat_with_tools_streams_deltas_and_assembles_tool_calls(monkeypatch):
+    """
+    Regression: the agent loop used to wait for the whole completion and then
+    emit it as a single STREAM blob, so the UI showed "Working..." followed by
+    a dump. Deltas must reach the caller while tool calls are still assembled.
+    """
+    import asyncio
+    import codepilot.engine.provider as provider_module
+
+    captured: dict = {}
+    chunks = [
+        _stream_chunk(reasoning="think "),
+        _stream_chunk(reasoning="hard"),
+        _stream_chunk(content="Hel"),
+        _stream_chunk(content="lo"),
+        _stream_chunk(tool_calls=[SimpleNamespace(
+            index=0,
+            id="call_9",
+            function=SimpleNamespace(name="view_file", arguments='{"path": '),
+        )]),
+        _stream_chunk(tool_calls=[SimpleNamespace(
+            index=0,
+            id=None,
+            function=SimpleNamespace(name=None, arguments='"a.py"}'),
+        )]),
+        _stream_chunk(finish="tool_calls"),
+    ]
+
+    async def fake_acompletion(**kwargs):
+        captured.update(kwargs)
+        return _async_iter(chunks)
+
+    monkeypatch.setattr(provider_module, "_litellm", lambda: SimpleNamespace(
+        acompletion=fake_acompletion,
+        suppress_debug_info=True,
+    ))
+
+    p = LiteLLMProvider(provider="alibaba", model="deepseek-v4.1-flash", api_key="k")
+    text: list = []
+    thinking: list = []
+    resp = asyncio.run(p.chat_with_tools(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[{"type": "function", "function": {"name": "view_file", "parameters": {}}}],
+        max_tokens=64,
+        on_text=text.append,
+        on_thinking=thinking.append,
+    ))
+
+    assert captured["stream"] is True
+    assert captured["_skip_mcp_handler"] is True
+    assert text == ["Hel", "lo"], "content deltas must be forwarded incrementally"
+    assert "".join(thinking) == "think hard"
+    assert resp.text == "Hello"
+    assert resp.stop_reason == "tool_calls"
+    assert resp.reasoning_content == "think hard"
+    assert len(resp.tool_calls) == 1
+    assert resp.tool_calls[0].call_id == "call_9"
+    assert resp.tool_calls[0].name == "view_file"
+    assert resp.tool_calls[0].arguments == {"path": "a.py"}
+
+
+def test_chat_with_tools_stays_non_streaming_for_anthropic(monkeypatch):
+    """
+    Anthropic extended thinking replays signed blocks that are only complete on
+    the full response, so that route must ignore the streaming callbacks.
+    """
+    import asyncio
+    import codepilot.engine.provider as provider_module
+
+    captured: dict = {}
+
+    async def fake_acompletion(**kwargs):
+        captured.update(kwargs)
+        return _fake_response()
+
+    monkeypatch.setattr(provider_module, "_litellm", lambda: SimpleNamespace(
+        acompletion=fake_acompletion,
+        suppress_debug_info=True,
+    ))
+
+    p = LiteLLMProvider(provider="anthropic", model="claude-sonnet-5", api_key="k")
+    text: list = []
+    resp = asyncio.run(p.chat_with_tools(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[],
+        max_tokens=64,
+        on_text=text.append,
+    ))
+
+    assert "stream" not in captured
+    assert text == []
+    assert resp.thinking_blocks[0]["signature"] == "sig"
+
+
+def test_streaming_accumulator_accepts_dict_deltas():
+    from codepilot.core.tool_protocol import StreamingToolCallAccumulator
+
+    acc = StreamingToolCallAccumulator()
+    acc.feed([{"index": 0, "id": "c1", "function": {"name": "f", "arguments": '{"a": 1}'}}])
+    calls = acc.finish()
+    assert len(calls) == 1
+    assert calls[0].call_id == "c1"
+    assert calls[0].name == "f"
+    assert calls[0].arguments == {"a": 1}

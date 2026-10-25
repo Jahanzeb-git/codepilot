@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 class _EditResult:
     """Outcome of a single search-and-replace attempt."""
 
-    __slots__ = ("ok", "new_content", "removed_lines", "added_lines", "error", "warning")
+    __slots__ = ("ok", "new_content", "removed_lines", "added_lines", "start_line", "error", "warning")
 
     def __init__(
         self,
@@ -58,6 +58,7 @@ class _EditResult:
         new_content: str = "",
         removed_lines: int = 0,
         added_lines: int = 0,
+        start_line: int = 0,
         error: str = "",
         warning: str = "",
     ):
@@ -65,6 +66,7 @@ class _EditResult:
         self.new_content  = new_content
         self.removed_lines = removed_lines
         self.added_lines   = added_lines
+        self.start_line    = start_line
         self.error        = error
         self.warning      = warning
 
@@ -387,6 +389,7 @@ def _build_result(
         new_content=new_content,
         removed_lines=removed,
         added_lines=added,
+        start_line=start + 1,
     )
 
 
@@ -741,10 +744,17 @@ class FilesystemTools:
             delta_str = f"Δ{delta:+d}" if delta != 0 else "Δ0"
             cache_note = " (from cache)" if cache_id is not None else ""
 
+            start = result.start_line or 1
+            if result.added_lines > 1:
+                region_label = f"lines {start}-{start + result.added_lines - 1}"
+            else:
+                region_label = f"line {start}"
+
             msg = (
                 f"[edit_file] '{path}' updated{cache_note}: "
-                f"replaced {result.removed_lines}-line region with {result.added_lines} lines "
-                f"({delta_str}). File now has {total_lines} lines."
+                f"replaced {result.removed_lines} lines at {region_label} "
+                f"with {result.added_lines} lines ({delta_str}). "
+                f"File now has {total_lines} lines."
             )
             if result.warning:
                 msg += f"\n[Notice] {result.warning}"

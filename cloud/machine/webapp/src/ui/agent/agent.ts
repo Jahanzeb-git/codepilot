@@ -4,13 +4,33 @@ import { icon } from "../icons";
 import { loadActiveSession, saveActiveSession } from "../../state/store";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
+import {
+  activitySummary,
+  enrichToolRecord,
+  formatDuration,
+  kindBreakdown,
+  parseLegacyArguments,
+  parseToolArguments,
+  describeTool,
+  type ToolRecord,
+} from "./toolPresentation";
+import { Odometer } from "./odometer";
 
 type FileWrittenHandler = (path: string) => void;
 
 /**
- * Redesigned agent chat: append-only DOM rendering (no full re-render per
- * token) for speed, with dedicated cards for tool calls, permission gates,
- * and ask_user prompts instead of dumping them as plain text.
+ * Agent chat panel.
+ *
+ * Layout contract:
+ *   - The transcript is append-only. Tokens never re-render the whole list.
+ *   - Tool activity lives in a dock that grows out of the composer, so the
+ *     user's eye stays on the input while work happens.
+ *   - When a turn ends, the same records collapse into a summary chip placed
+ *     *after* the reply, so history stays readable minutes later.
+ *
+ * Both paths — live websocket events and replayed session files — feed the
+ * same ToolRecord model, which is why a resumed conversation looks identical
+ * to one that just ran.
  */
 export class AgentPanel {
   private el: HTMLElement;
@@ -18,32 +38,45 @@ export class AgentPanel {
   private composer: HTMLTextAreaElement;
   private sendBtn: HTMLButtonElement;
   private abortBtn: HTMLButtonElement;
+  private permissionBarEl: HTMLElement;
 
+  // Streaming state for the current assistant block.
   private currentThinkingEl: HTMLElement | null = null;
   private currentThinkingBoxEl: HTMLElement | null = null;
   private currentTextEl: HTMLElement | null = null;
-  private currentRawText: string = "";
+  private currentRawText = "";
+  private currentStreamFrame: number | null = null;
   private inThinking = false;
 
+  // Current turn.
   private currentTurnEl: HTMLElement | null = null;
-  private currentWorkingBoxEl: HTMLElement | null = null;
-  private currentWorkingListEl: HTMLElement | null = null;
-  private currentWorkingTimerEl: HTMLElement | null = null;
-  private currentPills = new Set<string>();
-  private currentTimerInterval: any = null;
-  private currentTurnStartTime: number = 0;
-  private turnHasToolCalls = false;
+  private turnRecords: ToolRecord[] = [];
+  private liveRows = new Map<number, HTMLElement>();
+  private recordSeq = 0;
+  private lastActivity: ToolRecord | null = null;
+  private turnStart = 0;
+  private turnTimer: number | null = null;
 
-  // Permission gate: expands inline above the composer without hiding it,
-  // so the person can keep typing while a tool call is awaiting approval.
-  private permissionBarEl: HTMLElement | null = null;
+  // Activity dock (grows out of the composer).
+  private dockEl: HTMLElement;
+  private dockListEl: HTMLElement;
+  private dockTitleEl: HTMLElement;
+  private dockSubEl: HTMLElement;
+  private dockTimeEl: HTMLElement;
+  private dockCountEl: HTMLElement;
+  private dockUnitEl: HTMLElement;
+  private odometer: Odometer;
+  private dockOpen = false;
+  private dockClearTimer: number | null = null;
+
+  // Permission gate.
   private pendingPermission: { tool: string; description: string } | null = null;
   private permissionKeyHandler: ((e: KeyboardEvent) => void) | null = null;
 
-  // Custom dropdown state
   private activeSession: string;
   private sessionsList: any[] = [];
   private fileWrittenHandlers = new Set<FileWrittenHandler>();
+  private stickToBottom = true;
 
   constructor(container: HTMLElement) {
     this.activeSession = loadActiveSession();
@@ -60,6 +93,22 @@ export class AgentPanel {
       </div>
       <div class="agent-messages"></div>
       <div class="agent-composer">
+        <div class="activity-dock">
+          <div class="activity-shell">
+            <div class="activity-head" role="button" tabindex="0" aria-expanded="false">
+              <span class="activity-orb"></span>
+              <span class="activity-title">Working</span>
+              <span class="activity-sub"></span>
+              <span class="activity-meter">
+                <span class="activity-count"></span>
+                <span class="activity-unit">tools</span>
+              </span>
+              <span class="activity-time">0.0s</span>
+              <span class="activity-chev">${icon("chevDown")}</span>
+            </div>
+            <div class="activity-list"></div>
+          </div>
+        </div>
         <div class="permission-bar"></div>
         <div class="composer-box">
           <textarea rows="1" placeholder="Message the agent…"></textarea>
@@ -82,11 +131,29 @@ export class AgentPanel {
     this.abortBtn = this.el.querySelector(".abort-btn")!;
     this.permissionBarEl = this.el.querySelector(".permission-bar")!;
 
+    this.dockEl = this.el.querySelector(".activity-dock")!;
+    this.dockListEl = this.el.querySelector(".activity-list")!;
+    this.dockTitleEl = this.el.querySelector(".activity-title")!;
+    this.dockSubEl = this.el.querySelector(".activity-sub")!;
+    this.dockTimeEl = this.el.querySelector(".activity-time")!;
+    this.dockCountEl = this.el.querySelector(".activity-count")!;
+    this.dockUnitEl = this.el.querySelector(".activity-unit")!;
+    this.odometer = new Odometer(this.dockCountEl);
+
     this.renderEmptyState();
 
     this.el.querySelector('[data-act="new-session"]')!.addEventListener("click", () => this.newSession());
     this.el.querySelector('[data-act="sessions"]')!.addEventListener("click", () => {
       agentSocket.send({ type: "event", event_type: "list_sessions" });
+    });
+
+    this.dockEl.querySelector(".activity-head")!.addEventListener("click", () => this.toggleDock());
+    this.dockEl.querySelector(".activity-head")!.addEventListener("keydown", (e) => {
+      const key = (e as KeyboardEvent).key;
+      if (key === "Enter" || key === " ") {
+        e.preventDefault();
+        this.toggleDock();
+      }
     });
 
     this.abortBtn.addEventListener("click", () => this.abort());
@@ -110,6 +177,11 @@ export class AgentPanel {
     });
     this.sendBtn.disabled = true;
 
+    this.messagesEl.addEventListener("scroll", () => {
+      const distance = this.messagesEl.scrollHeight - this.messagesEl.scrollTop - this.messagesEl.clientHeight;
+      this.stickToBottom = distance < 64;
+    });
+
     agentSocket.onConnectionChange((c) => {
       const el = this.el.querySelector("[data-conn]")!;
       el.textContent = c ? "" : "reconnecting…";
@@ -121,6 +193,8 @@ export class AgentPanel {
     this.fileWrittenHandlers.add(h);
   }
 
+  // --------------------------------------------------------------- sessions
+
   private renderSessionsModal() {
     const existing = document.getElementById("sessions-modal");
     if (existing) existing.remove();
@@ -128,15 +202,15 @@ export class AgentPanel {
     const overlay = document.createElement("div");
     overlay.id = "sessions-modal";
     overlay.className = "modal-overlay";
-    
+
     let listHtml = "";
     for (const s of this.sessionsList) {
       const isActive = s.session_id === this.activeSession;
       const date = new Date(s.updated_at * 1000).toLocaleString();
       listHtml += `
-        <div class="session-card ${isActive ? 'active' : ''}" data-id="${s.session_id}">
+        <div class="session-card ${isActive ? "active" : ""}" data-id="${s.session_id}">
           <div class="session-card-header">
-            <span class="session-card-title">${isActive ? '<span class="session-active-dot"></span>' : ''}${escapeHtml(s.session_id)}</span>
+            <span class="session-card-title">${isActive ? '<span class="session-active-dot"></span>' : ""}${escapeHtml(s.session_id)}</span>
             <span class="session-card-date">${date}</span>
           </div>
           <div class="session-card-snippet">${escapeHtml(s.snippet)}</div>
@@ -186,7 +260,7 @@ export class AgentPanel {
   }
 
   private newSession() {
-    const id = `session_${Date.now()}`; // Backend will replace it correctly if we want, or just a timestamp
+    const id = `session_${Date.now()}`;
     agentSocket.send({ type: "event", event_type: "new_session", session_id: id });
   }
 
@@ -195,37 +269,38 @@ export class AgentPanel {
     agentSocket.send({ type: "event", event_type: "switch_session", session_id: id });
   }
 
-  // ---------------------------------------------------------------- send
+  // ------------------------------------------------------------------- send
 
   private send() {
     const text = this.composer.value.trim();
     if (!text) return;
 
     // If a permission gate is open, typing + sending means "reject this
-    // call, then immediately run what I typed" — reject first, then fall
-    // through to the normal send so the two happen back-to-back.
-    if (this.pendingPermission) {
-      this.resolvePermission(false);
-    }
+    // call, then immediately run what I typed".
+    if (this.pendingPermission) this.resolvePermission(false);
 
-    this.appendUserMessage(text);
+    if (this.currentTurnEl) this.finalizeTurn();
+    this.appendUserTurn(text, true);
     agentSocket.send({ type: "task", text });
+
     this.composer.value = "";
     this.composer.style.height = "auto";
     this.sendBtn.disabled = true;
     this.setRunning(true);
+    this.scrollToBottom(true);
   }
 
   private abort() {
     agentSocket.send({ type: "event", event_type: "abort" });
     this.setRunning(false);
+    this.finalizeTurn();
   }
 
   private setRunning(running: boolean) {
     this.abortBtn.style.display = running ? "flex" : "none";
   }
 
-  // ------------------------------------------------------------ inbound
+  // ---------------------------------------------------------------- inbound
 
   private handleInbound(msg: AgentInbound) {
     switch (msg.type) {
@@ -241,9 +316,6 @@ export class AgentPanel {
         break;
       case "tool_result":
         this.appendToolResult(msg.tool, msg.result);
-        if ((msg.tool === "write_file" || msg.tool === "edit_file") && typeof msg.result === "string") {
-          // Best-effort: surface which file to refresh — args carried the path on tool_call.
-        }
         break;
       case "ask_user":
         this.appendAskUser(msg.question);
@@ -273,95 +345,18 @@ export class AgentPanel {
       case "session_switched":
         this.activeSession = msg.session_id;
         saveActiveSession(msg.session_id);
-        this.messagesEl.innerHTML = "";
-        
+        this.resetTurnState();
         if (msg.history && Array.isArray(msg.history)) {
-          this.currentTurnEl = null;
-          this.currentWorkingBoxEl = null;
-
-          for (const item of msg.history) {
-            if (item.role === "user") {
-              const text = item.content || "";
-              if (text.startsWith("[EXECUTION RESULT]") || text.startsWith("[SYSTEM]") || text.startsWith("[TOOL_RESULT]")) {
-                continue;
-              }
-              let userText = text;
-              if (userText.includes("[USER INPUT]")) {
-                userText = userText.split("[USER INPUT]")[1].trim();
-              }
-              if (userText) {
-                if (this.currentTurnEl) this.finalizeTurn();
-                this.appendUserMessage(userText);
-              }
-            } else if (item.role === "assistant") {
-              if (!this.currentTurnEl) {
-                // In case assistant responds without a preceding user message
-                this.appendUserMessage("...");
-              }
-              let content = item.content || "";
-              
-              // Remove payload blocks
-              content = content.replace(/```[a-zA-Z0-9_.-]+\s+filename=[^\n]+\n<<<<<<< CONTENT[\s\S]*?>>>>>>> CONTENT\n```/g, "");
-              
-              // Extract tools
-              const toolCalls: string[] = [];
-              content = content.replace(/```codepilot\n([\s\S]*?)\n```/g, (match: string, code: string) => {
-                const lines = code.split("\\n");
-                for (const line of lines) {
-                  const m = line.trim().match(/^([a-zA-Z0-9_]+)\(/);
-                  if (m) toolCalls.push(m[1]);
-                }
-                return "";
-              });
-
-              content = content.trim();
-              if (content) {
-                const bubble = this.appendAgentBlock("bubble", "");
-                Promise.resolve(marked.parse(content)).then((html) => {
-                  bubble.innerHTML = DOMPurify.sanitize(html as string);
-                  bubble.querySelectorAll("pre").forEach(pre => {
-                    const codeEl = pre.querySelector("code");
-                    let lang = "text";
-                    if (codeEl) {
-                      const match = codeEl.className.match(/language-(\w+)/);
-                      if (match) lang = match[1];
-                    }
-                    const header = document.createElement("div");
-                    header.className = "code-header";
-                    header.innerHTML = `<span>${escapeHtml(lang)}</span><button class="icon-btn copy-btn" title="Copy code">${icon("files")}</button>`;
-                    header.querySelector(".copy-btn")!.addEventListener("click", () => {
-                      navigator.clipboard.writeText(codeEl?.textContent || "");
-                      const btn = header.querySelector(".copy-btn")!;
-                      btn.innerHTML = icon("check");
-                      setTimeout(() => btn.innerHTML = icon("files"), 2000);
-                    });
-                    pre.insertBefore(header, pre.firstChild);
-                  });
-                });
-              }
-
-              for (const tool of toolCalls) {
-                this.appendToolCall(tool, null);
-                this.appendToolResult(tool, null);
-              }
-            }
-          }
-          if (this.currentTurnEl) {
-            this.finalizeTurn();
-          }
-        }
-        
-        if (this.messagesEl.children.length === 0) {
-          this.renderEmptyState();
+          this.renderHistory(msg.history);
         } else {
-          this.scrollToBottom();
+          this.messagesEl.replaceChildren();
+          this.renderEmptyState();
         }
         this.setRunning(false);
         break;
       case "session_deleted":
         this.sessionsList = this.sessionsList.filter((s) => s.session_id !== msg.session_id);
-        const existing = document.getElementById("sessions-modal");
-        if (existing) this.renderSessionsModal(); // re-render if open
+        if (document.getElementById("sessions-modal")) this.renderSessionsModal();
         break;
       case "settings_updated":
         this.appendSystemNote(msg.success ? "Settings updated." : `Settings update failed: ${msg.message}`);
@@ -369,112 +364,567 @@ export class AgentPanel {
     }
   }
 
+  // --------------------------------------------------------- streaming text
+
   private handleStream(text: string) {
     this.clearEmptyState();
-    if (text === "<thinking>\n") {
-      this.inThinking = true;
-      this.currentThinkingEl = this.appendThinkingBlock();
-      return;
-    }
-    if (text === "\n</thinking>\n") {
-      this.inThinking = false;
-      this.currentThinkingEl = null;
-      // Thinking is done — collapse it now that the visible reply is about
-      // to start streaming. Still toggle-able via its header at any time.
-      if (this.currentThinkingBoxEl) {
-        this.currentThinkingBoxEl.dataset.open = "false";
-        this.currentThinkingBoxEl.querySelector(".thinking-pulse")?.remove();
-      }
-      return;
-    }
-    if (this.inThinking) {
-      if (!this.currentThinkingEl) {
-        this.currentThinkingEl = this.appendThinkingBlock();
-      }
-      this.currentThinkingEl.textContent += text;
-      if (this.currentThinkingBoxEl?.dataset.open === "true") {
-        this.currentThinkingBoxEl.querySelector(".thinking-body")!.scrollTop = this.currentThinkingEl.scrollHeight;
-      }
-    } else {
-      if (!this.currentTextEl) {
-        this.currentTextEl = this.appendAgentBlock("bubble", "");
-        this.currentRawText = "";
-      }
-      this.currentRawText += text;
-      Promise.resolve(marked.parse(this.currentRawText)).then((html) => {
-        if (this.currentTextEl) {
-          this.currentTextEl.innerHTML = DOMPurify.sanitize(html as string);
-          this.currentTextEl.querySelectorAll("pre").forEach(pre => {
-            const codeEl = pre.querySelector("code");
-            let lang = "text";
-            if (codeEl) {
-              const match = codeEl.className.match(/language-(\w+)/);
-              if (match) lang = match[1];
-            }
-            const header = document.createElement("div");
-            header.className = "code-header";
-            // Use SVG string for copy directly if icon("copy") doesn't exist, but icon("copy") is generally safe.
-            header.innerHTML = `<span>${escapeHtml(lang)}</span><button class="icon-btn copy-btn" title="Copy code">${icon("files")}</button>`;
-            header.querySelector(".copy-btn")!.addEventListener("click", () => {
-              navigator.clipboard.writeText(codeEl?.textContent || "");
-              const btn = header.querySelector(".copy-btn")!;
-              btn.innerHTML = icon("check");
-              setTimeout(() => btn.innerHTML = icon("files"), 2000);
-            });
-            pre.insertBefore(header, pre.firstChild);
-          });
+    let rest = text;
+
+    while (rest.length > 0) {
+      if (!this.inThinking) {
+        const open = rest.indexOf("<thinking>\n");
+        if (open === -1) {
+          this.appendContent(rest);
+          break;
         }
-      });
+        if (open > 0) this.appendContent(rest.slice(0, open));
+        this.inThinking = true;
+        this.currentThinkingEl = this.appendThinkingBlock();
+        rest = rest.slice(open + "<thinking>\n".length);
+      } else {
+        const close = rest.indexOf("</thinking>");
+        if (close === -1) {
+          this.appendThinking(rest);
+          break;
+        }
+        if (close > 0) this.appendThinking(rest.slice(0, close));
+        this.endThinking();
+        rest = rest.slice(close + "</thinking>".length);
+        if (rest.startsWith("\n")) rest = rest.slice(1);
+      }
     }
+
     this.scrollToBottom();
   }
 
+  private appendContent(text: string) {
+    if (!text) return;
+    if (!this.currentTextEl) {
+      this.currentTextEl = this.appendAgentBubble();
+      this.currentRawText = "";
+    }
+    this.currentRawText += text;
+    this.scheduleStreamRender();
+    if (!this.hasRunningTool()) {
+      this.updateDockHeader();
+      this.peekDock();
+    }
+  }
+
+  private scheduleStreamRender() {
+    if (this.currentStreamFrame != null) return;
+    this.currentStreamFrame = requestAnimationFrame(() => {
+      this.currentStreamFrame = null;
+      if (!this.currentTextEl) return;
+      this.renderMarkdown(this.currentTextEl, this.currentRawText);
+      this.scrollToBottom();
+    });
+  }
+
+  /** Render the buffered markdown immediately and cancel any queued frame. */
+  private flushStreamRender() {
+    if (this.currentStreamFrame != null) {
+      cancelAnimationFrame(this.currentStreamFrame);
+      this.currentStreamFrame = null;
+    }
+    if (this.currentTextEl && this.currentRawText) {
+      this.renderMarkdown(this.currentTextEl, this.currentRawText);
+    }
+  }
+
+  private appendThinking(text: string) {
+    if (!text) return;
+    if (!this.currentThinkingEl) this.currentThinkingEl = this.appendThinkingBlock();
+    this.currentThinkingEl.textContent += text;
+    if (this.currentThinkingBoxEl?.dataset.open === "true") {
+      const body = this.currentThinkingBoxEl.querySelector(".thinking-body") as HTMLElement | null;
+      if (body) body.scrollTop = body.scrollHeight;
+    }
+  }
+
+  private endThinking() {
+    this.inThinking = false;
+    this.currentThinkingEl = null;
+    if (this.currentThinkingBoxEl) {
+      this.currentThinkingBoxEl.dataset.open = "false";
+      this.currentThinkingBoxEl.querySelector(".thinking-pulse")?.remove();
+    }
+  }
+
+  // ---------------------------------------------------------- turn building
+
+  private appendUserTurn(text: string, live: boolean): HTMLElement {
+    this.clearEmptyState();
+    this.resetStreamState();
+
+    const turnEl = document.createElement("div");
+    turnEl.className = "turn-wrapper";
+
+    if (text) {
+      const wrap = document.createElement("div");
+      wrap.className = "msg user";
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+      bubble.textContent = text;
+      wrap.appendChild(bubble);
+      turnEl.appendChild(wrap);
+    }
+
+    this.messagesEl.appendChild(turnEl);
+    this.currentTurnEl = turnEl;
+
+    if (live) this.beginLiveTurn();
+    this.scrollToBottom(true);
+    return turnEl;
+  }
+
+  private beginLiveTurn() {
+    if (this.turnTimer !== null) clearInterval(this.turnTimer);
+    this.turnRecords = [];
+    this.recordSeq = 0;
+    this.liveRows.clear();
+    this.lastActivity = null;
+    this.odometer.set(0, true);
+    this.dockListEl.replaceChildren();
+    this.closeDock(true);
+    this.dockTimeEl.textContent = "0.0s";
+    this.dockSubEl.textContent = "";
+    this.dockTitleEl.textContent = "Working";
+    this.turnStart = Date.now();
+    this.turnTimer = window.setInterval(() => {
+      this.dockTimeEl.textContent = formatDuration(Date.now() - this.turnStart);
+    }, 120);
+  }
+
   private finalizeTurn() {
+    if (this.turnTimer !== null) {
+      clearInterval(this.turnTimer);
+      this.turnTimer = null;
+    }
+
+    // Make sure the last markdown frame lands even if finalize beat the rAF.
+    this.flushStreamRender();
+    if (this.currentThinkingBoxEl) {
+      this.currentThinkingBoxEl.dataset.open = "false";
+      this.currentThinkingBoxEl.querySelector(".thinking-pulse")?.remove();
+    }
+
+    const elapsed = this.turnStart > 0 ? Date.now() - this.turnStart : null;
+    for (const record of this.turnRecords) {
+      if (record.state === "running") {
+        record.state = "ok";
+        record.endedAt = Date.now();
+      }
+    }
+
+    if (this.currentTurnEl && this.turnRecords.length > 0) {
+      this.appendSummaryChip(this.currentTurnEl, this.turnRecords, elapsed);
+    }
+
     this.currentTextEl = null;
     this.currentThinkingEl = null;
     this.currentThinkingBoxEl = null;
     this.currentRawText = "";
     this.inThinking = false;
+    this.currentTurnEl = null;
+    this.turnRecords = [];
+    this.liveRows.clear();
+    this.lastActivity = null;
+    this.turnStart = 0;
+    this.closeDock();
+  }
 
-    if (this.currentTimerInterval) {
-      clearInterval(this.currentTimerInterval);
-      this.currentTimerInterval = null;
-    }
-
-    if (this.currentWorkingBoxEl) {
-      if (this.turnHasToolCalls) {
-        // Auto-collapse once the task finishes — still expandable by clicking
-        // the header at any point later.
-        this.currentWorkingBoxEl.classList.add("collapsed");
-        const spinner = this.currentWorkingBoxEl.querySelector(".working-spinner");
-        if (spinner) {
-          spinner.innerHTML = icon("check");
-          spinner.classList.add("done");
-        }
-      } else {
-        // Plain conversation, no tools ever ran — the box was never shown.
-        this.currentWorkingBoxEl.remove();
-      }
-    }
-
-    // Built here (not at turn-start) and appended now, on purpose: this
-    // makes it land after the markdown response in DOM order, at the very
-    // bottom of the turn, since finalizeTurn() only runs once streaming
-    // is fully done — exactly where "files touched, once the task is
-    // complete" belongs, not sandwiched between the working box and the
-    // response text.
-    if (this.currentTurnEl && this.currentPills.size > 0) {
-      const pillsEl = document.createElement("div");
-      pillsEl.className = "file-pills";
-      pillsEl.innerHTML = Array.from(this.currentPills).map(p => {
-        const name = p.split("/").pop();
-        return `<span class="pill">${icon("openFile")} ${escapeHtml(name!)}</span>`;
-      }).join("");
-      this.currentTurnEl.appendChild(pillsEl);
+  private resetStreamState() {
+    this.currentTextEl = null;
+    this.currentThinkingEl = null;
+    this.currentThinkingBoxEl = null;
+    this.currentRawText = "";
+    this.inThinking = false;
+    if (this.currentStreamFrame != null) {
+      cancelAnimationFrame(this.currentStreamFrame);
+      this.currentStreamFrame = null;
     }
   }
 
-  // ------------------------------------------------------------ render
+  private resetTurnState() {
+    if (this.turnTimer !== null) {
+      clearInterval(this.turnTimer);
+      this.turnTimer = null;
+    }
+    this.resetStreamState();
+    this.turnRecords = [];
+    this.liveRows.clear();
+    this.lastActivity = null;
+    this.currentTurnEl = null;
+    this.turnStart = 0;
+    this.closeDock(true);
+  }
+
+  // ------------------------------------------------------------ live tooling
+
+  private appendToolCall(tool: string, rawArgs: unknown, label?: string) {
+    this.clearEmptyState();
+    // Flush any pending token frame before the step switches to tool output,
+    // otherwise the last unrendered markdown chunk is dropped.
+    this.flushStreamRender();
+    this.currentTextEl = null;
+    this.currentRawText = "";
+
+    const args = parseToolArguments(rawArgs);
+    const rawOpaque = rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)
+      ? (rawArgs as Record<string, unknown>)
+      : null;
+
+    // Lifecycle sentinels such as task(finish) aren't user-visible work.
+    if (describeTool(tool, args ?? rawOpaque).hidden) return;
+
+    // The runtime emits TOOL_CALL before dispatch, and most tools emit their
+    // own TOOL_CALL again (sometimes with different argument shapes). The two
+    // arrive back-to-back, so collapse same-name events inside a short window.
+    // A genuine repeat has a completed result in between.
+    const last = this.turnRecords[this.turnRecords.length - 1];
+    if (last && last.state === "running" && last.name === tool && Date.now() - last.startedAt < 250) {
+      if (label && !last.descriptor.target) {
+        last.descriptor.target = label.length > 60 ? `${label.slice(0, 59)}…` : label;
+        const row = this.liveRows.get(last.id);
+        if (row) this.syncActivityRow(row, last);
+      }
+      return;
+    }
+
+    const record = this.makeRecord(tool, args ?? rawOpaque, undefined, Date.now());
+    if (label && !record.descriptor.target) {
+      record.descriptor.target = label.length > 60 ? `${label.slice(0, 59)}…` : label;
+    }
+
+    this.turnRecords.push(record);
+    this.lastActivity = record;
+
+    const row = this.renderActivityRow(record);
+    this.liveRows.set(record.id, row);
+    this.dockListEl.appendChild(row);
+
+    this.openDock();
+    this.odometer.set(this.turnRecords.length);
+    this.updateDockHeader();
+    this.dockListEl.scrollTop = this.dockListEl.scrollHeight;
+    this.scrollToBottom();
+
+    if ((tool === "write_file" || tool === "edit_file" || tool === "find_and_replace_many" || tool === "block") && record.args) {
+      const path = record.args.path ?? record.args.file_path;
+      if (typeof path === "string") this.fileWrittenHandlers.forEach((h) => h(path));
+    }
+  }
+
+  private appendToolResult(tool: string, result: unknown) {
+    const record = [...this.turnRecords].reverse().find((r) => r.state === "running" && r.name === tool);
+    if (!record) return;
+
+    const text = result == null ? "" : typeof result === "string" ? result : String(result);
+    enrichToolRecord(record, text);
+    this.lastActivity = record;
+
+    const row = this.liveRows.get(record.id);
+    if (row) this.syncActivityRow(row, record);
+    this.updateDockHeader();
+  }
+
+  private makeRecord(
+    name: string,
+    args: Record<string, unknown> | null,
+    result?: string,
+    startedAt: number | null = Date.now(),
+  ): ToolRecord {
+    const record: ToolRecord = {
+      id: ++this.recordSeq,
+      name,
+      args,
+      descriptor: describeTool(name, args),
+      state: "running",
+      result: "",
+      startedAt: startedAt ?? 0,
+      endedAt: null,
+    };
+    if (result !== undefined) {
+      enrichToolRecord(record, result);
+      record.startedAt = 0;
+      record.endedAt = null;
+    }
+    return record;
+  }
+
+  private hasRunningTool(): boolean {
+    return this.turnRecords.some((r) => r.state === "running");
+  }
+
+  // ----------------------------------------------------------- activity dock
+
+  private openDock() {
+    if (this.dockClearTimer !== null) {
+      clearTimeout(this.dockClearTimer);
+      this.dockClearTimer = null;
+    }
+    this.dockEl.classList.add("open");
+    this.dockEl.classList.remove("peek");
+    this.dockEl.querySelector(".activity-head")?.setAttribute("aria-expanded", "true");
+    this.dockOpen = true;
+    this.dockTimeEl.textContent = formatDuration(Date.now() - this.turnStart);
+  }
+
+  private peekDock() {
+    if (!this.dockOpen || this.turnRecords.length === 0) return;
+    this.dockEl.classList.add("peek");
+    this.dockEl.querySelector(".activity-head")?.setAttribute("aria-expanded", "false");
+  }
+
+  private closeDock(immediate = false) {
+    if (this.dockClearTimer !== null) {
+      clearTimeout(this.dockClearTimer);
+      this.dockClearTimer = null;
+    }
+    this.dockEl.classList.remove("open", "peek");
+    this.dockEl.querySelector(".activity-head")?.setAttribute("aria-expanded", "false");
+    this.dockOpen = false;
+
+    const clear = () => {
+      if (!this.dockOpen) this.dockListEl.replaceChildren();
+      this.dockClearTimer = null;
+    };
+    if (immediate) clear();
+    else this.dockClearTimer = window.setTimeout(clear, 380);
+  }
+
+  private toggleDock() {
+    if (!this.dockOpen) return;
+    const peeked = this.dockEl.classList.toggle("peek");
+    this.dockEl.querySelector(".activity-head")?.setAttribute("aria-expanded", String(!peeked));
+  }
+
+  private updateDockHeader() {
+    const running = this.hasRunningTool();
+    this.dockTitleEl.textContent = running ? "Working" : this.currentTextEl ? "Responding" : "Working";
+    this.dockSubEl.textContent = this.lastActivity ? activitySummary(this.lastActivity) : "";
+    this.dockUnitEl.textContent = this.turnRecords.length === 1 ? "tool" : "tools";
+    this.dockEl.dataset.busy = running ? "true" : "false";
+  }
+
+  private renderActivityRow(record: ToolRecord): HTMLElement {
+    const row = document.createElement("div");
+    row.className = "activity-row";
+    row.dataset.state = record.state;
+    row.dataset.kind = record.descriptor.kind;
+    row.innerHTML = `
+      <span class="row-icon">${icon(record.descriptor.icon)}</span>
+      <span class="row-text">${this.rowTextHtml(record)}</span>
+      <span class="row-state"></span>
+    `;
+    return row;
+  }
+
+  private syncActivityRow(row: HTMLElement, record: ToolRecord) {
+    row.dataset.state = record.state;
+    const textEl = row.querySelector(".row-text");
+    if (textEl) textEl.innerHTML = this.rowTextHtml(record);
+  }
+
+  private rowTextHtml(record: ToolRecord): string {
+    const { verb, target, meta } = record.descriptor;
+    let html = `<span class="row-verb">${escapeHtml(verb)}</span>`;
+    if (target) html += `<span class="row-target">${escapeHtml(target)}</span>`;
+    if (meta) html += `<span class="row-meta">${escapeHtml(meta)}</span>`;
+    return html;
+  }
+
+  // ---------------------------------------------------------- turn summary
+
+  private appendSummaryChip(turnEl: HTMLElement, records: ToolRecord[], elapsedMs: number | null) {
+    const failed = records.some((r) => r.state === "error");
+    const count = records.length;
+    const title = `${count} tool call${count === 1 ? "" : "s"}`;
+    const kinds = kindBreakdown(records);
+    const time = elapsedMs != null ? formatDuration(elapsedMs) : "";
+
+    const chip = document.createElement("div");
+    chip.className = "turn-summary";
+    chip.dataset.open = "false";
+    if (failed) chip.dataset.error = "true";
+
+    chip.innerHTML = `
+      <button class="summary-head" type="button" aria-expanded="false">
+        <span class="summary-icon">${icon(failed ? "x" : "check")}</span>
+        <span class="summary-title">${escapeHtml(title)}</span>
+        ${kinds ? `<span class="summary-kinds">${escapeHtml(kinds)}</span>` : ""}
+        ${time ? `<span class="summary-time">${escapeHtml(time)}</span>` : ""}
+        <span class="summary-chev">${icon("chevDown")}</span>
+      </button>
+      <div class="summary-body">
+        <div class="summary-inner">
+          <div class="summary-list"></div>
+        </div>
+      </div>
+    `;
+
+    const list = chip.querySelector(".summary-list")!;
+    for (const record of records) list.appendChild(this.renderSummaryRow(record));
+
+    const head = chip.querySelector(".summary-head") as HTMLButtonElement;
+    head.addEventListener("click", () => {
+      const open = chip.dataset.open === "true";
+      chip.dataset.open = open ? "false" : "true";
+      head.setAttribute("aria-expanded", String(!open));
+      if (!open) {
+        requestAnimationFrame(() => chip.scrollIntoView({ block: "nearest", behavior: "smooth" }));
+      }
+    });
+
+    turnEl.appendChild(chip);
+    this.scrollToBottom();
+  }
+
+  private renderSummaryRow(record: ToolRecord): HTMLElement {
+    const row = document.createElement("div");
+    row.className = "summary-row";
+    row.dataset.state = record.state;
+    row.dataset.kind = record.descriptor.kind;
+
+    const duration = record.startedAt > 0 && record.endedAt != null
+      ? formatDuration(record.endedAt - record.startedAt)
+      : "";
+
+    row.innerHTML = `
+      <span class="row-icon">${icon(record.descriptor.icon)}</span>
+      <span class="row-text">${this.rowTextHtml(record)}</span>
+      ${duration ? `<span class="summary-dur">${escapeHtml(duration)}</span>` : ""}
+      <span class="row-state"></span>
+    `;
+    return row;
+  }
+
+  // --------------------------------------------------------- history replay
+
+  private renderHistory(history: unknown[]) {
+    this.messagesEl.replaceChildren();
+    this.recordSeq = 0;
+
+    const results = new Map<string, string>();
+    for (const raw of history) {
+      const item = raw as any;
+      if (item && item.role === "tool" && item.tool_call_id != null) {
+        results.set(String(item.tool_call_id), String(item.content ?? ""));
+      }
+    }
+
+    let turnEl: HTMLElement | null = null;
+    let records: ToolRecord[] = [];
+
+    const flush = () => {
+      if (turnEl && records.length > 0) this.appendSummaryChip(turnEl, records, null);
+      records = [];
+      turnEl = null;
+    };
+
+    for (const raw of history) {
+      const item = raw as any;
+      if (!item || typeof item !== "object") continue;
+
+      if (item.role === "user") {
+        const content = String(item.content ?? "");
+        if (isInternalHistoryMessage(content)) continue;
+        const userText = stripUserInput(content);
+        if (!userText.trim()) continue;
+        flush();
+        turnEl = this.appendUserTurn(userText, false);
+        continue;
+      }
+
+      if (item.role !== "assistant") continue;
+      if (!turnEl) turnEl = this.appendUserTurn("", false);
+
+      const reasoning = String(item.reasoning_content ?? "").trim();
+      if (reasoning) this.appendHistoryThinking(turnEl, reasoning);
+
+      const { text, calls } = extractLegacyCalls(String(item.content ?? ""));
+      if (text.trim()) this.appendHistoryBubble(turnEl, text.trim());
+
+      const nativeCalls = Array.isArray(item.tool_calls) ? item.tool_calls : [];
+      for (const call of nativeCalls) {
+        const name = String(call?.function?.name ?? call?.name ?? "").trim();
+        if (!name) continue;
+        const args = parseToolArguments(call?.function?.arguments ?? call?.arguments);
+        if (describeTool(name, args).hidden) continue;
+        const result = call?.id != null ? results.get(String(call.id)) : undefined;
+        records.push(this.makeRecord(name, args, result, null));
+      }
+      for (const call of calls) {
+        if (describeTool(call.name, call.args).hidden) continue;
+        records.push(this.makeRecord(call.name, call.args, "", null));
+      }
+    }
+
+    flush();
+
+    if (this.messagesEl.children.length === 0) this.renderEmptyState();
+    this.scrollToBottom(true);
+  }
+
+  private appendHistoryThinking(turnEl: HTMLElement, reasoning: string) {
+    const wrap = document.createElement("div");
+    wrap.className = "msg agent";
+    const box = document.createElement("div");
+    box.className = "thinking-box";
+    box.dataset.open = "false";
+    box.innerHTML = `
+      <div class="thinking-header">
+        ${icon("brain")}
+        <span>Thought process</span>
+        <span class="thinking-chev">${icon("chevDown")}</span>
+      </div>
+      <div class="thinking-body"></div>
+    `;
+    const body = box.querySelector(".thinking-body") as HTMLElement;
+    body.textContent = reasoning;
+    box.querySelector(".thinking-header")!.addEventListener("click", () => {
+      box.dataset.open = box.dataset.open === "true" ? "false" : "true";
+    });
+    wrap.appendChild(box);
+    turnEl.appendChild(wrap);
+  }
+
+  private appendHistoryBubble(turnEl: HTMLElement, text: string) {
+    const wrap = document.createElement("div");
+    wrap.className = "msg agent";
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    wrap.appendChild(bubble);
+    turnEl.appendChild(wrap);
+    this.renderMarkdown(bubble, text);
+  }
+
+  // --------------------------------------------------------------- renderers
+
+  private renderMarkdown(el: HTMLElement, raw: string) {
+    Promise.resolve(marked.parse(raw)).then((html) => {
+      el.innerHTML = DOMPurify.sanitize(html as string);
+      el.querySelectorAll("pre").forEach((pre) => {
+        const codeEl = pre.querySelector("code");
+        let lang = "text";
+        if (codeEl) {
+          const match = codeEl.className.match(/language-(\w+)/);
+          if (match) lang = match[1];
+        }
+        const header = document.createElement("div");
+        header.className = "code-header";
+        header.innerHTML = `<span>${escapeHtml(lang)}</span><button class="icon-btn copy-btn" title="Copy code">${icon("files")}</button>`;
+        header.querySelector(".copy-btn")!.addEventListener("click", () => {
+          navigator.clipboard.writeText(codeEl?.textContent || "");
+          const btn = header.querySelector(".copy-btn")!;
+          btn.innerHTML = icon("check");
+          setTimeout(() => (btn.innerHTML = icon("files")), 2000);
+        });
+        pre.insertBefore(header, pre.firstChild);
+      });
+    });
+  }
 
   private renderEmptyState() {
     if (this.messagesEl.children.length > 0) return;
@@ -483,83 +933,23 @@ export class AgentPanel {
     el.innerHTML = `${icon("bot")}<div>Ask the agent to explore, edit, or run something in this workspace.</div>`;
     this.messagesEl.appendChild(el);
   }
+
   private clearEmptyState() {
     this.messagesEl.querySelector(".agent-empty")?.remove();
   }
 
-  private appendUserMessage(text: string) {
-    this.clearEmptyState();
-    
-    if (this.currentTimerInterval) clearInterval(this.currentTimerInterval);
-    this.currentTimerInterval = null;
-    this.currentTurnStartTime = Date.now();
-    this.currentPills.clear();
-    this.turnHasToolCalls = false;
-
-    const turnEl = document.createElement("div");
-    turnEl.className = "turn-wrapper";
-
-    const wrap = document.createElement("div");
-    wrap.className = "msg user";
-    wrap.innerHTML = `<div class="bubble"></div>`;
-    wrap.querySelector(".bubble")!.textContent = text;
-    turnEl.appendChild(wrap);
-
-    // Hidden until the first real tool call — a pure conversational turn
-    // never shows a "Working…" box at all.
-    const workingBox = document.createElement("div");
-    workingBox.className = "working-box";
-    workingBox.innerHTML = `
-      <div class="working-header">
-        <div class="working-spinner">${icon("spinner")}</div>
-        <span>Working...</span>
-        <span class="working-time">0.0s</span>
-        <span class="working-chev">${icon("chevDown")}</span>
-      </div>
-      <div class="working-list"></div>
-    `;
-    workingBox.querySelector(".working-header")!.addEventListener("click", () => {
-      workingBox.classList.toggle("collapsed");
-    });
-    turnEl.appendChild(workingBox);
-
-    this.messagesEl.appendChild(turnEl);
-    this.scrollToBottom();
-
-    this.currentTurnEl = turnEl;
-    this.currentWorkingBoxEl = workingBox;
-    this.currentWorkingListEl = workingBox.querySelector(".working-list")!;
-    this.currentWorkingTimerEl = workingBox.querySelector(".working-time")!;
-    
-    this.currentTextEl = null;
-    this.currentThinkingEl = null;
-    this.currentThinkingBoxEl = null;
-
-    this.currentTimerInterval = setInterval(() => {
-      if (this.currentWorkingTimerEl) {
-        const diff = (Date.now() - this.currentTurnStartTime) / 1000;
-        this.currentWorkingTimerEl.textContent = diff.toFixed(1) + "s";
-      }
-    }, 100) as any;
-  }
-
-  /** Appends a fresh agent message bubble, returns the element that should receive streamed markdown text. */
-  private appendAgentBlock(kind: "bubble", initial: string): HTMLElement {
+  /** Appends a fresh agent bubble, returns the element that receives markdown. */
+  private appendAgentBubble(): HTMLElement {
     const wrap = document.createElement("div");
     wrap.className = "msg agent";
     const inner = document.createElement("div");
-    inner.className = kind;
-    inner.textContent = initial;
+    inner.className = "bubble";
     wrap.appendChild(inner);
-    if (this.currentTurnEl) {
-      this.currentTurnEl.appendChild(wrap);
-    } else {
-      this.messagesEl.appendChild(wrap);
-    }
+    (this.currentTurnEl ?? this.messagesEl).appendChild(wrap);
     return inner;
   }
 
-  /** Builds a collapsible "Thinking" block: open + pulsing while streaming, auto-collapses when done, toggle-able forever after. */
+  /** Collapsible thinking box: open + pulsing while streaming, collapses at the end. */
   private appendThinkingBlock(): HTMLElement {
     const wrap = document.createElement("div");
     wrap.className = "msg agent";
@@ -579,60 +969,12 @@ export class AgentPanel {
       box.dataset.open = box.dataset.open === "true" ? "false" : "true";
     });
     wrap.appendChild(box);
-    if (this.currentTurnEl) {
-      this.currentTurnEl.appendChild(wrap);
-    } else {
-      this.messagesEl.appendChild(wrap);
-    }
+    (this.currentTurnEl ?? this.messagesEl).appendChild(wrap);
     this.currentThinkingBoxEl = box;
     return box.querySelector(".thinking-body")!;
   }
 
-  private appendToolCall(tool: string, args: unknown, label?: string) {
-    this.clearEmptyState();
-    this.currentTextEl = null;
-
-    if (!this.currentWorkingListEl) return;
-    this.turnHasToolCalls = true;
-
-    if (this.currentWorkingBoxEl) {
-      this.currentWorkingBoxEl.classList.add("visible");
-    }
-
-    const row = document.createElement("div");
-    row.className = "tool-row";
-    row.dataset.tool = tool;
-
-    row.innerHTML = `
-      <div class="tool-spinner">${icon("spinner")}</div>
-      <span class="tool-name">${escapeHtml(tool)}</span>
-      ${label ? `<span class="tool-label">${escapeHtml(label)}</span>` : ""}
-    `;
-    this.currentWorkingListEl.appendChild(row);
-
-    this.currentWorkingListEl.scrollTop = this.currentWorkingListEl.scrollHeight;
-    this.scrollToBottom();
-
-    if ((tool === "write_file" || tool === "edit_file") && args && typeof args === "object") {
-      const path = (args as any).path || (args as any).file_path;
-      if (typeof path === "string") {
-        this.currentPills.add(path);
-        this.fileWrittenHandlers.forEach((h) => h(path));
-      }
-    }
-  }
-
-  private appendToolResult(tool: string, result: unknown) {
-    if (!this.currentWorkingListEl) return;
-    const rows = Array.from(this.currentWorkingListEl.querySelectorAll(".tool-row:not([data-has-result])"));
-    const match = rows.reverse().find(r => (r as HTMLElement).dataset.tool === tool);
-    if (match) {
-      (match as HTMLElement).dataset.hasResult = "true";
-      const spinner = match.querySelector(".tool-spinner")!;
-      spinner.innerHTML = icon("check");
-      spinner.classList.add("done");
-    }
-  }
+  // ------------------------------------------------------------- interjections
 
   private appendAskUser(question: string) {
     this.clearEmptyState();
@@ -656,22 +998,19 @@ export class AgentPanel {
     input.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
     card.querySelector("button")!.addEventListener("click", submit);
     wrap.appendChild(card);
-    this.messagesEl.appendChild(wrap);
+    (this.currentTurnEl ?? this.messagesEl).appendChild(wrap);
     setTimeout(() => input.focus());
-    this.scrollToBottom();
+    this.scrollToBottom(true);
   }
 
   /**
-   * Permission gate: expands a bar above the composer with an animation.
-   * The textarea stays live throughout — the person can approve/reject via
-   * Esc / Alt+Enter, click the buttons, or just type what they actually
-   * want and hit Enter (which rejects this call, then sends the message).
+   * Permission gate: expands a bar above the composer. The textarea stays
+   * live throughout — approve/reject via Esc / Alt+Enter, the buttons, or by
+   * typing what you actually want (which rejects this call, then sends).
    */
   private appendPermission(tool: string, description: string) {
     this.clearEmptyState();
     this.currentTextEl = null;
-
-    if (!this.permissionBarEl) return;
     this.pendingPermission = { tool, description };
 
     this.permissionBarEl.innerHTML = `
@@ -725,7 +1064,7 @@ export class AgentPanel {
     const wrap = document.createElement("div");
     wrap.className = "msg agent";
     wrap.innerHTML = `<div class="card" style="color:var(--fg-1);font-size:12px">${escapeHtml(text)}</div>`;
-    this.messagesEl.appendChild(wrap);
+    (this.currentTurnEl ?? this.messagesEl).appendChild(wrap);
     this.scrollToBottom();
   }
 
@@ -733,13 +1072,62 @@ export class AgentPanel {
     const wrap = document.createElement("div");
     wrap.className = "msg agent";
     wrap.innerHTML = `<div class="card error">${escapeHtml(text)}</div>`;
-    this.messagesEl.appendChild(wrap);
-    this.scrollToBottom();
+    (this.currentTurnEl ?? this.messagesEl).appendChild(wrap);
+    this.scrollToBottom(true);
   }
 
-  private scrollToBottom() {
+  private scrollToBottom(force = false) {
+    if (!force && !this.stickToBottom) return;
     this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
   }
+}
+
+// ---------------------------------------------------------------- utilities
+
+const INTERNAL_PREFIXES = [
+  "[EXECUTION RESULT]",
+  "[SYSTEM]",
+  "[TOOL_RESULT]",
+  "[ENVIRONMENT CHANGE]",
+  "[ARCHIVED TASK",
+  "[GLOBAL SUMMARY]",
+  "[INTERNAL CONTEXT MAINTENANCE]",
+  "[Sub-Agent",
+];
+
+function isInternalHistoryMessage(content: string): boolean {
+  const trimmed = content.trimStart();
+  return INTERNAL_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
+}
+
+function stripUserInput(content: string): string {
+  const marker = "[USER INPUT]";
+  const idx = content.indexOf(marker);
+  if (idx !== -1) return content.slice(idx + marker.length).trim();
+  return content.trim();
+}
+
+/** Extract legacy ```codepilot tool lines from pre-native-calling sessions. */
+function extractLegacyCalls(content: string): {
+  text: string;
+  calls: Array<{ name: string; args: Record<string, unknown> | null }>;
+} {
+  let text = content.replace(
+    /```[a-zA-Z0-9_.-]+\s+filename=[^\n]+\n<<<<<<< CONTENT[\s\S]*?>>>>>>> CONTENT\n```/g,
+    "",
+  );
+
+  const calls: Array<{ name: string; args: Record<string, unknown> | null }> = [];
+  text = text.replace(/```codepilot\n([\s\S]*?)\n```/g, (_match: string, code: string) => {
+    for (const line of code.split("\n")) {
+      const trimmed = line.trim();
+      const match = trimmed.match(/^([a-zA-Z_][\w.]*)\(/);
+      if (match) calls.push({ name: match[1], args: parseLegacyArguments(trimmed) });
+    }
+    return "";
+  });
+
+  return { text, calls };
 }
 
 function escapeHtml(s: string): string {

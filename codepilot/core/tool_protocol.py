@@ -329,6 +329,15 @@ def build_anthropic_tool_result_content(results: List[ToolResult]) -> List[Dict]
 # Streaming tool call accumulator
 # ---------------------------------------------------------------------------
 
+def _delta_field(obj: Any, name: str, default: Any = None) -> Any:
+    """Read a field from either a pydantic delta object or a plain dict."""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
 class StreamingToolCallAccumulator:
     """
     Accumulates streaming tool-call deltas from the OpenAI streaming API
@@ -343,23 +352,41 @@ class StreamingToolCallAccumulator:
         # index → {id, name, arguments_chunks}
         self._calls: Dict[int, Dict] = {}
 
+    def _index_for(self, raw_index: Any, call_id: str) -> int:
+        """Resolve the slot a fragment belongs to.
+
+        LiteLLM normally sets ``index`` on every fragment. Some gateways omit
+        it, so fall back to the last slot — allocating a new one only when a
+        genuinely new call id shows up.
+        """
+        if raw_index is not None:
+            return int(raw_index)
+        if self._calls and call_id and call_id not in {v["id"] for v in self._calls.values()}:
+            return max(self._calls) + 1
+        return max(self._calls) if self._calls else 0
+
     def feed(self, delta_tool_calls: list) -> None:
         """Feed a list of tool_call delta objects from one streaming chunk."""
         for tc_delta in delta_tool_calls or []:
-            idx = tc_delta.index
+            call_id = _delta_field(tc_delta, "id") or ""
+            function = _delta_field(tc_delta, "function")
+            idx = self._index_for(_delta_field(tc_delta, "index"), call_id)
+
             if idx not in self._calls:
                 self._calls[idx] = {
-                    "id":   tc_delta.id or "",
-                    "name": (tc_delta.function.name or "") if tc_delta.function else "",
+                    "id":   call_id,
+                    "name": (_delta_field(function, "name") or "") if function else "",
                     "args": [],
                 }
-            if tc_delta.id:
-                self._calls[idx]["id"] = tc_delta.id
-            if tc_delta.function:
-                if tc_delta.function.name:
-                    self._calls[idx]["name"] = tc_delta.function.name
-                if tc_delta.function.arguments:
-                    self._calls[idx]["args"].append(tc_delta.function.arguments)
+            if call_id:
+                self._calls[idx]["id"] = call_id
+            if function:
+                name = _delta_field(function, "name")
+                if name:
+                    self._calls[idx]["name"] = name
+                arguments = _delta_field(function, "arguments")
+                if arguments:
+                    self._calls[idx]["args"].append(arguments)
 
     def finish(self) -> List[ToolCall]:
         """Return the complete ToolCall list after the stream has ended."""
