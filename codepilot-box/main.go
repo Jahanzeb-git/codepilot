@@ -335,13 +335,19 @@ func child() {
 	// bind mounting virtual devices using tempfs
 	must(syscall.Mount("tmpfs", filepath.Join(rootfsPath, "dev"), "tmpfs", 0, "mode=0755"))
 
+	// Every bind target below must exist before mount(2) is called — otherwise
+	// the kernel returns ENOENT and the whole launch dies with a bare
+	// "no such file or directory". Our images ship an empty /dev, so the stub
+	// files are created here rather than assumed to be present.
 	bind_files := []string{"null", "zero", "full", "random", "urandom", "tty"}
 	for _, i := range bind_files {
-		f, err := os.Create(filepath.Join(rootfsPath, "dev", i)) // creating a file on container
-		if err == nil {
-			f.Close() // close descriptor
+		target := filepath.Join(rootfsPath, "dev", i)
+		f, err := os.Create(target) // creating a file on container
+		if err != nil {
+			must(fmt.Errorf("creating /dev/%s stub: %w", i, err))
 		}
-		must(syscall.Mount(fmt.Sprintf("/dev/%s", i), filepath.Join(rootfsPath, "dev", i), "", syscall.MS_BIND, ""))
+		f.Close() // close descriptor
+		must(syscall.Mount(fmt.Sprintf("/dev/%s", i), target, "", syscall.MS_BIND, ""))
 	}
 
 	must(syscall.Mount("/sys", filepath.Join(rootfsPath, "sys"), "", syscall.MS_BIND|syscall.MS_REC, ""))
@@ -352,7 +358,17 @@ func child() {
 
 	// Bind mount the container's ptmx node over the host's /dev/ptmx node.
 	// This guarantees that any process opening /dev/ptmx gets a PTY in the container's devpts!
-	must(syscall.Mount(filepath.Join(rootfsPath, "dev", "pts", "ptmx"), filepath.Join(rootfsPath, "dev", "ptmx"), "", syscall.MS_BIND, ""))
+	//
+	// The target stub MUST exist first: a bind mount onto a missing path fails
+	// with ENOENT, which is exactly how v1.1.4 broke on fresh OCI rootfs images
+	// (their /dev is empty, unlike the old 0.9.39 image).
+	ptmxTarget := filepath.Join(rootfsPath, "dev", "ptmx")
+	if err := os.WriteFile(ptmxTarget, nil, 0666); err != nil {
+		must(fmt.Errorf("creating /dev/ptmx stub: %w", err))
+	}
+	if err := syscall.Mount(filepath.Join(rootfsPath, "dev", "pts", "ptmx"), ptmxTarget, "", syscall.MS_BIND, ""); err != nil {
+		must(fmt.Errorf("bind-mounting /dev/ptmx: %w", err))
+	}
 
 	// Set container hostname (visible to processes inside the UTS namespace).
 	_ = syscall.Sethostname([]byte("codepilot-workspace"))

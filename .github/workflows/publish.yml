@@ -50,3 +50,8 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Launcher-only releases (e.g. v1.1.5) ship the same Python version as
+          # the previous tag. Without this, PyPI rejects the duplicate upload and
+          # fails the whole release for no reason.
+          skip-existing: true
