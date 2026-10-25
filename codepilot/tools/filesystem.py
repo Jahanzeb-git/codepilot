@@ -2,130 +2,391 @@
 File: filesystem.py
 Author: Jahanzeb Ahmed <jahanzebahmed.mail@gmail.com>
 Created: 2026-04-16
-Updated: 2026-06-12
+Updated: 2026-10-25
 
-Description:
-Unified filesystem tools for the CodePilot agentic runtime.
+Filesystem tools for the CodePilot agentic runtime — native tool-calling edition.
 
-Architectural Notes:
-Provides three micro-tools:
-  - view_file:  Read file content with 1-indexed line numbers.
-  - write_file: Write or overwrite a complete file (payload block).
-  - edit_file:  Search-and-replace a unique text region.
+Tools exposed:
+  - view_file:   Read a file with 1-indexed line numbers.
+  - write_file:  Write or overwrite a file. Content arrives as a direct
+                 string argument — no payload blocks or fenced code needed.
+  - edit_file:   Search-and-replace a unique region. Uses a multi-pass
+                 forgiving algorithm so minor model mistakes in old_str
+                 still result in a correct edit instead of a hard failure.
+  - find_and_replace_many: Replace every occurrence of a literal string
+                 across an entire file.
+
+Write / edit caching:
+  When write_file or edit_file fails due to an OS error (PermissionError,
+  FileNotFoundError, etc.) the content is saved to an in-memory cache keyed
+  by a numeric ID. The model is told the ID and asked to fix the underlying
+  issue then retry with cache_id=N — no content regeneration needed.
+
+JSON argument repair:
+  If a write_file call arrives with a repaired JSON argument string (detected
+  by the protocol layer via ToolCall.was_repaired), the write still proceeds
+  and a soft warning is appended to the tool result so the model can improve
+  future calls.
 
 Copyright (c) 2026 Jahanzeb Ahmed.
 Licensed under the MIT License.
 """
 
-import os
+from __future__ import annotations
+
 from pathlib import Path
-from typing import Optional, Union, TYPE_CHECKING
+from typing import Optional, List, Tuple, TYPE_CHECKING
 
 from ..engine.hooks import EventType
 
 if TYPE_CHECKING:
-    from ..engine.runtime import Runtime
+    from ..engine.runtime import AsyncRuntime
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# Edit result — carries match outcome for one SEARCH/REPLACE chunk
 # ---------------------------------------------------------------------------
 
-class _SearchResult:
-    """Result of a single search-and-replace attempt."""
-    __slots__ = ("ok", "new_content", "old_line_count", "new_line_count", "error")
+class _EditResult:
+    """Outcome of a single search-and-replace attempt."""
+
+    __slots__ = ("ok", "new_content", "removed_lines", "added_lines", "error", "warning")
 
     def __init__(
         self,
         ok: bool,
         new_content: str = "",
-        old_line_count: int = 0,
-        new_line_count: int = 0,
+        removed_lines: int = 0,
+        added_lines: int = 0,
         error: str = "",
+        warning: str = "",
     ):
-        self.ok = ok
-        self.new_content = new_content
-        self.old_line_count = old_line_count
-        self.new_line_count = new_line_count
-        self.error = error
+        self.ok           = ok
+        self.new_content  = new_content
+        self.removed_lines = removed_lines
+        self.added_lines   = added_lines
+        self.error        = error
+        self.warning      = warning
+
+    @property
+    def old_line_count(self) -> int:
+        return self.removed_lines
+
+    @property
+    def new_line_count(self) -> int:
+        return self.added_lines
 
 
-def _apply_str_replace(file_content: str, search: str, replacement: str) -> _SearchResult:
+# ---------------------------------------------------------------------------
+# Forgiving search-and-replace algorithm
+# ---------------------------------------------------------------------------
+
+def _stripped(line: str) -> str:
+    """Strip leading and trailing whitespace from a line."""
+    return line.strip()
+
+
+def _non_blank(lines: List[str]) -> List[str]:
+    """Return only non-blank lines (preserving original strings)."""
+    return [l for l in lines if l.strip()]
+
+
+def _find_windows_stripped(file_lines: List[str], needle: List[str]) -> List[int]:
     """
-    Find a unique block of lines in *file_content* that matches *search* and
-    replace the ENTIRE matched lines with *replacement*.
+    Sliding-window search — each file line and needle line is compared
+    after stripping all leading/trailing whitespace.
+
+    Returns the list of start indices (into file_lines) where the needle
+    matches. An index i means file_lines[i:i+len(needle)] matches needle.
     """
-    # Split file into lines, preserving line endings.
-    file_lines = file_content.splitlines(keepends=True)
-
-    # Build normalised (stripped) search lines, dropping empty boundary lines.
-    raw_search_lines = search.splitlines()
-    while raw_search_lines and not raw_search_lines[0].strip():
-        raw_search_lines.pop(0)
-    while raw_search_lines and not raw_search_lines[-1].strip():
-        raw_search_lines.pop()
-
-    if not raw_search_lines:
-        return _SearchResult(
-            ok=False,
-            error=(
-                "search= is blank or whitespace-only. Provide unique, "
-                "non-blank lines from the file that uniquely identify the region "
-                "to replace."
-            ),
-        )
-
-    # Strip each search line for comparison (ignore indentation).
-    needle = [line.strip() for line in raw_search_lines]
     n = len(needle)
-
-    # Sliding window: find all positions where stripped file lines match needle.
+    stripped_needle = [_stripped(l) for l in needle]
     matches = []
     for i in range(len(file_lines) - n + 1):
-        window = [file_lines[i + j].rstrip("\n").rstrip("\r").strip() for j in range(n)]
-        if window == needle:
+        window = [_stripped(file_lines[i + j]) for j in range(n)]
+        if window == stripped_needle:
             matches.append(i)
+    return matches
 
-    if len(matches) == 0:
-        first_line = needle[0]
-        return _SearchResult(
+
+def _find_windows_exact(file_lines: List[str], needle: List[str]) -> List[int]:
+    """
+    Sliding-window search — exact match including indentation.
+    Each line is rstripped (to ignore trailing whitespace / CRLF) but
+    leading whitespace is preserved.
+
+    Returns the list of start indices where the needle matches exactly.
+    """
+    n = len(needle)
+    exact_needle = [l.rstrip() for l in needle]
+    matches = []
+    for i in range(len(file_lines) - n + 1):
+        window = [file_lines[i + j].rstrip() for j in range(n)]
+        if window == exact_needle:
+            matches.append(i)
+    return matches
+
+
+def _find_anchor_regions(
+    file_lines: List[str],
+    first_anchor: str,
+    last_anchor: str,
+    expected_n: int,
+    strip: bool = True,
+) -> List[Tuple[int, int]]:
+    """
+    Find all (start, end) index pairs where:
+      - file_lines[start] matches first_anchor
+      - file_lines[end]   matches last_anchor
+      - end - start + 1   == expected_n
+
+    When strip=True, comparison ignores indentation.
+    When strip=False, comparison is exact (rstripped).
+
+    Returns a list of (start_idx, end_idx) tuples.
+    """
+    compare = _stripped if strip else (lambda l: l.rstrip())
+    n = expected_n
+    regions = []
+    for i in range(len(file_lines) - n + 1):
+        end = i + n - 1
+        if compare(file_lines[i]) == compare(first_anchor) and \
+           compare(file_lines[end]) == compare(last_anchor):
+            regions.append((i, end))
+    return regions
+
+
+def _apply_str_replace(file_content: str, old_str: str, new_str: str) -> _EditResult:
+    """
+    Forgiving multi-pass search-and-replace.
+
+    Replaces the unique region in *file_content* matched by *old_str* with
+    *new_str*. Passes run in order until exactly one match is found:
+
+    Pass 1 — Full old_str, indentation stripped.
+        All lines of old_str are stripped and compared against stripped
+        file lines. If unique → apply.
+
+    Pass 2 — Full old_str, exact indentation.
+        Run only when Pass 1 found multiple matches. If unique → apply.
+
+    Pass 3 — First-and-last anchor pair, indentation stripped.
+        Use only the first and last non-blank lines of old_str as anchors.
+        Searches for (anchor_first, anchor_last) pairs separated by exactly
+        len(old_str_lines) - 1 lines. If unique → apply (middle content
+        of old_str is ignored). This tolerates mistakes in middle lines.
+
+    Pass 4 — First-and-last anchor pair, exact indentation.
+        Run only when Pass 3 found multiple matches. If unique → apply.
+
+    Pass 5 — Progressive bottom-up anchor expansion.
+        Run only when Pass 4 still found multiple matches. Adds lines from
+        the bottom of old_str upward one at a time (second-to-last, then
+        third-to-last, …). For each extension, checks whether the bottom
+        anchor window (last_anchor + extension lines above it) uniquely
+        identifies a contiguous region within any of the Pass 4 candidates.
+        Stops as soon as a unique region is confirmed.
+
+    Indentation preservation:
+        When the match was found via anchor-only passes (3-5), the base
+        indentation of the matched region in the file is used to prefix
+        each line of new_str that is not blank.
+
+    Returns an _EditResult with ok=True on success or ok=False with a
+    human-readable error string the model can act on.
+    """
+    file_lines = file_content.splitlines(keepends=True)
+    raw_old_lines = old_str.splitlines()
+
+    # Drop blank boundary lines (models sometimes add trailing newlines).
+    while raw_old_lines and not raw_old_lines[0].strip():
+        raw_old_lines.pop(0)
+    while raw_old_lines and not raw_old_lines[-1].strip():
+        raw_old_lines.pop()
+
+    if not raw_old_lines:
+        return _EditResult(
             ok=False,
             error=(
-                f"<<<<<<< SEARCH chunk not found in file. The leading line "
-                f'"{first_line}" (and its surrounding lines) does not match any '
-                f"lines in the file. Possible causes: (1) the file was edited "
-                f"since this content was read — call view_file() to "
-                f"refresh; (2) the text no longer exists in this form."
+                "old_str is blank or contains only whitespace. "
+                "Provide the exact lines from the file that identify the region to replace."
             ),
         )
-    if len(matches) > 1:
-        first_line = needle[0]
-        return _SearchResult(
+
+    n = len(raw_old_lines)  # expected region height in the file
+
+    # ------------------------------------------------------------------ #
+    # Pass 1 — full match, indentation stripped                           #
+    # ------------------------------------------------------------------ #
+    p1_matches = _find_windows_stripped(file_lines, raw_old_lines)
+
+    if len(p1_matches) == 1:
+        return _build_result(file_lines, p1_matches[0], n, new_str)
+
+    # ------------------------------------------------------------------ #
+    # Pass 2 — full match, exact indentation (disambiguation)             #
+    # ------------------------------------------------------------------ #
+    if len(p1_matches) > 1:
+        p2_matches = _find_windows_exact(file_lines, raw_old_lines)
+        if len(p2_matches) == 1:
+            return _build_result(file_lines, p2_matches[0], n, new_str)
+        # If still multiple, fall through to anchor-based passes.
+        # If p2 has zero matches (indentation truly wrong), also fall through.
+
+    # No full-string match at all — only anchor-based passes remain.
+    if n == 1:
+        # Single-line old_str: no anchor pair possible — report clearly.
+        first_line_stripped = _stripped(raw_old_lines[0])
+        if len(p1_matches) > 1:
+            return _EditResult(
+                ok=False,
+                error=(
+                    f"old_str is ambiguous — {len(p1_matches)} lines match "
+                    f"{first_line_stripped!r}. Add more surrounding lines to old_str "
+                    "to make the region unique, or use find_and_replace_many() "
+                    "to replace all occurrences."
+                ),
+            )
+        return _EditResult(
             ok=False,
             error=(
-                f"<<<<<<< SEARCH chunk is ambiguous — found {len(matches)} matching "
-                f'regions (leading line: "{first_line}"). Expand the SEARCH block '
-                f"to include more surrounding unique lines so the match "
-                f"is unambiguous."
+                f"old_str line not found: {first_line_stripped!r}. "
+                "Verify the line exists in the file with view_file() and retry."
             ),
         )
 
-    # Exactly one match found. Replace those whole lines with the payload.
-    match_start = matches[0]
-    old_line_count = n
+    first_anchor = raw_old_lines[0]
+    last_anchor  = raw_old_lines[-1]
 
-    # Normalise replacement: always ends with exactly one newline.
-    repl = replacement.rstrip("\n") + "\n" if replacement.strip() else "\n"
-    new_line_count = repl.count("\n")
+    # ------------------------------------------------------------------ #
+    # Pass 3 — first+last anchor, indentation stripped                    #
+    # ------------------------------------------------------------------ #
+    p3_regions = _find_anchor_regions(
+        file_lines, first_anchor, last_anchor, n, strip=True
+    )
 
-    new_lines = file_lines[:match_start] + [repl] + file_lines[match_start + n:]
-    new_content = "".join(new_lines)
+    if len(p3_regions) == 1:
+        start, end = p3_regions[0]
+        return _build_result(file_lines, start, end - start + 1, new_str)
 
-    return _SearchResult(
+    # ------------------------------------------------------------------ #
+    # Pass 4 — first+last anchor, exact indentation                       #
+    # ------------------------------------------------------------------ #
+    if len(p3_regions) > 1:
+        p4_regions = _find_anchor_regions(
+            file_lines, first_anchor, last_anchor, n, strip=False
+        )
+        if len(p4_regions) == 1:
+            start, end = p4_regions[0]
+            return _build_result(file_lines, start, end - start + 1, new_str)
+
+        if not p4_regions:
+            # Indentation was wrong even for anchors — fall back to p3 candidates.
+            p4_regions = p3_regions
+
+        # ------------------------------------------------------------------ #
+        # Pass 5 — progressive bottom-up expansion inside p4 candidates       #
+        # ------------------------------------------------------------------ #
+        # Build an expanding "bottom window" from old_str lines. Start with
+        # the last anchor (already in p4_regions), then add lines from the
+        # bottom of old_str upward: old_str[-2], old_str[-3], …
+        #
+        # For each candidate region (start, end) in p4_regions we check
+        # whether the bottom window (size k, stripped) matches the bottom k
+        # lines of that region in the file. Candidates that fail are dropped.
+        # Once exactly one candidate survives → apply.
+        #
+        # This handles the classic case of two functions both ending with
+        # `return "hi"`: as we expand upward we eventually hit a distinguishing
+        # line unique to one function and the other candidate is eliminated.
+
+        surviving = list(p4_regions)
+
+        for k in range(2, n):
+            # Bottom window: last k lines of old_str
+            bottom_window = [_stripped(l) for l in raw_old_lines[n - k:]]
+
+            surviving = [
+                (start, end)
+                for (start, end) in surviving
+                if [_stripped(file_lines[end - k + 1 + j]) for j in range(k)]
+                   == bottom_window
+            ]
+
+            if len(surviving) == 1:
+                start, end = surviving[0]
+                return _build_result(file_lines, start, end - start + 1, new_str)
+            if not surviving:
+                break
+
+    # ------------------------------------------------------------------ #
+    # Failure — build a useful error message                              #
+    # ------------------------------------------------------------------ #
+    first_line_str = _stripped(raw_old_lines[0])
+    if len(p1_matches) == 0 and (not p3_regions if n > 1 else True):
+        return _EditResult(
+            ok=False,
+            error=(
+                f"old_str not found in file. Leading line {first_line_str!r} "
+                "does not appear in the file. The file may have changed since you "
+                "last read it — call view_file() to refresh and retry."
+            ),
+        )
+
+    # Multiple candidates survived all passes.
+    candidate_count = len(p3_regions) if p3_regions else len(p1_matches)
+    return _EditResult(
+        ok=False,
+        error=(
+            f"old_str is ambiguous — {candidate_count} matching regions found "
+            f"(leading line: {first_line_str!r}). "
+            "Add more surrounding lines to old_str to make it unique, or "
+            "use find_and_replace_many() if the change applies to all occurrences."
+        ),
+    )
+
+
+def _build_result(
+    file_lines: List[str],
+    start: int,
+    region_n: int,
+    new_str: str,
+) -> _EditResult:
+    """
+    Apply a confirmed replacement: splice new_str in place of
+    file_lines[start : start + region_n], preserving the base indentation
+    of the matched region.
+    """
+    old_snippet = file_lines[start : start + region_n]
+
+    # Detect base indentation from the first non-blank line of the matched region.
+    base_indent = ""
+    for line in old_snippet:
+        stripped = line.lstrip()
+        if stripped:
+            base_indent = line[: len(line) - len(stripped)]
+            break
+
+    # new_str is inserted literally as the model specified — preserves
+    # the model's exact intended indentation, including intentional
+    # unindenting (e.g. extracting methods to module scope) or indenting.
+    new_lines_raw = new_str.splitlines(keepends=True)
+    if new_lines_raw and not new_lines_raw[-1].endswith("\n"):
+        new_lines_raw[-1] += "\n"
+
+    indented_new = new_lines_raw
+
+    removed = region_n
+    added   = len(indented_new)
+
+    new_file_lines = file_lines[:start] + indented_new + file_lines[start + region_n:]
+    new_content    = "".join(new_file_lines)
+
+    return _EditResult(
         ok=True,
         new_content=new_content,
-        old_line_count=old_line_count,
-        new_line_count=new_line_count,
+        removed_lines=removed,
+        added_lines=added,
     )
 
 
@@ -136,12 +397,25 @@ def _apply_str_replace(file_content: str, search: str, replacement: str) -> _Sea
 class FilesystemTools:
     """Filesystem tools for the CodePilot agentic runtime."""
 
-    def __init__(self, runtime: "Runtime"):
+    def __init__(self, runtime: "AsyncRuntime"):
         self.runtime = runtime
+        #---content cache for OS-error retries---
+        self._content_cache: dict[int, str] = {}
+        self._cache_counter: int = 0
 
     # ------------------------------------------------------------------
     # Internal plumbing
     # ------------------------------------------------------------------
+
+    def _cache_content(self, content: str) -> int:
+        """Store content for retry after an OS error. Returns the cache ID."""
+        self._cache_counter += 1
+        self._content_cache[self._cache_counter] = content
+        return self._cache_counter
+
+    def _pop_cache(self, cache_id: int) -> Optional[str]:
+        """Retrieve and remove cached content by ID. Returns None if not found."""
+        return self._content_cache.pop(cache_id, None)
 
     def _request_permission(self, tool: str, description: str) -> bool:
         result = self.runtime.hooks.emit(
@@ -162,598 +436,380 @@ class FilesystemTools:
                 )
         return str(abs_path)
 
-    def _emit_error(self, tool: str, message: str) -> None:
-        result = f"[{tool}] ERROR: {message}"
-        self.runtime._append_execution(result)
-        self.runtime.hooks.emit(EventType.TOOL_RESULT, tool=tool, result=result)
-
-    def _emit_result(self, tool: str, message: str) -> None:
+    def _emit_ok(self, tool: str, message: str) -> str:
         self.runtime._append_execution(message)
         self.runtime.hooks.emit(EventType.TOOL_RESULT, tool=tool, result=message)
+        return message
 
-    @staticmethod
-    def _is_int(value) -> bool:
-        return isinstance(value, int) and not isinstance(value, bool)
+    def _emit_err(self, tool: str, message: str) -> str:
+        full = f"[{tool} ERROR] {message}"
+        self.runtime._append_execution(full)
+        self.runtime.hooks.emit(EventType.TOOL_RESULT, tool=tool, result=full)
+        return full
 
-    @staticmethod
-    def _payload_filename_error(path: str, payloads: list) -> Optional[str]:
-        """Validate that each payload block carries the correct filename= annotation."""
-        expected = path.replace("\\", "/")
-        for idx, payload in enumerate(payloads, start=1):
-            if payload.filename is None:
-                return (
-                    f"Payload block {idx} for '{path}' is missing filename={path}. "
-                    "No file was changed."
-                )
-            actual = payload.filename.replace("\\", "/")
-            if actual != expected:
-                return (
-                    f"Payload block {idx} filename mismatch: got filename={payload.filename}, "
-                    f"expected filename={path}. No file was changed."
-                )
-        return None
+    def _check_permission(self, tool: str, description: str) -> bool:
+        tool_cfg = self.runtime._tool_config(tool)
+        if tool_cfg.get("require_permission", False):
+            return self._request_permission(tool, description)
+        return True
+
+    def _os_error_message(self, tool: str, path: str, exc: Exception, cache_id: int) -> str:
+        """Build an actionable OS error message with the cache ID."""
+        err_type = type(exc).__name__
+        lines = [
+            f"Failed to access or modify '{path}' ({err_type}: {exc}).",
+            f"Payload cached as cache_id={cache_id}. Do NOT regenerate content.",
+            "Diagnose and fix the underlying issue (e.g. check path, permissions, disk space, or process locks), then retry with:",
+            f"  {tool}(path=\"{path}\", cache_id={cache_id})",
+        ]
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Tool: view_file
     # ------------------------------------------------------------------
 
-    def view_file(self, path: str, start_line: int = 1, end_line: int = None) -> None:
+    def view_file(self, path: str, start_line: int = 1, end_line: int = None) -> str:
         """
-        Read file content with 1-indexed line numbers. Use a targeted range when
-        you only need an edit anchor; omit end_line to read through EOF.
-        Read the resulting [EXECUTION RESULT] before emitting a dependent edit.
+        Read file content with 1-indexed line numbers.
+
+        Use start_line / end_line to read only the lines you need. Omit
+        end_line to read through the end of the file. Always read the result
+        before emitting a dependent edit.
         """
-        ui_status = (
-            f"Reading {path}: L{start_line}-{end_line}"
-            if end_line else f"Reading {path}..."
-        )
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="view_file",
-            args={"path": path, "start_line": start_line,
-                  "end_line": end_line, "ui_status": ui_status},
+            args={"path": path, "start_line": start_line, "end_line": end_line},
         )
         try:
-            if not self._is_int(start_line):
-                self._emit_error(
+            if not isinstance(start_line, int) or isinstance(start_line, bool):
+                return self._emit_err(
                     "view_file",
-                    f"start_line must be an integer >= 1, got {start_line!r}. "
-                    "Omit start_line/end_line to read the whole file.",
+                    f"start_line must be an integer >= 1, got {start_line!r}.",
                 )
-                return
             if start_line < 1:
-                self._emit_error(
+                return self._emit_err(
                     "view_file",
-                    f"start_line={start_line} is invalid; line numbers are 1-indexed.",
+                    f"start_line={start_line} is invalid — line numbers are 1-indexed.",
                 )
-                return
             if end_line is not None:
-                if not self._is_int(end_line):
-                    self._emit_error(
+                if not isinstance(end_line, int) or isinstance(end_line, bool):
+                    return self._emit_err(
                         "view_file",
-                        f"end_line must be an integer >= start_line, got {end_line!r}.",
+                        f"end_line must be an integer, got {end_line!r}.",
                     )
-                    return
                 if end_line < start_line:
-                    self._emit_error(
+                    return self._emit_err(
                         "view_file",
                         f"end_line={end_line} must be >= start_line={start_line}.",
                     )
-                    return
 
             abs_path = self._safe_path(path)
             if not Path(abs_path).is_file():
-                self._emit_error(
+                return self._emit_err(
                     "view_file",
-                    f"'{path}' not found in the workspace. Verify the path from the "
-                    "codebase snapshot or use find() to locate the file.",
+                    f"'{path}' not found. Check the path in the codebase snapshot.",
                 )
-                return
 
             with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
                 all_lines = f.readlines()
 
             total = len(all_lines)
             if total == 0:
-                result = f"[view_file] '{path}' is empty (0 lines).\n[END OF FILE]"
-                self._emit_result("view_file", result)
-                if hasattr(self.runtime, "_watcher"):
-                    self.runtime._watcher.register(abs_path)
-                return
+                result = f"[view_file] '{path}' is empty.\n[END OF FILE]"
+                return self._emit_ok("view_file", result)
 
             if start_line > total:
-                self._emit_error(
+                return self._emit_err(
                     "view_file",
-                    f"start_line={start_line} exceeds '{path}' length of {total} lines. "
-                    f"Use a value between 1 and {total}.",
+                    f"start_line={start_line} exceeds file length of {total} lines.",
                 )
-                return
 
-            e = end_line if end_line is not None else total
-            if e > total:
-                e = total
-
+            e = min(end_line, total) if end_line is not None else total
             s = start_line - 1
             numbered = [f"{i + s + 1:5} | {line.rstrip()}" for i, line in enumerate(all_lines[s:e])]
             content = "\n".join(numbered)
-
             footer = (
                 "\n[END OF FILE]" if e >= total
                 else f"\n[TRUNCATED: {total - e} lines remaining — use start_line={e + 1} to continue]"
             )
-
-            result = (
-                f"[view_file] '{path}' (lines {s + 1}–{e} of {total})\n"
-                + content + footer
-            )
-            self._emit_result("view_file", result)
+            result = f"[view_file] '{path}' (lines {s + 1}–{e} of {total})\n{content}{footer}"
+            self._emit_ok("view_file", result)
 
             if hasattr(self.runtime, "_watcher"):
                 self.runtime._watcher.register(abs_path)
 
+            return result
+
         except Exception as exc:
-            self._emit_error(
+            return self._emit_err(
                 "view_file",
-                f"Unexpected failure reading '{path}': {exc}. "
-                "Treat this as a tool failure; do not assume any content was returned.",
+                f"Unexpected error reading '{path}': {exc}.",
             )
 
     # ------------------------------------------------------------------
     # Tool: write_file
     # ------------------------------------------------------------------
 
-    def write_file(self, path: str, from_cache_id: int = None) -> None:
-        """
-        Write or overwrite a file completely. Creates parent directories automatically.
-
-        [CRITICAL CONSTRAINT]
-        You CAN provide ONE payload block immediately after your ```codepilot block,
-        annotated as filename=<path> OR MULTIPLE payload blocks ordered per write_file() call in ```codepilot block.
-
-        If the previous write failed (OS error, permission denied, wrong path) the runtime
-        will have cached the content with a numeric ID. In that case call:
-            write_file("correct_path", from_cache_id=<N>)
-        No payload block is needed — content is loaded from the internal cache.
-        The path can be DIFFERENT from the original failed call.
-        Always fix the underlying issue (e.g. permissions) in the SAME step.
-
-        Example 1 (normal write):
-        ```codepilot
-        write_file("app.py")
-        ```
-        ```python filename=app.py
-        <<<<<<< SEARCH
-        =======
-        # full file content here
-        >>>>>>> REPLACE
-        ```
-        Example 2 (multiple files):
-        ```codepilot
-        write_file("file.txt")
-        write_file("example.py")
-        ```
-        ```text filename=file.txt
-        <<<<<<< SEARCH
-        =======
-        content for file.txt
-        >>>>>>> REPLACE
-        ```
-        ```python filename=example.py
-        <<<<<<< SEARCH
-        =======
-        # content for example.py
-        >>>>>>> REPLACE
-        ```
-        Example 3 (retry from cache after failure):
-        ```codepilot
-        run_command("chmod 755 scripts/")
-        write_file("scripts/deploy.sh", from_cache_id=1)
-        ```
-        """
-    @staticmethod
-    def _extract_clean_write_content(raw: str) -> str:
-        """Extract clean content from raw payload text, stripping SEARCH/REPLACE or CONTENT markers if present."""
-        lines = raw.splitlines(keepends=True)
-
-        # Check if SEARCH/REPLACE format is used
-        has_search = any(l.strip().startswith("<<<<<<< SEARCH") for l in lines)
-        has_replace = any(l.strip().startswith(">>>>>>> REPLACE") for l in lines)
-
-        if has_search and has_replace:
-            replace_lines = []
-            state = "OUTSIDE"
-            for line in lines:
-                stripped = line.strip()
-                if stripped.startswith("<<<<<<< SEARCH"):
-                    state = "SEARCH"
-                elif stripped == "=======" or stripped.startswith("======="):
-                    if state == "SEARCH":
-                        state = "REPLACE"
-                elif stripped.startswith(">>>>>>> REPLACE"):
-                    if state == "REPLACE":
-                        state = "OUTSIDE"
-                elif state == "REPLACE":
-                    replace_lines.append(line)
-            if replace_lines:
-                return "".join(replace_lines)
-
-        # Check if CONTENT format is used
-        import re
-        c_match = re.search(r"<{5,9}\s*CONTENT\s*\n(.*?)\n>{5,9}\s*CONTENT", raw, re.DOTALL)
-        if c_match:
-            return c_match.group(1)
-
-        return raw
-
     def write_file(
         self,
         path: str,
-        from_cache_id: Optional[int] = None,
-    ) -> None:
+        content: str = "",
+        cache_id: Optional[int] = None,
+        _was_repaired: bool = False,
+    ) -> str:
         """
-        Create a new file or overwrite an existing file.
+        Create a new file or overwrite an existing file completely.
+
+        Pass the full file content as the 'content' argument. Parent
+        directories are created automatically.
+
+        If a previous write failed with an OS error (PermissionError, wrong
+        path, etc.) the runtime cached the content and returned a cache_id.
+        Fix the underlying issue first, then retry by passing that cache_id —
+        the content argument can be omitted in that case:
+          write_file(path="correct/path.py", cache_id=<N>)
         """
-        ui_status = f"Creating {path}..."
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="write_file",
-            args={"path": path, "ui_status": ui_status},
+            args={"path": path, "cache_id": cache_id},
         )
 
-        self.runtime._step_write_count += 1
-
-        # ------------------------------------------------------------------ #
-        # Resolve content: from cache or from the next payload block
-        # ------------------------------------------------------------------ #
-        if from_cache_id is not None:
-            cache = getattr(self.runtime, "_payload_cache", {})
-            content = cache.get(from_cache_id)
-            if content is None:
-                available = list(cache.keys())
+        # ---------------------------------------------------------------- #
+        # Resolve content — either from the argument or from the retry cache
+        # ---------------------------------------------------------------- #
+        if cache_id is not None:
+            cached = self._pop_cache(cache_id)
+            if cached is None:
+                available = sorted(self._content_cache)
                 hint = (
                     f" Available cache IDs: {available}." if available
-                    else " The cache is empty — no prior failed write was recorded."
+                    else " The cache is empty — no failed write was recorded."
                 )
-                self._emit_error(
+                return self._emit_err(
                     "write_file",
-                    f"from_cache_id={from_cache_id} not found.{hint} "
-                    "Use a valid cache_id or provide a new payload block without from_cache_id.",
+                    f"cache_id={cache_id} not found.{hint}",
                 )
-                return
-        else:
-            # Consume payload block BEFORE any error that might short-circuit
-            payload = self.runtime.pop_payload_block_for_path(path)
-            if payload is None:
-                self._emit_error(
-                    "write_file",
-                    f"No Payload Block found for '{path}'. Provide exactly one fenced "
-                    "Payload Block immediately after the ```codepilot block, annotated "
-                    f"as filename={path}. Never pass file content as a function argument.",
-                )
-                return
+            content = cached
 
-            err = self._payload_filename_error(path, [payload])
-            if err:
-                self._emit_error("write_file", err)
-                return
-            content = self._extract_clean_write_content(payload.content)
+        if not content and cache_id is None:
+            return self._emit_err(
+                "write_file",
+                "content argument is empty. Provide the full file content.",
+            )
 
-        # Permission gate
-        tool_cfg = self.runtime._tool_config("write_file")
-        if tool_cfg.get("require_permission", False):
-            if not self._request_permission("write_file", f"Create/overwrite '{path}'"):
-                self._emit_error(
-                    "write_file",
-                    f"Permission denied for '{path}'. No file was changed.",
-                )
-                return
+        if not self._check_permission("write_file", f"Create/overwrite '{path}'"):
+            return self._emit_err("write_file", f"Permission denied for '{path}'.")
 
         try:
             abs_path = self._safe_path(path)
             Path(abs_path).parent.mkdir(parents=True, exist_ok=True)
+            existed = Path(abs_path).exists()
             with open(abs_path, "w", encoding="utf-8") as f:
                 f.write(content)
+
             line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
-            cache_note = " (from cache)" if from_cache_id is not None else ""
-            result = (
-                f"[write_file] '{path}' created{cache_note} "
-                f"({len(content)} bytes, {line_count} lines)."
-            )
-            self._emit_result("write_file", result)
-            # Success — evict cache entry so stale content isn't reused
-            if from_cache_id is not None and hasattr(self.runtime, "_payload_cache"):
-                self.runtime._payload_cache.pop(from_cache_id, None)
+            verb = "updated" if existed else "created"
+            cache_note = " (from cache)" if cache_id is not None else ""
+            result = f"[write_file] '{path}' {verb}{cache_note} ({len(content)} bytes, {line_count} lines)."
+
+            if _was_repaired:
+                result += (
+                    "\n[Notice] The JSON arguments for this call contained encoding "
+                    "mistakes that were automatically repaired. Watch for escaping issues "
+                    "in future write_file calls (e.g. use \\n for newlines inside strings)."
+                )
+
             if hasattr(self.runtime, "_watcher"):
                 try:
-                    self.runtime._watcher.register(self._safe_path(path))
+                    self.runtime._watcher.register(abs_path)
                 except Exception:
                     pass
+
+            return self._emit_ok("write_file", result)
+
         except Exception as exc:
-            cache_msg = self._build_cache_error(
-                "write_file", path, exc, content, from_cache_id
-            )
-            self._emit_error(
+            new_cache_id = self._cache_content(content)
+            return self._emit_err(
                 "write_file",
-                f"Failed to write '{path}': {exc}.{cache_msg}",
+                self._os_error_message("write_file", path, exc, new_cache_id),
             )
 
     # ------------------------------------------------------------------
     # Tool: edit_file
     # ------------------------------------------------------------------
 
-    def edit_file(self, path: str, from_cache_id: int = None) -> None:
+    def edit_file(
+        self,
+        path: str,
+        old_str: str = "",
+        new_str: str = "",
+        cache_id: Optional[int] = None,
+    ) -> str:
         """
-        Search-and-replace regions of text. You can include multiple SEARCH chunks in the Payload Block.
+        Replace a unique region in a file identified by old_str with new_str.
 
-        [CRITICAL CONSTRAINT]
-        You MUST provide exactly ONE payload block immediately after your ```codepilot block,
-        annotated as filename=<path>.
+        old_str must uniquely identify the region to replace. It does not need
+        to be letter-perfect — the tool uses a forgiving multi-pass algorithm:
 
-        If the previous edit failed (OS error, permission denied, wrong path) the runtime
-        will have cached the SEARCH/REPLACE payload with a numeric ID. In that case call:
-            edit_file("correct_path", from_cache_id=<N>)
-        No payload block is needed. The path can be DIFFERENT from the original failed call.
-        Always fix the underlying issue in the SAME step.
+        1. Full old_str match, indentation ignored.
+        2. Full old_str match, exact indentation (disambiguates pass 1).
+        3. First+last line anchor pair, indentation ignored (tolerates mistakes
+           in middle lines of old_str).
+        4. First+last anchor pair, exact indentation.
+        5. Progressive bottom-up expansion — adds lines from the bottom of
+           old_str upward until the region is uniquely identified.
 
-        Inside the Payload Block, use Git conflict markers EXACTLY like this:
-        <<<<<<< SEARCH
-        def process(self):
-            pass
-        =======
-        def process(self):
-            result = self._run()
-            return result
-        >>>>>>> REPLACE
+        For large edits across multiple independent regions in the same file,
+        call edit_file() multiple times — one call per region.
 
-        Example 1:
-        ```codepilot
-        edit_file("app.py")
-        ```
-        ```python filename=app.py
-        <<<<<<< SEARCH
-        TIMEOUT=5
-        =======
-        TIMEOUT=15
-        >>>>>>> REPLACE
-
-        Example 2:
-        ```codepilot
-        edit_file("decorator.py")
-        ```
-        ```python filename=decorator.py
-        <<<<<<< SEARCH
-            def wrapper(*args, **kwargs):
-        =======
-            def wrapper(*args, **kwargs):
-                print("Before calling the function...")
-        >>>>>>> REPLACE
-        <<<<<<< SEARCH
-        MAX_RETRIES = 5
-        =======
-        MAX_RETRIES = 10
-        >>>>>>> REPLACE
-        ```
+        If a previous edit failed with an OS error, the runtime cached the
+        arguments and returned a cache_id. Fix the issue and retry:
+          edit_file(path="correct/path.py", old_str="...", new_str="...", cache_id=<N>)
         """
-        ui_status = f"Editing {path}..."
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="edit_file",
-            args={"path": path, "ui_status": ui_status},
+            args={"path": path, "cache_id": cache_id},
         )
 
-        # Guard: only one edit per file per step
-        edited_files = self.runtime._step_edited_files
-        if path in edited_files:
-            self._emit_error(
-                "edit_file",
-                f"Only one edit_file per file per step is allowed. '{path}' was "
-                "already edited this step. You can include multiple <<<<<<< SEARCH chunks "
-                "in a single Payload Block to make multiple edits at once.",
-            )
-            return
-        edited_files.add(path)
-
-        # ------------------------------------------------------------------ #
-        # Resolve payload content: from cache or from the next payload block
-        # ------------------------------------------------------------------ #
-        if from_cache_id is not None:
-            cache = getattr(self.runtime, "_payload_cache", {})
-            raw_content = cache.get(from_cache_id)
-            if raw_content is None:
-                available = list(cache.keys())
+        # ---------------------------------------------------------------- #
+        # Resolve old_str / new_str — from arguments or from retry cache   #
+        # ---------------------------------------------------------------- #
+        if cache_id is not None:
+            cached = self._pop_cache(cache_id)
+            if cached is None:
+                available = sorted(self._content_cache)
                 hint = (
                     f" Available cache IDs: {available}." if available
-                    else " The cache is empty — no prior failed edit was recorded."
+                    else " The cache is empty."
                 )
-                self._emit_error(
+                return self._emit_err(
                     "edit_file",
-                    f"from_cache_id={from_cache_id} not found.{hint} "
-                    "Use a valid cache_id or provide a new payload block without from_cache_id.",
+                    f"cache_id={cache_id} not found.{hint}",
                 )
-                return
-        else:
-            payload = self.runtime.pop_payload_block_for_path(path)
-            if payload is None:
-                self._emit_error(
-                    "edit_file",
-                    f"No Payload Block found for '{path}'. Provide exactly one fenced "
-                    "Payload Block immediately after the ```codepilot block, annotated "
-                    f"as filename={path}.",
-                )
-                return
+            # Cache stores "old_str\x00new_str" packed together.
+            packed = cached
+            sep    = packed.find("\x00")
+            old_str = packed[:sep]
+            new_str = packed[sep + 1:]
 
-            err = self._payload_filename_error(path, [payload])
-            if err:
-                self._emit_error("edit_file", err)
-                return
-            raw_content = payload.content
-
-        # Parse SEARCH/REPLACE chunks from raw_content
-        chunks = []
-        lines = raw_content.splitlines(keepends=True)
-        state = "OUTSIDE"
-        search_lines = []
-        replace_lines = []
-
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith("<<<<<<< SEARCH"):
-                if state != "OUTSIDE":
-                    self._emit_error("edit_file", f"Malformed payload for '{path}': Nested <<<<<<< SEARCH marker found.")
-                    return
-                state = "SEARCH"
-                search_lines = []
-                replace_lines = []
-            elif stripped.startswith("======="):
-                if state != "SEARCH":
-                    self._emit_error("edit_file", f"Malformed payload for '{path}': ======= found without preceding <<<<<<< SEARCH.")
-                    return
-                state = "REPLACE"
-            elif stripped.startswith(">>>>>>> REPLACE"):
-                if state != "REPLACE":
-                    self._emit_error("edit_file", f"Malformed payload for '{path}': >>>>>>> REPLACE found without preceding ======= .")
-                    return
-                state = "OUTSIDE"
-                chunks.append(("".join(search_lines), "".join(replace_lines)))
-            else:
-                if state == "SEARCH":
-                    search_lines.append(line)
-                elif state == "REPLACE":
-                    replace_lines.append(line)
-
-        if state != "OUTSIDE":
-            self._emit_error("edit_file", f"Malformed payload for '{path}': Incomplete SEARCH/REPLACE chunk. Missing >>>>>>> REPLACE.")
-            return
-
-        if not chunks:
-            self._emit_error(
+        if not old_str:
+            return self._emit_err(
                 "edit_file",
-                f"No SEARCH/REPLACE chunks found in payload for '{path}'. "
-                "Ensure you use <<<<<<< SEARCH, =======, and >>>>>>> REPLACE markers."
+                "old_str is empty. Provide the lines from the file that identify the region to replace.",
             )
-            return
 
-        # Permission gate
-        tool_cfg = self.runtime._tool_config("edit_file")
-        if tool_cfg.get("require_permission", False):
-            if not self._request_permission("edit_file", f"Edit '{path}' ({len(chunks)} chunks)"):
-                self._emit_error(
-                    "edit_file",
-                    f"Permission denied for '{path}'. No file was changed.",
-                )
-                return
+        if not self._check_permission("edit_file", f"Edit '{path}'"):
+            return self._emit_err("edit_file", f"Permission denied for '{path}'.")
 
         try:
             abs_path = self._safe_path(path)
             if not Path(abs_path).is_file():
-                raise FileNotFoundError(f"Cannot edit '{path}': file does not exist.")
+                return self._emit_err(
+                    "edit_file",
+                    f"'{path}' does not exist. Use write_file() to create a new file.",
+                )
 
             with open(abs_path, "r", encoding="utf-8") as f:
-                current_content = f.read()
+                current = f.read()
 
-            edit_results: list[str] = []
-            succeeded = 0
-            failed = 0
+            result = _apply_str_replace(current, old_str, new_str)
 
-            for idx, (search_str, replace_str) in enumerate(chunks, start=1):
-                sr = _apply_str_replace(current_content, search_str, replace_str)
-                if sr.ok:
-                    current_content = sr.new_content
-                    delta = sr.new_line_count - sr.old_line_count
-                    delta_str = f"\u0394{delta:+d}" if delta != 0 else "\u03940"
-                    edit_results.append(
-                        f"  \u2713 edit {idx}: replaced {sr.old_line_count}-line region "
-                        f"with {sr.new_line_count} lines ({delta_str})"
+            if not result.ok:
+                #---cache old_str + new_str so the model can retry after fixing the path---
+                if cache_id is None:
+                    new_cache_id = self._cache_content(old_str + "\x00" + new_str)
+                    return self._emit_err(
+                        "edit_file",
+                        f"{result.error}\n"
+                        f"Edit arguments cached as cache_id={new_cache_id} for retry.",
                     )
-                    succeeded += 1
-                else:
-                    edit_results.append(f"  \u2717 edit {idx}: {sr.error}")
-                    failed += 1
+                return self._emit_err("edit_file", result.error)
 
-            if succeeded > 0:
-                with open(abs_path, "w", encoding="utf-8") as f:
-                    f.write(current_content)
-                if hasattr(self.runtime, "_watcher"):
-                    try:
-                        self.runtime._watcher.register(abs_path)
-                    except Exception:
-                        pass
+            with open(abs_path, "w", encoding="utf-8") as f:
+                f.write(result.new_content)
 
-            total_lines = current_content.count("\n") + (
-                1 if current_content and not current_content.endswith("\n") else 0
+            if hasattr(self.runtime, "_watcher"):
+                try:
+                    self.runtime._watcher.register(abs_path)
+                except Exception:
+                    pass
+
+            total_lines = result.new_content.count("\n") + (
+                1 if result.new_content and not result.new_content.endswith("\n") else 0
             )
+            delta = result.added_lines - result.removed_lines
+            delta_str = f"Δ{delta:+d}" if delta != 0 else "Δ0"
+            cache_note = " (from cache)" if cache_id is not None else ""
 
-            cache_note = " (from cache)" if from_cache_id is not None else ""
-            status = f"{succeeded}/{len(chunks)} edits applied{cache_note}"
-            if failed:
-                status += f" ({failed} failed)"
-            detail = "\n".join(edit_results)
-            result = (
-                f"[edit_file] '{path}' edited: {status}.\n"
-                f"{detail}\n"
-                f"File now has {total_lines} lines."
+            msg = (
+                f"[edit_file] '{path}' updated{cache_note}: "
+                f"replaced {result.removed_lines}-line region with {result.added_lines} lines "
+                f"({delta_str}). File now has {total_lines} lines."
             )
-            self._emit_result("edit_file", result)
-            # Success — evict cache entry
-            if from_cache_id is not None and hasattr(self.runtime, "_payload_cache"):
-                self.runtime._payload_cache.pop(from_cache_id, None)
+            if result.warning:
+                msg += f"\n[Notice] {result.warning}"
+
+            return self._emit_ok("edit_file", msg)
 
         except Exception as exc:
-            cache_msg = self._build_cache_error(
-                "edit_file", path, exc, raw_content, from_cache_id
-            )
-            self._emit_error(
-                "edit_file",
-                f"Failed while editing '{path}': {exc}.{cache_msg}",
-            )
+            if cache_id is None:
+                new_cache_id = self._cache_content(old_str + "\x00" + new_str)
+                return self._emit_err(
+                    "edit_file",
+                    self._os_error_message("edit_file", path, exc, new_cache_id),
+                )
+            return self._emit_err("edit_file", f"Failed to edit '{path}': {exc}.")
 
     # ------------------------------------------------------------------
     # Tool: find_and_replace_many
     # ------------------------------------------------------------------
 
-    def find_and_replace_many(self, path: str, find: str, replace: str) -> None:
-        """Replace every occurrence of an exact literal string across an entire file — use when the same text repeats and all instances must change (e.g., renaming a variable, constant, or import path file-wide)."""
+    def find_and_replace_many(self, path: str, find: str, replace: str) -> str:
+        """
+        Replace every occurrence of an exact literal string in a file.
+
+        Use this when the same text appears multiple times and all instances
+        must change (e.g. renaming a variable, constant, or import path
+        across an entire file). For targeted single-region edits, use
+        edit_file() instead.
+        """
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="find_and_replace_many",
             args={"path": path, "find": find, "replace": replace},
-            label=f"Replacing all occurrences in {path}...",
         )
 
         if not find:
-            self._emit_error(
+            return self._emit_err(
                 "find_and_replace_many",
-                "find= must be a non-empty string. Nothing was changed.",
+                "find= must be a non-empty string.",
             )
-            return
 
         try:
             abs_path = self._safe_path(path)
             if not Path(abs_path).is_file():
-                self._emit_error(
+                return self._emit_err(
                     "find_and_replace_many",
                     f"'{path}' not found in the workspace.",
                 )
-                return
 
             with open(abs_path, "r", encoding="utf-8") as f:
                 original = f.read()
 
             count = original.count(find)
             if count == 0:
-                self._emit_error(
+                return self._emit_err(
                     "find_and_replace_many",
-                    f"The string {find!r} was not found in '{path}'. Nothing was changed.",
+                    f"String {find!r} not found in '{path}'. Nothing was changed.",
                 )
-                return
 
-            tool_cfg = self.runtime._tool_config("find_and_replace_many")
-            if tool_cfg.get("require_permission", False):
-                if not self._request_permission(
+            if not self._check_permission(
+                "find_and_replace_many",
+                f"Replace {count} occurrence(s) of {find!r} in '{path}'",
+            ):
+                return self._emit_err(
                     "find_and_replace_many",
-                    f"Replace {count} occurrence(s) of {find!r} in '{path}'",
-                ):
-                    self._emit_error(
-                        "find_and_replace_many",
-                        f"Permission denied for '{path}'. Nothing was changed.",
-                    )
-                    return
+                    f"Permission denied for '{path}'.",
+                )
 
             new_content = original.replace(find, replace)
             with open(abs_path, "w", encoding="utf-8") as f:
@@ -769,77 +825,10 @@ class FilesystemTools:
                 f"[find_and_replace_many] '{path}': replaced {count} occurrence(s) of "
                 f"{find!r} with {replace!r}."
             )
-            self._emit_result("find_and_replace_many", result)
+            return self._emit_ok("find_and_replace_many", result)
 
         except Exception as exc:
-            self._emit_error(
+            return self._emit_err(
                 "find_and_replace_many",
                 f"Unexpected error in '{path}': {exc}.",
             )
-
-    # ------------------------------------------------------------------
-    # Cache error message builder (failure-type-aware)
-    # ------------------------------------------------------------------
-
-    def _build_cache_error(
-        self, tool: str, path: str, exc: Exception,
-        content: str, from_cache_id: int = None,
-    ) -> str:
-        """
-        Build a precise, LLM-steering error message for cached failures.
-
-        Classifies the exception to generate failure-type-specific recovery
-        instructions that prevent hallucination and steer the LLM correctly.
-        """
-        # If content was already from cache, it's already stored — find its ID
-        if from_cache_id is not None:
-            cache_id = from_cache_id
-        else:
-            # Cache the content and get a new ID
-            if hasattr(self.runtime, "_payload_cache"):
-                cache_id = self.runtime._cache_payload(content)
-            else:
-                return ""  # No cache available
-
-        no_payload_instruction = (
-            f"Important: DO NOT regenerate file content. No payload block(s) needed \u2014 "
-            f"call {tool}() directly in control block without associating payload block."
-        )
-
-        if isinstance(exc, FileNotFoundError):
-            # PATH is wrong — LLM must fix it
-            return (
-                f"\nContent cached (cache_id={cache_id}) \u2014 the file path is WRONG. "
-                f"Retry with the CORRECT path:\n"
-                f"  {tool}(\"<correct_path>\", from_cache_id={cache_id})\n"
-                f"Do NOT reuse the path '{path}'. {no_payload_instruction}"
-            )
-
-        if isinstance(exc, PermissionError):
-            exc_str = str(exc).lower()
-            if "outside workspace" in exc_str or "outside" in exc_str:
-                # Path outside workspace
-                return (
-                    f"\nContent cached (cache_id={cache_id}) \u2014 the path is OUTSIDE the workspace. "
-                    f"Ask user to enable unsafe_mode in AgentFile to allow writing outside "
-                    f"working directory if needed, otherwise retry with a path inside WORK_DIR:\n"
-                    f"  {tool}(\"<path_inside_workspace>\", from_cache_id={cache_id})\n"
-                    f"{no_payload_instruction}"
-                )
-            else:
-                # Permission denied — path is correct, fix permissions
-                return (
-                    f"\nContent cached (cache_id={cache_id}) \u2014 the path is correct but "
-                    f"permissions block the write. Fix permissions first, then retry in the SAME step:\n"
-                    f"  execute(\"main\", \"chmod 755 {Path(path).parent or '.'}/\")\n"
-                    f"  {tool}(\"{path}\", from_cache_id={cache_id})\n"
-                    f"{no_payload_instruction}"
-                )
-
-        # Generic OS error — path might be correct
-        return (
-            f"\nContent cached (cache_id={cache_id}) \u2014 an OS error prevented the write. "
-            f"Fix the issue, then retry in the SAME step:\n"
-            f"  {tool}(\"{path}\", from_cache_id={cache_id})\n"
-            f"{no_payload_instruction}"
-        )

@@ -20,8 +20,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -42,6 +44,7 @@ const (
 	pidFile    = "/tmp/codepilot.pid"
 	selfBinary = "/usr/local/bin/codepilot-workspace"
 	hostPort   = 8080
+	cgroupDir  = "/sys/fs/cgroup/codepilot-workspace"
 )
 
 // agentYAML is written to ~/.codepilot/agent.yaml on the very first run.
@@ -187,7 +190,8 @@ func setup() {
 
 	fmt.Println("\n  Workspace is ready.")
 	fmt.Printf("  url:  http://localhost:%d\n", hostPort)
-	fmt.Println("  stop: sudo codepilot-workspace stop\n")
+	fmt.Println("  stop: sudo codepilot-workspace stop")
+	fmt.Println()
 	// setup() exits here. The container process keeps running independently.
 }
 
@@ -196,24 +200,16 @@ func setup() {
 // ---------------------------------------------------------------------------
 
 func isRunning() bool {
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		return false // PID file missing → not running
+	// Preferred path: the supervisor PID recorded by run().
+	if pid := readPIDFile(); pid > 0 && isWorkspacePID(pid) {
+		return true
 	}
 
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		return false
-	}
-
-	// /proc/<pid>/exe is a symlink that only exists while the process is alive.
-	// If the PID was recycled by another process, exe will point to a different binary.
-	exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
-	if err != nil {
-		return false // process dead or PID doesn't exist
-	}
-
-	return exe == selfBinary // confirm it's OUR process, not a recycled PID
+	// Fallback: anything still alive in our cgroup. This catches:
+	//   - older releases that wrote the initd PID to the PID file
+	//   - an orphaned child whose supervisor was killed
+	//   - a lost/stale PID file
+	return len(liveCgroupPIDs()) > 0
 }
 
 // ---------------------------------------------------------------------------
@@ -236,19 +232,62 @@ func run() {
 	// Apply cgroup resource limits before launching the child.
 	cg()
 
+	// Register the signal forwarder before starting the child so an early
+	// `stop` cannot kill the supervisor and orphan the container.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+
 	// Start the child process (non-blocking).
 	must(cmd.Start())
 
-	// Write the HOST-VISIBLE PID now that the kernel has assigned it.
-	// cmd.Process.Pid is what the host sees — inside the PID namespace,
-	// the child sees itself as PID 1. We need the host PID for /proc/<pid>/exe.
-	_ = os.WriteFile(pidFile, []byte(strconv.Itoa(cmd.Process.Pid)), 0644)
+	// Record THIS process (the supervisor), not the child. The child execs
+	// /opt/codepilot/initd almost immediately, so /proc/<child>/exe no longer
+	// points at codepilot-workspace — which made the old stop() always report
+	// a stale PID. The supervisor's exe stays stable for the workspace's
+	// entire lifetime.
+	_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0644)
+
+	// Forward SIGTERM/SIGINT to the container init. Without this, stopping
+	// the supervisor would leave initd, the agent server, and the workspace
+	// server orphaned and holding port 8080.
+	done := make(chan struct{})
+	go func() {
+		select {
+		case sig := <-sigCh:
+			// initd handles SIGINT/SIGTERM, not SIGHUP. Translate a
+			// terminal hangup into a normal shutdown so closing the
+			// launching terminal cannot orphan the container.
+			if sig == syscall.SIGHUP {
+				sig = syscall.SIGTERM
+			}
+			_ = cmd.Process.Signal(sig)
+
+			// initd performs the ordered shutdown (B2 snapshot sync first,
+			// then the servers). Give it a generous window, then force it.
+			select {
+			case <-done:
+			case <-time.After(30 * time.Second):
+				_ = cmd.Process.Kill()
+			}
+		case <-done:
+		}
+	}()
 
 	// Wait blocks until the container exits — this IS the container's lifetime.
-	must(cmd.Wait())
+	err := cmd.Wait()
+	close(done)
 
-	// Container exited cleanly — remove the stale PID file.
+	// Container exited — remove the PID file.
 	_ = os.Remove(pidFile)
+
+	// A signal-terminated child is the normal result of `stop`, not a fatal
+	// launcher error.
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+			return
+		}
+	}
+	must(err)
 }
 
 // ---------------------------------------------------------------------------
@@ -257,7 +296,7 @@ func run() {
 
 func child() {
 
-	// NOTE: PID file is written by run() using cmd.Process.Pid (host-visible PID).
+	// NOTE: PID file is written by run() using the supervisor's PID.
 	// We do NOT write it here because os.Getpid() inside a new PID namespace
 	// returns 1 — useless for /proc/<pid>/exe lookups on the host.
 
@@ -584,41 +623,279 @@ func printBanner() {
 // ---------------------------------------------------------------------------
 
 func stop() {
-	stoppedViaPID := false
+	if os.Geteuid() != 0 {
+		fmt.Fprintln(os.Stderr, "  This command must be run as root: sudo codepilot-workspace stop")
+		os.Exit(1)
+	}
 
-	data, err := os.ReadFile(pidFile)
-	if err == nil {
-		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-		if err == nil {
-			exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
-			if err == nil && exe == selfBinary {
-				process, err := os.FindProcess(pid)
-				if err == nil {
-					if err := process.Signal(syscall.SIGTERM); err == nil {
-						fmt.Println("  Workspace stopped gracefully.")
-						stoppedViaPID = true
-					}
+	stoppedSomething := false
+
+	// 1. Ask the supervisor (recorded in the PID file) to shut down. It
+	// forwards the signal to initd, which drains snapshot-daemon first and
+	// then stops the agent + workspace servers.
+	if pid := readPIDFile(); pid > 0 {
+		if isWorkspacePID(pid) {
+			fmt.Printf("  Stopping workspace (pid %d)...\n", pid)
+			if err := signalPID(pid, syscall.SIGTERM); err == nil {
+				stoppedSomething = true
+				if waitForStop(pid, 20*time.Second) {
+					fmt.Println("  Workspace stopped gracefully.")
+				} else {
+					fmt.Println("  Graceful shutdown timed out; forcing...")
 				}
+			}
+		} else {
+			fmt.Println("  PID file is stale; checking for orphaned workspace processes...")
+		}
+	}
+
+	// 2. Sweep the whole cgroup. This catches the old child-PID bug, a killed
+	// supervisor whose container kept running, and children that ignored
+	// SIGTERM because they were PID 1.
+	if pids := liveCgroupPIDs(); len(pids) > 0 {
+		stoppedSomething = true
+		fmt.Printf("  Terminating %d workspace process(es)...\n", len(pids))
+		for _, pid := range pids {
+			_ = signalPID(pid, syscall.SIGTERM)
+		}
+
+		deadline := time.Now().Add(8 * time.Second)
+		for time.Now().Before(deadline) && len(liveCgroupPIDs()) > 0 {
+			time.Sleep(150 * time.Millisecond)
+		}
+
+		if remaining := liveCgroupPIDs(); len(remaining) > 0 {
+			for _, pid := range remaining {
+				_ = signalPID(pid, syscall.SIGKILL)
+			}
+			for range 20 {
+				if len(liveCgroupPIDs()) == 0 {
+					break
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+	}
+
+	// 3. Last-resort /proc scan for systems where the cgroup file isn't
+	// available, or where the port is somehow still held. Only processes
+	// that are unmistakably ours are touched.
+	_, cgroupErr := os.Stat(filepath.Join(cgroupDir, "cgroup.procs"))
+	if cgroupErr != nil || portInUse(hostPort) {
+		if pids := workspacePIDsFromProc(); len(pids) > 0 {
+			stoppedSomething = true
+			for _, pid := range pids {
+				_ = signalPID(pid, syscall.SIGTERM)
+			}
+			time.Sleep(2 * time.Second)
+			for _, pid := range workspacePIDsFromProc() {
+				_ = signalPID(pid, syscall.SIGKILL)
 			}
 		}
 	}
 
 	_ = os.Remove(pidFile)
+	_ = os.Remove(cgroupDir) // succeeds only when the cgroup is empty
 
-	if !stoppedViaPID {
-		fmt.Println("  No running workspace found via PID file.")
+	if !stoppedSomething {
+		fmt.Println("  No running workspace found.")
+		return
 	}
 
-	// Fallback: kill any process on hostPort (8080)
-	fmt.Println("  Checking for orphaned processes on port 8080...")
-	out, _ := exec.Command("sh", "-c", fmt.Sprintf("lsof -t -i :%d", hostPort)).Output()
-	pids := strings.TrimSpace(string(out))
-	if pids != "" {
-		_ = exec.Command("sh", "-c", fmt.Sprintf("kill -9 %s", strings.ReplaceAll(pids, "\n", " "))).Run()
-		fmt.Println("  Found and forcefully terminated an orphaned workspace process.")
-	} else if !stoppedViaPID {
-		fmt.Println("  Port 8080 is clear. Nothing to stop.")
+	if portInUse(hostPort) {
+		fmt.Println("  Warning: port 8080 is still in use by another process.")
+	} else {
+		fmt.Println("  Port 8080 is clear.")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// workspace process helpers
+// ---------------------------------------------------------------------------
+
+func readPIDFile() int {
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return 0
+	}
+
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 1 {
+		return 0
+	}
+	return pid
+}
+
+func pidAlive(pid int) bool {
+	if pid <= 1 {
+		return false
+	}
+
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return false
+	}
+
+	// The comm field can contain spaces and parentheses, so the state is the
+	// first character after the final ')'.
+	s := string(data)
+	i := strings.LastIndexByte(s, ')')
+	if i < 0 || i+2 >= len(s) {
+		return true
+	}
+	state := s[i+2]
+	return state != 'Z' && state != 'X'
+}
+
+func sameExecutable(a, b string) bool {
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bi, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(ai, bi)
+}
+
+func isWorkspaceExecutable(pid int) bool {
+	if exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid)); err == nil {
+		if sameExecutable(exe, selfBinary) {
+			return true
+		}
+	}
+
+	if data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {
+		cmdline := strings.ReplaceAll(string(data), "\x00", " ")
+
+		// Internal subcommands of the installed launcher. Check argv[0] by
+		// basename so an editor or `grep` that merely mentions the name is
+		// never matched.
+		fields := strings.Fields(cmdline)
+		if len(fields) > 0 {
+			base := filepath.Base(fields[0])
+			if base == "codepilot-workspace" && len(fields) > 1 {
+				if fields[1] == "run" || fields[1] == "child" {
+					return true
+				}
+			}
+			if base == "codepilot-server" {
+				return true
+			}
+		}
+
+		// Container init and agent server, by their fixed image paths.
+		return strings.Contains(cmdline, "/opt/codepilot/initd") ||
+			strings.Contains(cmdline, "/opt/codepilot/agent_server.py")
+	}
+
+	return false
+}
+
+func isWorkspacePID(pid int) bool {
+	return pidAlive(pid) && (isWorkspaceExecutable(pid) || cgroupHasPID(pid))
+}
+
+func cgroupPIDs() []int {
+	data, err := os.ReadFile(filepath.Join(cgroupDir, "cgroup.procs"))
+	if err != nil {
+		return nil
+	}
+
+	var pids []int
+	for _, field := range strings.Fields(string(data)) {
+		pid, err := strconv.Atoi(field)
+		if err == nil && pid > 1 {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
+func cgroupHasPID(pid int) bool {
+	for _, p := range cgroupPIDs() {
+		if p == pid {
+			return true
+		}
+	}
+	return false
+}
+
+func liveCgroupPIDs() []int {
+	self := os.Getpid()
+	var live []int
+	for _, pid := range cgroupPIDs() {
+		if pid == self {
+			continue
+		}
+		if pidAlive(pid) {
+			live = append(live, pid)
+		}
+	}
+	return live
+}
+
+func workspacePIDsFromProc() []int {
+	inCgroup := make(map[int]bool)
+	for _, pid := range liveCgroupPIDs() {
+		inCgroup[pid] = true
+	}
+
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+
+	self := os.Getpid()
+	var pids []int
+	seen := make(map[int]bool)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid <= 1 || pid == self || seen[pid] || !pidAlive(pid) {
+			continue
+		}
+
+		if inCgroup[pid] || isWorkspaceExecutable(pid) {
+			seen[pid] = true
+			pids = append(pids, pid)
+		}
+	}
+
+	return pids
+}
+
+func signalPID(pid int, sig syscall.Signal) error {
+	if pid <= 1 {
+		return nil
+	}
+	return syscall.Kill(pid, sig)
+}
+
+func waitForStop(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !pidAlive(pid) && !portInUse(hostPort) {
+			return true
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	return !pidAlive(pid) && !portInUse(hostPort)
+}
+
+func portInUse(port int) bool {
+	for _, host := range []string{"127.0.0.1", "[::1]"} {
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), 250*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -626,7 +903,6 @@ func stop() {
 // ---------------------------------------------------------------------------
 
 func cg() {
-	cgroupDir := "/sys/fs/cgroup/codepilot-workspace"
 	must(os.MkdirAll(cgroupDir, 0755))
 	must(os.WriteFile(filepath.Join(cgroupDir, "pids.max"), []byte("200"), 0700))
 	must(os.WriteFile(filepath.Join(cgroupDir, "memory.max"), []byte("8589934592"), 0700)) // 8 GiB

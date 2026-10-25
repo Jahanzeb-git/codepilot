@@ -30,7 +30,7 @@ import (
 // actually started ourselves via exec.Cmd in this process — that's what lets
 // the Go runtime reap it properly. a raw pid recovered via os.FindProcess
 // doesn't give you that guarantee on Linux.
-var ( 
+var (
 	snapshotDaemonProc  *os.Process
 	agentServiceProc    *os.Process
 	workspaceServerProc *os.Process
@@ -56,6 +56,26 @@ func signalProcess(name string, p *os.Process, sig os.Signal) error {
 	return nil
 }
 
+// waitForChild reaps a child and treats a signal-terminated exit as success.
+// A graceful shutdown signals each child, so exit-by-signal is the expected
+// outcome — not an error. Only a genuine non-zero exit is reported.
+func waitForChild(name string, p *os.Process) error {
+	state, err := p.Wait()
+	if err == nil {
+		if state == nil || state.Success() {
+			return nil
+		}
+		return fmt.Errorf("%s exited with %s", name, state)
+	}
+
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+			return nil
+		}
+	}
+	return fmt.Errorf("waiting for %s: %w", name, err)
+}
+
 // cleanup blocks until we receive SIGINT/SIGTERM, then shuts every child
 // down. order matters here: the snapshot daemon needs to actually finish
 // its B2 sync before we let the VM disappear, so we signal it first and
@@ -69,22 +89,20 @@ func signalProcess(name string, p *os.Process, sig os.Signal) error {
 // aborts the rest — we always attempt all three and report every error we
 // hit at the end, otherwise a daemon that already exited would leave the
 // agent and workspace server never signalled at all.
-func cleanup() error {
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+func cleanup(sigChan <-chan os.Signal) error {
 	sig := <-sigChan
 	fmt.Printf("[INFO] received signal: %s, shutting down gracefully...\n", sig)
 
 	var errs []error
 
-	if snapshotDaemonProc != nil { 
+	if snapshotDaemonProc != nil {
 		fmt.Println("[INFO] notifying B2 snapshot daemon to sync...")
 		if err := signalProcess("snapshot-daemon", snapshotDaemonProc, sig); err != nil {
 			errs = append(errs, err)
-		} else if _, err := snapshotDaemonProc.Wait(); err != nil {
+		} else if err := waitForChild("snapshot-daemon", snapshotDaemonProc); err != nil {
 			// don't bail here either — we still want to try shutting the
 			// other two down even if reaping the daemon itself errored.
-			errs = append(errs, fmt.Errorf("waiting for snapshot-daemon: %w", err))
+			errs = append(errs, err)
 		} else {
 			fmt.Println("[INFO] B2 sync complete.")
 		}
@@ -100,13 +118,13 @@ func cleanup() error {
 	// now actually wait for the last two to finish exiting instead of
 	// racing main()'s return against them.
 	if agentServiceProc != nil {
-		if _, err := agentServiceProc.Wait(); err != nil {
-			errs = append(errs, fmt.Errorf("waiting for agent-service: %w", err))
+		if err := waitForChild("agent-service", agentServiceProc); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	if workspaceServerProc != nil {
-		if _, err := workspaceServerProc.Wait(); err != nil {
-			errs = append(errs, fmt.Errorf("waiting for workspace-server: %w", err))
+		if err := waitForChild("workspace-server", workspaceServerProc); err != nil {
+			errs = append(errs, err)
 		}
 	}
 
@@ -239,6 +257,12 @@ func StartWorkspaceServer() {
 }
 
 func main() {
+	// Register the shutdown handler before anything else. As PID 1 in its
+	// PID namespace, initd ignores SIGINT/SIGTERM unless a handler is
+	// installed; an early `stop` would otherwise be silently lost.
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
 	HandleAgentConfig()  // make sure agent.yaml exists before anyone reads it
 	SnapshotFilesystem() // restore from B2 on first boot + start the watch daemon
 	RunAgentService()    // agent_server.py reads its secrets from env, then we scrub below
@@ -246,7 +270,15 @@ func main() {
 	// scrub secrets from THIS process's environment once the agent service
 	// has already forked off with its own copy. anything forked after this
 	// point (workspace server included) won't inherit them.
-	envVars := []string{"MACHINE_SECRET", "CONTROL_PLANE_URL", "DASHSCOPE_API_KEY", "ALIBABA_API_KEY", "VOYAGE_API_KEY", "TAVILY_API_KEY"}
+	envVars := []string{
+		"MACHINE_SECRET", "CONTROL_PLANE_URL",
+		"EXPERIENTIAL_API_KEY", "DASHSCOPE_API_KEY", "ALIBABA_API_KEY",
+		"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
+		"GOOGLE_API_KEY", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY",
+		"GROQ_API_KEY", "MISTRAL_API_KEY", "XAI_API_KEY",
+		"TOGETHER_API_KEY", "FIREWORKS_API_KEY", "CEREBRAS_API_KEY",
+		"VOYAGE_API_KEY", "TAVILY_API_KEY",
+	}
 	for _, envVar := range envVars {
 		os.Unsetenv(envVar)
 	}
@@ -263,7 +295,7 @@ func main() {
 	StartWorkspaceServer()
 
 	// block here until SIGINT/SIGTERM, then shut everything down in order
-	if err := cleanup(); err != nil {
+	if err := cleanup(sigChan); err != nil {
 		fmt.Fprintf(os.Stderr, "[ERROR] cleanup finished with errors: %v\n", err)
 		os.Exit(1)
 	}

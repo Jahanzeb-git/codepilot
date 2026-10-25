@@ -261,14 +261,37 @@ export class SettingsPanel {
     const d = this.settingsData;
     const provider = d?.provider || "experientiallabs";
     const models = MODEL_CATALOG[provider] || [];
-    const currentModel = models.find((m) => m.name === d?.model) || models[0];
+    const currentModel = models.find((m) => m.name === d?.model);
     const thinkingEnabled = d?.thinking?.enabled ?? false;
+    const providerOptions: [string, string][] = Object.keys(PROVIDER_LABELS).map(
+      (k) => [k, PROVIDER_LABELS[k] || k]
+    );
 
     this.body.innerHTML = `
       <div class="field-group">
-        <div class="group-title">LLM Provider ${this.infoTip("Select the AI provider. Each provider requires its own API key.")}</div>
-        ${this.selectRow("provider", "Provider", "AI model provider", Object.keys(MODEL_CATALOG).map((k) => [k, PROVIDER_LABELS[k] || k]), provider)}
-        ${this.selectRow("model", "Model", "Specific model to use", models.map((m) => [m.name, `${m.name} (${m.notes})`]), d?.model || "")}
+        <div class="group-title">LLM Provider ${this.infoTip("Select the AI provider. Every provider is routed through LiteLLM; each needs its own API key.")}</div>
+        ${this.selectRow("provider", "Provider", "AI model provider", providerOptions, provider)}
+        <div class="field-row">
+          <div class="label"><span class="t">Model</span><span class="d">Any model ID accepted by the provider</span></div>
+          <div class="control">
+            <input type="text" data-field="model" value="${escapeHtml(d?.model || "")}"
+              list="model-suggestions" placeholder="e.g. gpt-4o, claude-sonnet-5, llama3.1"
+              style="min-width:240px"/>
+            <datalist id="model-suggestions">
+              ${models.map((m) => `<option value="${escapeHtml(m.name)}">${escapeHtml(m.notes)}</option>`).join("")}
+            </datalist>
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="label"><span class="t">Base URL</span><span class="d">Optional — local or custom endpoint</span></div>
+          <div class="control"><input type="text" data-field="api-base" value="${escapeHtml(d?.api_base || "")}"
+            placeholder="e.g. http://localhost:8000/v1" style="min-width:240px"/></div>
+        </div>
+        <div class="field-row">
+          <div class="label"><span class="t">API Version</span><span class="d">Optional — Azure OpenAI only</span></div>
+          <div class="control"><input type="text" data-field="api-version" value="${escapeHtml(d?.api_version || "")}"
+            placeholder="e.g. 2024-10-21" style="min-width:240px"/></div>
+        </div>
       </div>
       <div class="field-group">
         <div class="group-title">Parameters ${this.infoTip("Temperature: higher = more creative, lower = more deterministic. Max tokens: maximum output length.")}</div>
@@ -344,11 +367,21 @@ export class SettingsPanel {
       const models = MODEL_CATALOG[providerSel.value] || [];
       d.model = models[0]?.name || "";
       d.api_key_env = PROVIDER_API_KEY_ENV[providerSel.value] || "";
+      // Preset the known gateway/regional endpoints; custom/local providers
+      // start blank so the user supplies the full /v1 URL.
+      if (providerSel.value === "experientiallabs") {
+        d.api_base = "https://api.experientiallabs.ai/v1";
+      } else if (providerSel.value === "alibaba") {
+        d.api_base = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
+      } else {
+        d.api_base = "";
+      }
       this.renderTab();
     });
 
-    const modelSel = this.body.querySelector('[data-field="model"]') as HTMLSelectElement | null;
-    modelSel?.addEventListener("change", () => { d.model = modelSel.value; this.renderTab(); });
+    this.onText("model", (v) => (d.model = v));
+    this.onText("api-base", (v) => (d.api_base = v));
+    this.onText("api-version", (v) => (d.api_version = v));
 
     this.onNum("temperature", (v) => (d.temperature = v));
     this.onNum("max-tokens", (v) => (d.max_tokens = v));
@@ -666,6 +699,8 @@ export class SettingsPanel {
       temperature: d.temperature,
       max_tokens: d.max_tokens,
       api_key_env: d.api_key_env,
+      api_base: d.api_base || "",
+      api_version: d.api_version || "",
       thinking: {
         enabled: d.thinking.enabled,
         reasoning_effort: d.thinking.reasoning_effort,

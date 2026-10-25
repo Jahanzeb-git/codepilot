@@ -818,8 +818,8 @@ class TerminalManager:
 
     def execute(
         self,
-        session_id: str,
-        command: str,
+        session_id: str = "main",
+        command: str = "",
         timeout: int = 10,
         new_terminal: bool = False,
         shell: str = None,
@@ -836,6 +836,10 @@ class TerminalManager:
         Optional shell parameter: 'bash' (default on Linux/macOS), 'powershell' (default on Windows), or 'cmd'.
         Inspect [EXECUTION RESULT] before taking a dependent action.
         """
+        # Forgiving parameter resolution: handle execute("ls") or execute(command="ls")
+        if not command and session_id != "main":
+            command = session_id
+            session_id = "main"
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="execute",
             args={

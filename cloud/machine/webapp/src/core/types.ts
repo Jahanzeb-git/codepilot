@@ -119,15 +119,27 @@ export const MODEL_CATALOG: Record<string, ModelDef[]> = {
     { name: "kimi-k3", maxOutputTokens: 32768, contextWindow: 1050000, thinkingMode: "reasoning", reasoningEffortSupport: true, reasoningEffortLevels: ["low", "medium", "high"], pricing: { input: 4.00, output: 15.00 }, notes: "Kimi K3 · strong reasoning" },
     { name: "gpt-5.6-sol", maxOutputTokens: 128000, contextWindow: 1050000, thinkingMode: "reasoning", reasoningEffortSupport: true, reasoningEffortLevels: ["low", "medium", "high"], pricing: { input: 2.00, output: 10.00 }, notes: "GPT-5.6 Sol · flagship reasoning" },
   ],
+  // These lists are suggestions, not constraints — the model field is a
+  // free-text combobox so any LiteLLM model ID works.
+  gemini: [],
+  openrouter: [],
+  ollama: [],
+  openai_compatible: [],
+  litellm: [],
 };
 
 
 export const PROVIDER_API_KEY_ENV: Record<string, string> = {
   anthropic: "ANTHROPIC_API_KEY",
   openai: "OPENAI_API_KEY",
+  gemini: "GEMINI_API_KEY",
   deepseek: "DEEPSEEK_API_KEY",
   alibaba: "DASHSCOPE_API_KEY",
+  openrouter: "OPENROUTER_API_KEY",
   experientiallabs: "EXPERIENTIAL_API_KEY",
+  ollama: "OLLAMA_API_KEY",
+  openai_compatible: "LLM_API_KEY",
+  litellm: "LLM_API_KEY",
 };
 
 
@@ -135,8 +147,13 @@ export const PROVIDER_LABELS: Record<string, string> = {
   experientiallabs: "Experiential Labs",
   anthropic: "Anthropic",
   openai: "OpenAI",
+  gemini: "Google Gemini",
   deepseek: "Deepseek",
   alibaba: "Alibaba (Qwen)",
+  openrouter: "OpenRouter",
+  ollama: "Ollama (local)",
+  openai_compatible: "Custom / OpenAI-compatible",
+  litellm: "Raw LiteLLM route",
 };
 
 
@@ -173,6 +190,8 @@ export interface AgentSettingsPatch {
   max_tokens?: number;
   api_key_env?: string;
   api_key?: string;
+  api_base?: string;
+  api_version?: string;
   thinking?: { enabled: boolean; budget_tokens?: number; reasoning_effort?: string };
   max_steps?: number;
   unsafe_mode?: boolean;
@@ -200,6 +219,8 @@ export interface AgentSettingsData {
   temperature: number;
   max_tokens: number;
   api_key_env: string;
+  api_base: string;
+  api_version: string;
   thinking: { enabled: boolean; budget_tokens?: number; reasoning_effort?: string };
   max_steps: number;
   unsafe_mode: boolean;

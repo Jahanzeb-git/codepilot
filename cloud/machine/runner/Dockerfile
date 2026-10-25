@@ -38,8 +38,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir --break-system-packages codepilot-ai==0.9.39
-RUN pip install --no-cache-dir --break-system-packages dashscope
+RUN pip install --no-cache-dir --break-system-packages \
+    codepilot-ai==0.9.40 \
+    "litellm>=1.106.4,<2.0"
 RUN pip install --no-cache-dir --break-system-packages voyageai
 
 RUN mkdir -p /opt/codepilot

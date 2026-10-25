@@ -42,9 +42,20 @@ class ThinkingConfig(BaseModel):
 
 
 class ModelConfig(BaseModel):
-    provider: str = Field(..., description="LLM provider: 'anthropic', 'openai', 'gemini', 'alibaba', 'deepseek', or 'experientiallabs'")
+    provider: str = Field(..., description="LiteLLM provider: 'anthropic', 'openai', 'gemini', 'alibaba', 'deepseek', 'openrouter', 'ollama', 'openai_compatible', 'experientiallabs', or any LiteLLM prefix")
     name: str = Field(..., description="Model identifier, e.g. 'claude-3-5-sonnet-20241022'")
-    api_key_env: str = Field(default="OPENAI_API_KEY", description="Name of the env var holding the API key")
+    api_key_env: str = Field(
+        default="",
+        description="Name of the env var holding the API key. Empty means the provider's conventional variable (e.g. ANTHROPIC_API_KEY).",
+    )
+    api_base: Optional[str] = Field(
+        default=None,
+        description="Optional base URL for OpenAI-compatible/local endpoints (include /v1).",
+    )
+    api_version: Optional[str] = Field(
+        default=None,
+        description="Optional API version, required by Azure OpenAI deployments.",
+    )
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     max_tokens: int = Field(default=4096, gt=0)
     thinking: ThinkingConfig = Field(

@@ -2,41 +2,35 @@
   File: dynamic_instructions.j2
   Author: Jahanzeb Ahmed <jahanzebahmed.mail@gmail.com>
   Created: 2026-04-16
+  Updated: 2026-10-24
 
   Description:
   Dynamic (per-step) half of the CodePilot system prompt.
 
   Architectural Notes:
-  Contains the runtime environment state: working directory, OS, current time,
-  active terminal sessions, context stress, codebase snapshot, and active
-  sub-agents. This content changes every agentic step and is NEVER cached. 
-  Rendered fresh by PromptManager on each call to render().
+  Contains only runtime state that changes each step: directory, OS,
+  time, terminal sessions, context pressure, and codebase snapshot.
+  Never cached — rendered fresh by PromptManager on every call.
 
   Copyright (c) 2026 Jahanzeb Ahmed.
   Licensed under the MIT License.
 #}
-## ENVIRONMENT
+## RUNTIME ENVIRONMENT
 
-Directory: `{{ work_dir }}` — OS: `{{ os_info }}` — Time: `{{ current_time }}`
-
+`{{ work_dir }}` · `{{ os_info }}` · `{{ current_time }}`
 {% if step_info %}
-**Agentic step info:**
 {{ step_info }}
 {% endif %}
 
-## STATEFUL VIRTUAL TERMINAL (VT100 PTY)
-
-Active sessions (use session IDs with terminal tools):
+{% if shell_info %}
+**Terminal sessions:**
 {{ shell_info }}
-
----
-
+{% endif %}
 {% if context_stress %}
-**Context stress:**
-{{ context_stress }}
+**Context pressure:** {{ context_stress }}
 {% endif %}
 
-**Codebase Snapshot:**
+**Workspace:**
 ```json
 {{ codebase_snapshot }}
 ```
@@ -45,9 +39,6 @@ Active sessions (use session IDs with terminal tools):
 ---
 ## ACTIVE SUB-AGENTS
 
-The following worker agents are running in parallel. Monitor their progress and
-respond to any [Sub-Agent #N →] questions that appear in your conversation.
-
 {{ sub_agent_status }}
 {% endif %}
-{# -------------------- END OF THE DYNAMIC INSTRUCTIONS -------------------- #}
+{# -------------------- END OF DYNAMIC INSTRUCTIONS -------------------- #}

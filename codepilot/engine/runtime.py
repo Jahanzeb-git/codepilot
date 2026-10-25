@@ -50,7 +50,7 @@ from ..core.prompt import PromptManager
 from ..core.session import BaseSession, create_session
 from ..core.watcher import WorkspaceWatcher
 from ..engine.hooks import EventType, HookSystem
-from ..engine.provider import get_provider, AnthropicProvider
+from ..engine.provider import get_provider
 from ..tools.context import ContextTools
 from ..tools.filesystem import FilesystemTools
 from ..tools.interaction import InteractionTools
@@ -370,117 +370,79 @@ class AsyncRuntime:
                 if self.config.model.provider.lower() == "deepseek":
                     force_thinking = True
 
-            # 3. LLM inference — always stream internally so the second-block
-            # early-abort can fire in real time regardless of the public stream=
-            # flag. _stream_inference suppresses user-facing STREAM events when
-            # self._stream is False, preserving the external API contract exactly.
+            # 3. LLM inference with native function/tool schemas
+            tools = self.registry.build_tool_schemas()
             try:
-                response_text = await self._stream_inference(
-                    system_prompt, messages=rendered_msgs, force_thinking=force_thinking
+                response = await self.provider.chat_with_tools(
+                    messages=rendered_msgs,
+                    tools=tools,
+                    system=system_prompt,
+                    temperature=self.config.model.temperature,
+                    max_tokens=self.config.model.max_tokens,
+                    force_thinking=force_thinking,
                 )
-
             except Exception as exc:
                 error_msg = f"LLM provider error: {exc}"
                 self.hooks.emit(EventType.RUNTIME_ERROR, error=error_msg)
                 self._append_execution_result(f"PROVIDER ERROR: {error_msg}")
                 continue
 
-            # 4. Parse conflict-marker blocks.  Natural text with no blocks is
-            # a conversational response.  parse_blocks is fault-tolerant: it
-            # returns (ops, errors) so a single malformed block does not abort
-            # the good ones.
-            operations, parse_errors = parse_blocks(response_text)
+            # Stream model commentary to user if present
+            if response.text and self._stream:
+                self.hooks.emit(EventType.STREAM, text=response.text)
 
-            # 4.5 Fire observability hook with the exact raw LLM generation
-            # BEFORE any execution side effects. This is the place in the pipeline
-            # where the full, unmodified response_text is available. The CLI
-            # uses this to write a faithful trace JSON for debugging.
-            self.hooks.emit(EventType.LLM_RESPONSE, step=step, response=response_text)
-            self._record_raw_llm_generation(step, response_text)
+            self.hooks.emit(EventType.LLM_RESPONSE, step=step, response=response.text or "")
+            self._record_raw_llm_generation(step, response.text or "")
 
-            # LLM output → assistant role. Strip any hallucinated </task_N> closing
-            # tags before storing. The model sees <task_N>...</task_N> wrappers for
-            # completed tasks in the rendered context and pattern-matches by emitting
-            # a spurious </task_N> to "close" the current (unwrapped) active task.
-            # These tags are never valid in an assistant turn — strip them so the
-            # model does not reinforce the pattern on the next inference step.
-            stored_response = re.sub(r"\s*</task_\d+>", "", response_text)
-
-            stored_response = stored_response.strip()
-
-            self.messages.append({"role": _ROLE_ASSISTANT, "content": stored_response})
+            # Append assistant message with its tool calls to history.
+            # Tool calls are stored in the OpenAI wire shape so FileSession /
+            # DatabaseSession can serialize them as JSON without a custom
+            # encoder. Provider-continuity metadata is kept verbatim:
+            # Anthropic needs signed thinking_blocks, DeepSeek needs
+            # reasoning_content, and Gemini needs provider thought signatures.
+            assistant_message: Dict[str, Any] = {
+                "role": _ROLE_ASSISTANT,
+                "content": response.text or "",
+                "tool_calls": [tc.to_dict() for tc in response.tool_calls],
+            }
+            if response.thinking_blocks:
+                assistant_message["thinking_blocks"] = response.thinking_blocks
+            if response.reasoning_content:
+                assistant_message["reasoning_content"] = response.reasoning_content
+            if response.provider_specific_fields:
+                assistant_message["provider_specific_fields"] = response.provider_specific_fields
+            self.messages.append(assistant_message)
 
             # Schedule cache TTL refresh (Anthropic only)
             self._last_system_prompt = system_prompt
             self._schedule_cache_timer()
 
-            if not operations and not parse_errors:
-                # Zero parseable blocks. This is EITHER a genuine conversational
-                # reply OR a silently-dropped action — the model tried to act but
-                # used a format our conflict-marker parser cannot see (e.g. it
-                # reverted to its native SFT tool-calling syntax, or wrapped the
-                # action in a code fence). The action-intent gate disambiguates:
-                # on a strong action signal we feed a correction back and let the
-                # model re-emit in-protocol, instead of ending the turn on a no-op.
-                tool_names = (
-                    set(self.registry.as_sandbox_dict().keys())
-                    if getattr(self, "registry", None) else set()
-                )
-                intent = detect_action_intent(response_text, tool_names)
-                if intent and self._intent_gate_retries < MAX_INTENT_GATE_RETRIES:
-                    self._intent_gate_retries += 1
-                    feedback = format_intent_gate_feedback(intent)
-                    self.hooks.emit(EventType.RUNTIME_ERROR, error=f"INTENT GATE: {intent}")
-                    self._append_execution_result(feedback)
-                    continue
-                # No action intent (or retries exhausted) — genuine conversational
-                # reply. Already streamed to user.
-                self._intent_gate_retries = 0
+            if not response.tool_calls:
+                # No tool calls: conversational reply finished
                 break
 
-            # A real action step ran — reset the consecutive-gate counter.
-            self._intent_gate_retries = 0
-
-            # 5. Apply all workspace blocks, then execute the ephemeral script.
+            # 4. Dispatch tool calls sequentially (supports writing/editing multiple files)
             self._execution_buffer = []
-
-            # Feed back parse errors for each malformed block BEFORE applying
-            # the good ones.  This preserves the left-to-right reading order in
-            # [EXECUTION RESULT] so the model sees positional context.
-            for err in parse_errors:
-                err_msg = format_parse_error(err)
-                self._append_execution(err_msg)
-                self.hooks.emit(EventType.RUNTIME_ERROR, error=err_msg)
-
-            await self._apply_block_operations(operations)
-            script = self._runtime_script_path.read_text(encoding="utf-8")
-            if script:
-                await self._execute(script)
-            self._reset_runtime_script()
-
-            # 7. Assemble execution result and feed back as next user turn
-            execution_result = "\n\n".join(self._execution_buffer).strip()
-            if not execution_result:
-                execution_result = "[Diff step completed with no output.]"
-            self._append_execution_result(execution_result)
+            for call in response.tool_calls:
+                self.hooks.emit(EventType.TOOL_CALL, tool=call.name, args=call.arguments)
+                result_content = self.registry.dispatch(call)
+                self.messages.append({
+                    "role": "tool",
+                    "tool_call_id": call.call_id,
+                    "name": call.name,
+                    "content": result_content,
+                })
+                self._append_execution(result_content)
 
             if self._context_maintenance_completed:
                 self._finish_context_maintenance()
 
-            # 7. task(finish=True) was called during execution → loop terminates.
-            #    Emit trailing text (after all parsed blocks) NOW so the user's
-            #    stream reflects reality — summary appears after tools ran.
             if self._done:
-                trailing = self._extract_trailing_text(
-                    response_text, operations
-                )
-                if trailing:
-                    self.hooks.emit(EventType.STREAM, text=trailing)
-                self._done_summary = trailing
+                self._done_summary = response.text or ""
                 self.hooks.emit(EventType.FINISH, summary=self._done_summary)
                 break
 
-            # 8. Update watcher snapshots (baseline for next step's check)
+            # 5. Update watcher snapshots (baseline for next step's check)
             self._watcher.snapshot_all()
 
         # Persist after every run() call
@@ -580,68 +542,9 @@ class AsyncRuntime:
 
     def _inject_few_shot_bootstrap(self):
         """
-        Inject a synthetic 'Pre-Flight Diagnostic' sequence into an empty session.
-        This provides the LLM with real environment context (OS, Python) while
-        serving as a flawless few-shot example of:
-        1. Emitting a valid conflict-marker block for codepilot.py.
-        2. Chaining terminal commands with '&&' instead of raw newlines.
-        3. Properly closing a task with task(finish=True) in a separate step.
-        The synthetic messages use the current protocol so the model
-        pattern-matches the correct format from turn zero.
+        No-op in native tool calling. Models are pretrained on standard tool use
+        and don't require synthetic pre-flight conflict-marker bootstrap turns.
         """
-        import platform
-        import sys
-
-        is_windows = platform.system() == "Windows"
-        cmd = "python --version && ver" if is_windows else "python3 --version && uname -s -r -m"
-
-        py_ver = sys.version.split()[0]
-        os_info = f"{platform.system()} {platform.release()} {platform.machine()}"
-
-        output_body = (
-            f"Python {py_ver}\n"
-            f"{os_info}\n"
-            f"[status: completed | return_code: 0 | pid: 9999 | cwd: {self.config.runtime.work_dir}]"
-        )
-
-        self.messages.extend([
-            {
-                "role": _ROLE_USER,
-                "content": "[SYSTEM] Agent sandbox initialized. Please verify the environment context before proceeding."
-            },
-            {
-                "role": _ROLE_ASSISTANT,
-                "content": (
-                    "I will check the operating system and Python environment to ensure I have the correct context before proceeding.\n\n"
-                    "codepilot.py\n"
-                    "<<<<<<< SEARCH\n"
-                    "=======\n"
-                    f'execute("main", "{cmd}", timeout=5)\n'
-                    ">>>>>>> REPLACE"
-                )
-            },
-            {
-                "role": _ROLE_USER,
-                "content": f"[EXECUTION RESULT]\n[terminal:main:cmd1] $ {cmd}\n{output_body}"
-            },
-            {
-                "role": _ROLE_ASSISTANT,
-                "content": (
-                    "Environment verified successfully. I am standing by for the user's first task.\n\n"
-                    "codepilot.py\n"
-                    "<<<<<<< SEARCH\n"
-                    "=======\n"
-                    "task(finish=True)\n"
-                    ">>>>>>> REPLACE"
-                )
-            },
-            {
-                "role": _ROLE_USER,
-                "content": "[EXECUTION RESULT]\n[task] Task marked as complete."
-            }
-        ])
-
-        # Reset task counter so the user's first actual prompt becomes [Task 1]
         self._task_counter = 0
 
     # ====================================================================== #
@@ -885,11 +788,13 @@ class AsyncRuntime:
         enabled = (
             {tc.name for tc in self.config.tools if tc.enabled}
             if self.config.tools
-            else {"view_file", "execute", "read_output",
-                  "send_input", "terminate_terminal", "ask_user", "find",
-                  "find_and_replace_many"}
+            else {"view_file", "write_file", "edit_file", "find_and_replace_many",
+                  "execute", "read_output", "send_input", "terminate_terminal",
+                  "ask_user", "find"}
         )
         if "view_file"              in enabled: self.registry.register("view_file",              self._fs_tools.view_file)
+        if "write_file"             in enabled: self.registry.register("write_file",             self._fs_tools.write_file)
+        if "edit_file"              in enabled: self.registry.register("edit_file",              self._fs_tools.edit_file)
         if "find_and_replace_many"  in enabled: self.registry.register("find_and_replace_many",  self._fs_tools.find_and_replace_many)
         if "execute"                in enabled: self.registry.register("execute",                self._terminal_manager.execute)
         if "read_output"            in enabled: self.registry.register("read_output",            self._terminal_manager.read_output)
@@ -1123,10 +1028,11 @@ class AsyncRuntime:
         When it fires, it sends a minimal (1-token) inference call to upgrade
         the conversational cache breakpoint TTL from 5 minutes to 1 hour.
 
-        Only activates for AnthropicProvider — other providers do automatic
-        caching and don't benefit from explicit TTL management.
+        Only activates for providers that advertise ``supports_cache_refresh``
+        (currently direct Anthropic). Other providers do automatic caching and
+        don't benefit from explicit TTL management.
         """
-        if not isinstance(self.provider, AnthropicProvider):
+        if not getattr(self.provider, "supports_cache_refresh", False):
             return
 
         self._cancel_cache_timer()

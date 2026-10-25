@@ -49,11 +49,31 @@ os.makedirs(SESSIONS_DIR, exist_ok=True)
 
 _MACHINE_SECRET       = os.environ.pop("MACHINE_SECRET",       "")
 _CONTROL_PLANE_URL    = os.environ.pop("CONTROL_PLANE_URL",    "")
-_EXPERIENTIAL_API_KEY = os.environ.pop("EXPERIENTIAL_API_KEY", "")
-_DASHSCOPE_API_KEY    = os.environ.pop("DASHSCOPE_API_KEY",    "")
-_ALIBABA_API_KEY      = os.environ.pop("ALIBABA_API_KEY",      "")
-_VOYAGE_API_KEY       = os.environ.pop("VOYAGE_API_KEY",       "")
-_TAVILY_API_KEY       = os.environ.pop("TAVILY_API_KEY",       "")
+
+# Platform-provisioned credentials. Pop them out of the environment at boot so
+# child processes (terminals, PTYs, MCP servers) never inherit them; they are
+# re-injected only around Runtime.__init__ and scrubbed immediately after.
+_PLATFORM_KEY_ENVS = (
+    "EXPERIENTIAL_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "ALIBABA_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "OPENROUTER_API_KEY",
+    "GROQ_API_KEY",
+    "MISTRAL_API_KEY",
+    "XAI_API_KEY",
+    "TOGETHER_API_KEY",
+    "FIREWORKS_API_KEY",
+    "CEREBRAS_API_KEY",
+    "VOYAGE_API_KEY",
+    "TAVILY_API_KEY",
+)
+_PLATFORM_KEYS = {name: os.environ.pop(name, "") for name in _PLATFORM_KEY_ENVS}
+_TAVILY_API_KEY = _PLATFORM_KEYS.get("TAVILY_API_KEY", "")
 
 # Tracks user-supplied API key override (from update_settings).
 # When a user brings their own LLM key, this replaces the platform default
@@ -130,16 +150,9 @@ def _inject_runtime_env() -> None:
     provider and tool setup).
     """
     # Platform-provided defaults
-    if _EXPERIENTIAL_API_KEY:
-        os.environ["EXPERIENTIAL_API_KEY"] = _EXPERIENTIAL_API_KEY
-    if _DASHSCOPE_API_KEY:
-        os.environ["DASHSCOPE_API_KEY"] = _DASHSCOPE_API_KEY
-    if _ALIBABA_API_KEY:
-        os.environ["ALIBABA_API_KEY"]   = _ALIBABA_API_KEY
-    if _VOYAGE_API_KEY:
-        os.environ["VOYAGE_API_KEY"]    = _VOYAGE_API_KEY
-    if _TAVILY_API_KEY:
-        os.environ["TAVILY_API_KEY"]    = _TAVILY_API_KEY
+    for env_var, key in _PLATFORM_KEYS.items():
+        if key:
+            os.environ[env_var] = key
 
     # User override: if the user brought their own LLM key it takes precedence
     if _user_llm_key and _user_llm_env_var:
@@ -154,7 +167,7 @@ def _scrub_runtime_env() -> None:
     Remove all API keys from os.environ immediately after Runtime.__init__()
     returns. Must be called before any subprocess can fork.
     """
-    for k in ("EXPERIENTIAL_API_KEY", "DASHSCOPE_API_KEY", "ALIBABA_API_KEY", "VOYAGE_API_KEY", "TAVILY_API_KEY"):
+    for k in _PLATFORM_KEY_ENVS:
         os.environ.pop(k, None)
     # Also scrub the user's custom env var name if different from defaults
     if _user_llm_env_var:
@@ -621,6 +634,8 @@ def handle_client(conn, addr):
                             "temperature": model.get("temperature", 1.0),
                             "max_tokens": model.get("max_tokens", 65536),
                             "api_key_env": model.get("api_key_env", ""),
+                            "api_base": model.get("api_base", "") or "",
+                            "api_version": model.get("api_version", "") or "",
                             "thinking": {
                                 "enabled": thinking.get("enabled", False),
                                 "budget_tokens": thinking.get("budget_tokens"),
@@ -674,6 +689,18 @@ def handle_client(conn, addr):
                 update_if_present(data["agent"]["model"], "temperature",  settings)
                 update_if_present(data["agent"]["model"], "max_tokens",   settings)
                 update_if_present(data["agent"]["model"], "api_key_env",  settings)
+
+                # Optional endpoint overrides. These must be clearable: an
+                # empty value means "use the provider default", so remove the
+                # key instead of leaving a stale URL behind.
+                model_block = data["agent"]["model"]
+                for optional_key in ("api_base", "api_version"):
+                    if optional_key in settings:
+                        value = str(settings.get(optional_key) or "").strip()
+                        if value:
+                            model_block[optional_key] = value
+                        else:
+                            model_block.pop(optional_key, None)
 
                 # Thinking config
                 thinking_settings = settings.get("thinking", {})

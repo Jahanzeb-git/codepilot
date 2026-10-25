@@ -211,6 +211,7 @@ test_grepai/
 debug_*.py
 test_*.py
 !tests/test_diff_protocol.py
+!tests/test_litellm_provider.py
 test_*.yaml
 rdpge_trace_*.json
 

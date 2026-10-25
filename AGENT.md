@@ -39,7 +39,7 @@ codepilot/               # main Python package
     context.py           # context utilities
   engine/
     runtime.py           # Runtime, AsyncRuntime — the main agent loop (largest file)
-    provider.py          # LLM provider adapters (Anthropic, OpenAI, Gemini, DeepSeek, Alibaba, ExperientialLabs)
+    provider.py          # Unified LiteLLM adapter (routes Anthropic, OpenAI, Gemini, DeepSeek, Alibaba, local/OpenAI-compatible endpoints, and any other LiteLLM provider)
     hooks.py             # HookSystem + EventType enum + decorator helpers
     eval_trace.py        # eval trace utilities
   tools/
@@ -205,10 +205,19 @@ There is also an evaluation harness in `evals/`. The GitHub Actions workflow `.g
 
 ## Adding a New LLM Provider
 
-1. Add entries to `_PROFILES` in `codepilot/core/model_profiles.py` for every model you want auto-resolved.
-2. Add a provider adapter in `codepilot/engine/provider.py`. Follow the pattern of the existing adapters — they all implement `generate()` and `generate_stream()` coroutines.
-3. Add the provider string to the docstring of `ModelConfig.provider` in `codepilot/core/agent_file.py`.
-4. Add an example YAML in `examples/`.
+Inference is unified through LiteLLM, so a new provider normally needs **no
+adapter code**:
+
+1. Add a route alias in `_PROVIDER_ROUTES` in `codepilot/engine/provider.py`
+   if the historical provider name differs from LiteLLM's prefix.
+2. Add its conventional key env vars to `_PROVIDER_KEY_ENVS` (optional; LiteLLM
+   can also resolve credentials itself).
+3. Add entries to `_PROFILES` in `codepilot/core/model_profiles.py` for every
+   model you want auto-resolved. Unknown models must set
+   `memory.max_context_tokens` explicitly.
+4. Add the provider string to the docstring of `ModelConfig.provider` in
+   `codepilot/core/agent_file.py`, and optionally to the web settings provider
+   list in `cloud/machine/webapp/src/core/types.ts`.
 5. Run the validation checks listed under **Testing**.
 
 ---

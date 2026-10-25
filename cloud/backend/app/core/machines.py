@@ -12,6 +12,32 @@ APP_NAME = os.environ.get("APP_NAME")
 WORKSPACE_APP_NAME = os.environ.get("WORKSPACE_APP_NAME")
 RUNNER_IMAGE = os.environ.get("RUNNER_IMAGE")
 
+# Provider credentials the control plane may sponsor. Empty values are sent as
+# empty strings so a machine can start without them; users can still bring
+# their own key through the Model settings tab.
+PLATFORM_KEY_ENVS = (
+    "EXPERIENTIAL_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "ALIBABA_API_KEY",
+    "OPENROUTER_API_KEY",
+    "GROQ_API_KEY",
+    "MISTRAL_API_KEY",
+    "XAI_API_KEY",
+    "TOGETHER_API_KEY",
+    "FIREWORKS_API_KEY",
+    "VOYAGE_API_KEY",
+    "TAVILY_API_KEY",
+)
+
+
+def _platform_env() -> dict[str, str]:
+    return {name: os.environ.get(name, "") for name in PLATFORM_KEY_ENVS}
+
 
 class MachineService:
 
@@ -37,9 +63,7 @@ class MachineService:
                     "WORKSPACE_ID": workspace_id,
                     "CREDENTIALS_ENDPOINT": "https://codepilot-api.fly.dev/machines/internal/b2-credentials",
                     "CONTROL_PLANE_URL": "https://codepilot-api.fly.dev",
-                    "EXPERIENTIAL_API_KEY": os.environ.get("EXPERIENTIAL_API_KEY", ""),
-                    "VOYAGE_API_KEY": os.environ.get("VOYAGE_API_KEY", ""),
-                    "TAVILY_API_KEY": os.environ.get("TAVILY_API_KEY", "")
+                    **_platform_env(),
                 },
                 "services": [
                     {
@@ -200,10 +224,7 @@ class MachineService:
                 
                 # Also ensure the env dictionary has all required keys in case they were added since the machine was created
                 current_env = current_config.setdefault("env", {})
-                current_env["EXPERIENTIAL_API_KEY"] = os.environ.get("EXPERIENTIAL_API_KEY", "")
-                current_env["DEEPSEEK_API_KEY"] = os.environ.get("DEEPSEEK_API_KEY", "")
-                current_env["VOYAGE_API_KEY"] = os.environ.get("VOYAGE_API_KEY", "")
-                current_env["TAVILY_API_KEY"] = os.environ.get("TAVILY_API_KEY", "")
+                current_env.update(_platform_env())
                 
                 payload = {"config": current_config}
                 
