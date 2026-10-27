@@ -55,6 +55,16 @@ _log = logging.getLogger(__name__)
 
 DEFAULT_SOCKET_PATH = "/tmp/codepilot_shared.sock"
 _READ_CHUNK = 65536
+#: Prefix of the one-line JSON hello an agent client sends immediately after
+#: connecting. Human clients never send this, so the server can classify the
+#: very first bytes without guessing.
+_ROLE_HELLO_PREFIX = b'{"cp_role":'
+#: A real role hello is a tiny JSON object. Anything longer that merely starts
+#: with the prefix is human input and must be forwarded, never swallowed.
+_ROLE_HELLO_MAX = 64
+#: How long an ambiguous partial prefix may be held before it is treated as
+#: human input. Keeps a typed "{" from appearing to freeze the terminal.
+_PARTIAL_HELLO_TIMEOUT = 0.25
 
 
 # ======================================================================
@@ -128,6 +138,15 @@ class MuxServer:
         self._bash_pid: Optional[int] = None
         self._running: bool = False
         self._rcfile_path: Optional[str] = None
+
+        # Clients owned by the agent (the TerminalSession's pexpect bridge)
+        # identify themselves with a one-line JSON hello immediately after
+        # connecting. Their keystrokes are command submissions, never human
+        # activity. Only *other* clients — a browser xterm.js, VS Code,
+        # socat — can represent a human typing into the shared PTY.
+        self._client_roles: dict = {}       # server-side sock -> "agent"|"human"
+        self._client_buffers: dict = {}     # server-side sock -> pending bytes
+        self._human_input_callback = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -206,6 +225,15 @@ class MuxServer:
         self._cols = cols
         self._rows = rows
         _set_pty_size(self._master_fd, cols, rows)
+
+    def set_human_input_callback(self, callback) -> None:
+        """
+        Register ``callback(data: bytes)`` for keystrokes from non-agent
+        clients. Called from the multiplexer thread before the bytes are
+        forwarded to bash, so listeners can reset their output watermark
+        exactly at the start of a human command.
+        """
+        self._human_input_callback = callback
 
     @property
     def bash_pid(self) -> Optional[int]:
@@ -334,6 +362,8 @@ PROMPT_COMMAND="__cp_command_finished; $PROMPT_COMMAND"
                 elif key.data == "client":
                     self._handle_client_input(key.fileobj)
 
+            self._flush_stale_partial_hellos()
+
     def _handle_accept(self) -> None:
         """Accept a new client and send the JSON handshake line."""
         try:
@@ -409,11 +439,112 @@ PROMPT_COMMAND="__cp_command_finished; $PROMPT_COMMAND"
             self._close_client(client_sock)
             return
 
+        role = self._client_roles.get(client_sock)
+        if role is None:
+            role, data = self._consume_role_hello(client_sock, data)
+            if role is None:
+                # Incomplete hello — wait for the rest. The event loop flushes
+                # it as human input if it never completes.
+                return
+
+        self._deliver_client_input(client_sock, role, data)
+
+    def _consume_role_hello(self, client_sock: socket.socket, data: bytes):
+        """
+        Classify the first bytes of a client.
+
+        Returns ``(role, bytes_to_forward)``. ``role`` is None when a partial
+        hello is still being received. The agent backend writes one JSON line
+        immediately after connecting; any other first byte belongs to a human
+        client and is forwarded untouched.
+        """
+        pending = self._client_buffers.get(client_sock)
+        buf = (pending[0] if pending else b"") + data
+
+        if len(buf) < len(_ROLE_HELLO_PREFIX) and _ROLE_HELLO_PREFIX.startswith(buf):
+            # Could still become a hello. Hold it briefly; the loop flushes
+            # it as human input if the client never completes the line.
+            self._client_buffers[client_sock] = (buf, time.monotonic())
+            return None, b""
+
+        if not buf.startswith(_ROLE_HELLO_PREFIX):
+            self._client_buffers.pop(client_sock, None)
+            self._client_roles[client_sock] = "human"
+            return "human", buf
+
+        newline = buf.find(b"\n")
+        if newline < 0:
+            if len(buf) > _ROLE_HELLO_MAX:
+                # Too long to be the tiny role hello: it is human input that
+                # merely starts with the same characters. Forward it.
+                self._client_buffers.pop(client_sock, None)
+                self._client_roles[client_sock] = "human"
+                return "human", buf
+            self._client_buffers[client_sock] = (buf, time.monotonic())
+            return None, b""
+
+        hello, remainder = buf[:newline], buf[newline + 1:]
+        self._client_buffers.pop(client_sock, None)
+
+        role = None
+        try:
+            payload = json.loads(hello.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            payload = None
+        if (
+            isinstance(payload, dict)
+            and set(payload) == {"cp_role"}
+            and payload["cp_role"] in ("agent", "human")
+        ):
+            role = payload["cp_role"]
+
+        if role is None:
+            # Malformed hello: treat the client as human, but forward the
+            # bytes so we never silently drop keystrokes.
+            self._client_roles[client_sock] = "human"
+            return "human", buf
+
+        # A valid role hello is control data, never PTY input.
+        self._client_roles[client_sock] = role
+        return role, remainder
+
+    def _deliver_client_input(self, client_sock: socket.socket, role: str, data: bytes) -> None:
+        """Report human keystrokes, then forward the bytes to bash."""
+        if not data:
+            return
+
+        # Only non-agent clients can represent a human typing. Report the
+        # keystrokes before forwarding them so the session can mark the start
+        # of the human command precisely.
+        if role != "agent" and self._human_input_callback is not None:
+            try:
+                self._human_input_callback(data)
+            except Exception:
+                _log.debug("Human input callback failed.", exc_info=True)
+
         try:
             os.write(self._master_fd, data)
         except OSError as exc:
             _log.warning("Write to master_fd failed (%s) — bash may have exited.", exc)
             self._running = False
+
+    def _flush_stale_partial_hellos(self) -> None:
+        """
+        Forward held partial role hellos that never completed.
+
+        A human may type characters that happen to be a prefix of the agent
+        hello. Those bytes are held only until they diverge, complete, or this
+        short deadline expires, so a real keystroke can never be lost.
+        """
+        if not self._client_buffers:
+            return
+        now = time.monotonic()
+        for client_sock, (buf, seen_at) in list(self._client_buffers.items()):
+            if now - seen_at < _PARTIAL_HELLO_TIMEOUT:
+                continue
+            self._client_buffers.pop(client_sock, None)
+            self._client_roles[client_sock] = "human"
+            self._deliver_client_input(client_sock, "human", buf)
 
     def _close_client(self, client_sock: socket.socket, *, log: bool = True) -> None:
         """Unregister, remove, and close a client socket."""
@@ -422,6 +553,8 @@ PROMPT_COMMAND="__cp_command_finished; $PROMPT_COMMAND"
                 self._sel.unregister(client_sock)
             except (KeyError, ValueError, OSError):
                 pass
+        self._client_roles.pop(client_sock, None)
+        self._client_buffers.pop(client_sock, None)
         if client_sock in self._clients:
             self._clients.remove(client_sock)
         try:

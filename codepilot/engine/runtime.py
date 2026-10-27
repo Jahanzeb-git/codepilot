@@ -529,13 +529,19 @@ class AsyncRuntime:
             "response": response,
         })
 
-    def send_message(self, message: str):
+    def send_message(self, message: str, silent: bool = False):
         """
         Inject a user message into the running loop from any thread.
         Thread-safe and non-blocking.
+
+        ``silent=True`` still inserts the message into the LLM context but
+        suppresses the USER_MESSAGE_QUEUED / USER_MESSAGE_INJECTED events.
+        Use it for internal context (for example the terminal's environment
+        notification) that must never be rendered in the user interface.
         """
-        self._message_queue.put(message)
-        self.hooks.emit(EventType.USER_MESSAGE_QUEUED, message=message)
+        self._message_queue.put((message, silent))
+        if not silent:
+            self.hooks.emit(EventType.USER_MESSAGE_QUEUED, message=message)
 
     def abort(self):
         """Stop the loop cleanly after the current step completes."""
@@ -790,14 +796,21 @@ class AsyncRuntime:
         """Consume all queued send_message() calls and insert into history."""
         while True:
             try:
-                msg = self._message_queue.get_nowait()
+                item = self._message_queue.get_nowait()
             except queue.Empty:
                 break
+            # Older callers may have queued a bare string before the silent
+            # flag existed; treat those as visible user messages.
+            if isinstance(item, tuple):
+                msg, silent = item
+            else:
+                msg, silent = item, False
             self.messages.append({
                 "role": _ROLE_USER,
                 "content": f"{TAG_USER_INJECTION}\n{msg}",
             })
-            self.hooks.emit(EventType.USER_MESSAGE_INJECTED, message=msg)
+            if not silent:
+                self.hooks.emit(EventType.USER_MESSAGE_INJECTED, message=msg)
 
     def _register_enabled_tools(self):
         # If the user supplies a tools: list in agent.yaml, honour it exactly.
@@ -1593,9 +1606,9 @@ class Runtime:
         """Stop the loop cleanly after the current step completes."""
         self._async.abort()
 
-    def send_message(self, message: str):
+    def send_message(self, message: str, silent: bool = False):
         """Inject a user message into the running loop from any thread."""
-        self._async.send_message(message)
+        self._async.send_message(message, silent=silent)
 
     def raw_llm_generations(self) -> List[Dict[str, Any]]:
         """Return raw, uncompressed LLM generations captured for this session."""

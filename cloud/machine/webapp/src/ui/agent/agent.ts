@@ -1096,8 +1096,13 @@ const INTERNAL_PREFIXES = [
   "[Sub-Agent",
 ];
 
+// Internal terminal notifications are injected into the model context but are
+// not user-authored turns; they must never be replayed as chat history.
+const ENV_NOTIFICATION_MARKER = "[Environment Detection Notification]";
+
 function isInternalHistoryMessage(content: string): boolean {
   const trimmed = content.trimStart();
+  if (trimmed.includes(ENV_NOTIFICATION_MARKER)) return true;
   return INTERNAL_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
 }
 

@@ -167,6 +167,15 @@ class _SocketPtyBackend:
         # socket; discarding them loses shell-integration markers.
         self._pending: bytes = remainder
 
+        # Identify this client as the agent's own control channel. Without
+        # this hello, the mux server cannot distinguish an agent command from
+        # a human typing into the same shared PTY, which caused false
+        # "user just ran a command" notifications.
+        try:
+            self._sock.sendall(b'{"cp_role": "agent"}\n')
+        except OSError:
+            pass
+
         # Wrap the socket's file descriptor in pexpect.fdpexpect so the
         # rest of TerminalSession can use the identical sendline/expect API.
         # We do NOT call setwinsize() here — that is meaningless on a socket
@@ -371,6 +380,8 @@ def _create_backend(session_id: str, work_dir: str, cols: int, rows: int, shell:
     # Store server reference on the backend so:
     # (a) GC does not destroy the server while the backend is alive.
     # (b) terminate() can call server.stop() for a clean shutdown.
+    # The backend already identified itself as the agent's control channel
+    # via the cp_role hello in its constructor.
     backend._mux_server = server
     return backend
 
@@ -434,8 +445,18 @@ class TerminalSession:
         )
         self.agent_active_command = False
 
+        # Human-input tracking. The notification feature must fire only for a
+        # command a human actually submitted to the *main* terminal. Output
+        # alone is never proof of human activity: an agent command can produce
+        # output after its completion marker (multi-line input, background
+        # children, straggling PTY bytes). The multiplexer tags the agent's own
+        # client, and only keystrokes from other clients reach _on_human_input.
+        self.human_input_active = False
+        self.human_input_pending = False
+
         self._backend = _create_backend(self.session_id, work_dir, DEFAULT_COLS, DEFAULT_ROWS, shell=self.shell)
         self.pid = self._backend.pid
+
         # Virtual terminal emulator — one per session, reset before each command.
         self._screen: VirtualScreen = VirtualScreen(cols=DEFAULT_COLS, rows=DEFAULT_ROWS)
 
@@ -453,8 +474,46 @@ class TerminalSession:
         
         import threading
         self._lock = threading.Lock()
+
+        # Wire human keystroke detection only for the runtime-initialised
+        # ``main`` session. Agent-created and human-created sessions never
+        # notify the agent about "user commands". The callback is installed
+        # after _lock/_screen exist because it may run on the mux thread.
+        mux = getattr(self._backend, "_mux_server", None)
+        if mux is not None and self.on_user_command is not None and self.session_id == "main":
+            mux.set_human_input_callback(self._on_human_input)
+
         self._bg_thread = threading.Thread(target=self._bg_listener, daemon=True)
         self._bg_thread.start()
+
+    def _on_human_input(self, data: bytes):
+        """Record keystrokes from a non-agent (human) mux client.
+
+        Called on the multiplexer thread *before* the bytes are forwarded to
+        bash. We only treat a newline/Enter as a command submission; moving
+        the cursor or typing characters must not queue a notification.
+        """
+        submitted = b"\r" in data or b"\n" in data
+        with self._lock:
+            if self.agent_active_command:
+                # The agent owns the PTY right now. Its output must never be
+                # disturbed (or attributed to a human) because someone typed
+                # concurrently. The keystrokes are still forwarded to bash.
+                return
+            if not self.human_input_active:
+                # Start the notification window exactly at the first human
+                # keystroke. Clear the rendered agent output so the queued
+                # text contains the human command and its result only, not
+                # stale agent output still visible on screen. Shell-integration
+                # counters/cwd are preserved by clear_rendered().
+                self.human_input_active = True
+                self._screen.clear_rendered()
+                # Any completion flag still set belongs to output that
+                # preceded this human command; never let it fire the
+                # notification for the new command.
+                self._screen.command_finished = False
+            if submitted:
+                self.human_input_pending = True
 
     def _bg_listener(self):
         """Background thread to read socket when agent is idle and detect human commands.
@@ -464,12 +523,18 @@ class TerminalSession:
         OSC 633 shell integration init). Without this, the initial
         __cp_command_finished() from PROMPT_COMMAND fires a false
         'user ran a command' notification.
+
+        Output alone is never treated as human activity. A notification is
+        emitted only when the multiplexer saw a non-agent client submit a
+        command (``human_input_pending``) AND this is the runtime-initialised
+        ``main`` session. Agent commands are therefore structurally unable to
+        trigger this path, even if their bytes arrive after completion.
         """
         import time
         while True:
             if not self._backend.is_alive():
                 break
-            
+
             with self._lock:
                 if not getattr(self, 'agent_active_command', False) and "bash" in self.shell:
                     # Read chunks directly into screen (timeout=0 prevents blocking inside lock)
@@ -483,17 +548,41 @@ class TerminalSession:
                             # bash init (rcfile, PROMPT_COMMAND) fires OSC 633;D
                             # which looks like a completed command.
                             if time.time() - self._startup_time < 3.0:
+                                self.human_input_active = False
+                                self.human_input_pending = False
                                 self._screen.reset_delta()
-                            elif self.on_user_command:
+                            elif (
+                                self.session_id == "main"
+                                and self.human_input_pending
+                                and self.on_user_command
+                            ):
                                 output = self._screen.delta_snapshot().strip()
+                                self.human_input_active = False
+                                self.human_input_pending = False
                                 if output:
                                     self.on_user_command(self.session_id, output)
+                            else:
+                                # Agent-owned or untracked output: never notify.
+                                # Advance the watermark so the next genuine human
+                                # command starts from a clean delta.
+                                self._screen.reset_delta()
             time.sleep(0.05)
 
     def _build_full_cmd(self, command: str) -> str:
         """Wrap user command with RC/CWD markers appropriate for the shell type."""
         if "bash" in self.shell:
             # We don't need wrappers for bash anymore! OSC 633 handles it.
+            #
+            # Multi-line input is different: bash reads and executes each line
+            # as a separate command, emitting its own OSC 633;C/D pair for
+            # every line. That made run() return after the *first* line and
+            # left the rest of the script running while the session looked
+            # idle — the root cause of false "user ran a command" events.
+            # A brace group executes the whole block as one command unit in
+            # the current shell (so cd/env/vars persist) and emits exactly one
+            # C/D pair, giving deterministic completion.
+            if "\n" in command.strip():
+                return "{\n" + command + "\n}"
             return command
         elif self.shell == "powershell":
             return (
@@ -546,6 +635,11 @@ class TerminalSession:
         
         with self._lock:
             self.agent_active_command = True
+            # An agent command takes ownership of the terminal. Discard any
+            # half-typed human input state so a stale flag can never attach
+            # this command's completion to a human notification.
+            self.human_input_active = False
+            self.human_input_pending = False
             # A fresh shell may still have startup prompt bytes buffered.
             # Drain them once so a stale OSC 633;D cannot be mistaken for
             # this command's completion.
@@ -558,7 +652,14 @@ class TerminalSession:
             self._bytes_fed = 0
             c_before = self._screen.osc_633_c_count
             full_cmd = self._build_full_cmd(command)
-            self._backend.sendline(full_cmd)
+            try:
+                self._backend.sendline(full_cmd)
+            except BaseException:
+                # The shell may have died (e.g. a prior ``set -e`` failure).
+                # Never leave the session thinking an agent command is still
+                # in flight.
+                self.agent_active_command = False
+                raise
 
         if "bash" not in self.shell:
             # Discard the PTY command echo. Wait for the START marker and ignore
@@ -573,12 +674,20 @@ class TerminalSession:
             # Wait a tiny bit for the command echo to start if needed, but VirtualScreen handles it
             pass
 
-        output, completed, rc = self._read_until(timeout, delta=False)
+        try:
+            output, completed, rc = self._read_until(timeout, delta=False)
+        except BaseException:
+            # Keep the ownership flag consistent if reading fails.
+            with self._lock:
+                self.agent_active_command = False
+            raise
 
         # Fallback for shells that do not emit OSC 633;C (no PS0 support or a
         # user override). Only used when the marker was genuinely absent.
+        # Compare against the exact text sent to the PTY, which may be a
+        # brace-wrapped multi-line block rather than the raw command.
         if "bash" in self.shell and self._screen.osc_633_c_count == c_before:
-            output = _strip_command_echo(output, command)
+            output = _strip_command_echo(output, full_cmd)
 
         self.command_output_buffer = output
 
@@ -631,13 +740,27 @@ class TerminalSession:
         is injected after them.
         """
         self.last_used = time.time()
-        self._backend.send(text)   # raw send — no \r\n appended
+        with self._lock:
+            # Agent interaction owns the terminal for the duration of the
+            # read. Keep the background listener out of the PTY and discard
+            # any half-typed human input state so this output is never
+            # attributed to a human notification.
+            was_active = self.agent_active_command
+            self.agent_active_command = True
+            self.human_input_active = False
+            self.human_input_pending = False
+            self._backend.send(text)   # raw send — no \r\n appended
 
         # Full snapshot — shows the complete current terminal state.
         # Delta is wrong here: TUIs need full screen (header + content + footer),
         # and interactive prompts need complete context. Token deduplication is
         # already handled at a higher level by _collapse_previous_outputs().
-        output, completed, rc = self._read_until(timeout, delta=False)
+        try:
+            output, completed, rc = self._read_until(timeout, delta=False)
+        finally:
+            if not was_active:
+                with self._lock:
+                    self.agent_active_command = False
         self.command_output_buffer = output
 
         # Sync delta watermark so any subsequent read_new() starts fresh
@@ -853,14 +976,20 @@ class TerminalManager:
         work_dir = self.runtime.config.runtime.work_dir
         try:
             def _on_user(sid, output):
+                # Bound the injected text: a human command can produce
+                # unbounded output, and this notice becomes model context.
+                output = self._truncate(output)
                 msg = f"[Environment Detection Notification] User just ran a command in terminal {sid}:\n{output}"
-                self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="execute", result=msg)
+                # Inject into the agent's context only. This is internal
+                # context, not a UI event: emitting TOOL_RESULT/USER_MESSAGE
+                # events made the webapp render a phantom "user command" and
+                # "Queued/Injected" notice for the user.
                 # Queue as a user message for the next inference cycle rather
                 # than appending to _execution_buffer. _append_execution()
                 # pollutes the current step's result even when no task is
                 # running, causing the LLM to hallucinate about phantom
                 # commands on the next run() call.
-                self.runtime.send_message(msg)
+                self.runtime.send_message(msg, silent=True)
                 
             session = TerminalSession("main", work_dir, on_user_command=_on_user)
             session.owner = "agent"
@@ -1022,13 +1151,12 @@ class TerminalManager:
                 )
                 return result
             try:
-                def _on_user(sid, output):
-                    msg = f"[Environment Detection Notification] User just ran a command in terminal {sid}:\n{output}"
-                    self.runtime.hooks.emit(EventType.TOOL_RESULT, tool="execute", result=msg)
-                    self.runtime._append_execution(msg)
-                    
+                # Only the runtime-initialised ``main`` session reports human
+                # commands. Agent-created terminals deliberately get no
+                # on_user_command callback: their output is always agent-owned
+                # and must never masquerade as human activity.
                 work_dir = self.runtime.config.runtime.work_dir
-                session = TerminalSession(session_id, work_dir, shell=shell, on_user_command=_on_user)
+                session = TerminalSession(session_id, work_dir, shell=shell)
                 session.owner = "agent"
                 self._sessions[session_id] = session
                 self._broadcast_control_event({
