@@ -529,17 +529,30 @@ class FilesystemTools:
     # Tool: view_file
     # ------------------------------------------------------------------
 
-    def view_file(self, path: str, start_line: int = 1, end_line: int = None) -> str:
+    def view_file(
+        self,
+        path: str,
+        start_line: int = 1,
+        end_line: int = None,
+        max_lines: int = 400,
+    ) -> str:
         """
         Read file content with 1-indexed line numbers.
 
         Use start_line / end_line to read only the lines you need. Omit
-        end_line to read through the end of the file. Always read the result
+        end_line to read through the end of the file. At most max_lines lines
+        are returned per call (default 400); the footer states the last line
+        returned and the start_line to continue from. Always read the result
         before emitting a dependent edit.
         """
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="view_file",
-            args={"path": path, "start_line": start_line, "end_line": end_line},
+            args={
+                "path": path,
+                "start_line": start_line,
+                "end_line": end_line,
+                "max_lines": max_lines,
+            },
         )
         try:
             if not isinstance(start_line, int) or isinstance(start_line, bool):
@@ -563,6 +576,13 @@ class FilesystemTools:
                         "view_file",
                         f"end_line={end_line} must be >= start_line={start_line}.",
                     )
+            if not isinstance(max_lines, int) or isinstance(max_lines, bool) or max_lines < 1:
+                return self._emit_err(
+                    "view_file",
+                    f"max_lines must be a positive integer, got {max_lines!r}.",
+                )
+            # A single read is bounded even if the model asks for more.
+            max_lines = min(max_lines, 5000)
 
             abs_path = self._safe_path(path)
             if not Path(abs_path).is_file():
@@ -585,14 +605,22 @@ class FilesystemTools:
                     f"start_line={start_line} exceeds file length of {total} lines.",
                 )
 
-            e = min(end_line, total) if end_line is not None else total
             s = start_line - 1
+            requested_end = min(end_line, total) if end_line is not None else total
+            e = min(requested_end, s + max_lines)
             numbered = [f"{i + s + 1:5} | {line.rstrip()}" for i, line in enumerate(all_lines[s:e])]
             content = "\n".join(numbered)
-            footer = (
-                "\n[END OF FILE]" if e >= total
-                else f"\n[TRUNCATED: {total - e} lines remaining — use start_line={e + 1} to continue]"
-            )
+            if e >= total:
+                footer = "\n[END OF FILE]"
+            else:
+                cap_note = (
+                    f"max_lines={max_lines} reached; "
+                    if e < requested_end else ""
+                )
+                footer = (
+                    f"\n[TRUNCATED: {cap_note}{total - e} lines remaining — "
+                    f"use start_line={e + 1} to continue]"
+                )
             result = f"[view_file] '{path}' (lines {s + 1}–{e} of {total})\n{content}{footer}"
             self._emit_ok("view_file", result)
 

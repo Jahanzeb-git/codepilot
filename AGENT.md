@@ -118,7 +118,7 @@ contains no tool calls. Do not call a tool solely to signal completion.
 | `read_output` | `read_output(terminal, timeout)` | Read from a running terminal |
 | `send_input` | `send_input(terminal, text, timeout)` | Send stdin to terminal |
 | `terminate_terminal` | `terminate_terminal(terminal)` | Kill named terminal session |
-| `view_file` | `view_file(path, start_line=None, end_line=None)` | Read file contents |
+| `view_file` | `view_file(path, start_line=1, end_line=None, max_lines=400)` | Read file contents (bounded per call) |
 | `list_dir` | `list_dir(path)` | List directory entries |
 | `find_file` | `find_file(pattern, directory=".")` | Find files by glob/name |
 | `search` | `search(pattern, path, include=None)` | ripgrep search |

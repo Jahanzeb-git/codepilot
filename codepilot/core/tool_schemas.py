@@ -38,11 +38,12 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "Read a text file and return its contents with 1-indexed line "
             "numbers in the form `  42 | code`. Use start_line/end_line to "
             "read only the region you need; omit end_line to read to the end "
-            "of the file. Read a file before editing it, and re-read it after "
-            "an external change. Long reads may be capped: the result states "
-            "the last line returned and the start_line to continue from. This "
-            "tool never modifies the file. It fails if the path is missing, "
-            "is not a file, or the range is invalid."
+            "of the file. At most max_lines lines are returned per call "
+            "(default 400): the footer states the last line returned and the "
+            "start_line to continue from. Read a file before editing it, and "
+            "re-read it after an external change. This tool never modifies "
+            "the file. It fails if the path is missing, is not a file, or the "
+            "range is invalid."
         ),
         "parameters": {
             "path": {
@@ -58,6 +59,13 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                 "description": (
                     "Last line to return, inclusive. Omit to read through the "
                     "end of the file."
+                ),
+            },
+            "max_lines": {
+                "description": (
+                    "Maximum lines to return in this call. Default 400. "
+                    "Increase only when you genuinely need a larger contiguous "
+                    "region; otherwise continue with start_line."
                 ),
             },
         },

@@ -111,6 +111,10 @@ def test_enums_and_required_parameters_are_declared():
     ]
     assert "default" not in tools["execute"]["parameters"]["properties"]["command"]
 
+    view_props = tools["view_file"]["parameters"]["properties"]
+    assert view_props["max_lines"]["type"] == "integer"
+    assert view_props["max_lines"]["default"] == 400
+
 
 def test_custom_tool_keeps_full_docstring_and_infers_types():
     def custom_tool(path: str, count: Optional[int] = None, tags: List[str] = None) -> str:
