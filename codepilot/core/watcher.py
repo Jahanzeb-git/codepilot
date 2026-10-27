@@ -73,10 +73,11 @@ class WorkspaceWatcher:
         Compare all tracked files against their snapshots.
 
         Returns a formatted ``[ENVIRONMENT CHANGE]`` notification string,
-        or *None* if nothing changed.
+        or *None* if nothing changed. Modified text files include a bounded
+        unified diff so the agent can often skip a full re-read.
         """
         notifications: List[str] = []
-        total_lines = 0
+        total_diff_lines = 0
 
         for abs_path, old_state in list(self._tracked.items()):
             current = _snapshot_file(abs_path)
@@ -85,7 +86,6 @@ class WorkspaceWatcher:
             if old_state.content_hash == current.content_hash:
                 continue
 
-            # Modified — compute changed line ranges
             rel_path = os.path.relpath(abs_path, self._work_dir)
 
             # Deleted
@@ -95,8 +95,15 @@ class WorkspaceWatcher:
 
             # Created (was not there at snapshot time, now it is)
             if not old_state.exists and current.exists:
+                detail = "binary" if current.binary else f"{current.line_count} lines"
+                notifications.append(f"📄 Created: {rel_path} ({detail})")
+                continue
+
+            # Binary content cannot be diffed meaningfully.
+            if old_state.binary or current.binary:
                 notifications.append(
-                    f"📄 Created: {rel_path} ({current.line_count} lines)"
+                    f"📝 Modified: {rel_path}\n"
+                    f"  (binary file — content not shown)"
                 )
                 continue
 
@@ -105,27 +112,31 @@ class WorkspaceWatcher:
             if not changed:
                 continue
 
-            remaining_budget = min(
-                self._max_per_file,
-                self._max_total - total_lines,
-            )
             range_strs: List[str] = []
-            lines_reported = 0
-
-            for start, end in changed:
-                span = end - start + 1
-                if lines_reported + span > remaining_budget:
-                    leftover = sum(e - s + 1 for s, e in changed) - lines_reported
-                    range_strs.append(f"(… {leftover} more changed lines)")
-                    break
+            for start, end in changed[:_MAX_RANGE_LABELS]:
                 range_strs.append(f"{start}" if start == end else f"{start}-{end}")
-                lines_reported += span
+            if len(changed) > _MAX_RANGE_LABELS:
+                range_strs.append(f"… {len(changed) - _MAX_RANGE_LABELS} more ranges")
 
-            total_lines += lines_reported
-            notifications.append(
+            remaining = max(
+                0,
+                min(self._max_per_file, self._max_total - total_diff_lines),
+            )
+            diff = _format_diff(
+                old_state.lines, current.lines, rel_path, remaining,
+            )
+
+            notification = (
                 f"📝 Modified: {rel_path}\n"
                 f"  Changed lines: {', '.join(range_strs)}"
             )
+            if diff:
+                total_diff_lines += len(diff.splitlines())
+                notification += "\n" + diff
+            elif remaining == 0:
+                notification += "\n  … diff omitted (budget exhausted)"
+
+            notifications.append(notification)
 
         if not notifications:
             return None
@@ -141,17 +152,61 @@ class WorkspaceWatcher:
 # Internal helpers
 # -----------------------------------------------------------------------
 
+#: Maximum number of changed-line ranges listed per file.
+_MAX_RANGE_LABELS = 8
+#: Maximum characters per diff line (protects against minified files).
+_MAX_DIFF_LINE_CHARS = 300
+
+
+def _format_diff(
+    old_lines: List[str],
+    new_lines: List[str],
+    rel_path: str,
+    max_lines: int,
+) -> str:
+    """Return an indented, bounded unified diff for one modified text file."""
+    if max_lines <= 0:
+        return ""
+
+    diff = list(
+        difflib.unified_diff(
+            old_lines,
+            new_lines,
+            fromfile=f"a/{rel_path}",
+            tofile=f"b/{rel_path}",
+            n=2,
+            lineterm="",
+        )
+    )
+    if not diff:
+        return ""
+
+    rendered: List[str] = []
+    for line in diff:
+        if len(line) > _MAX_DIFF_LINE_CHARS:
+            line = line[:_MAX_DIFF_LINE_CHARS] + "…"
+        rendered.append("  " + line)
+
+    if len(rendered) > max_lines:
+        hidden = len(rendered) - max_lines
+        rendered = rendered[:max_lines]
+        rendered.append(f"  … diff truncated ({hidden} more lines)")
+
+    return "\n".join(rendered)
+
 class _FileState:
     """Lightweight snapshot of a single file."""
-    __slots__ = ("exists", "content_hash", "line_count", "lines")
+    __slots__ = ("exists", "content_hash", "line_count", "lines", "binary")
 
     def __init__(
         self, exists: bool, content_hash: str, line_count: int, lines: List[str],
+        binary: bool = False,
     ):
         self.exists = exists
         self.content_hash = content_hash
         self.line_count = line_count
         self.lines = lines
+        self.binary = binary
 
 
 def _snapshot_file(abs_path: str) -> _FileState:
@@ -159,10 +214,19 @@ def _snapshot_file(abs_path: str) -> _FileState:
     if not os.path.isfile(abs_path):
         return _FileState(exists=False, content_hash="", line_count=0, lines=[])
     try:
-        with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
+        with open(abs_path, "rb") as f:
+            raw = f.read()
+        h = hashlib.md5(raw, usedforsecurity=False).hexdigest()
+
+        # Binary files cannot be diffed meaningfully. NUL bytes in the first
+        # 8 KB are the same heuristic git uses.
+        if b"\x00" in raw[:8192]:
+            return _FileState(
+                exists=True, content_hash=h, line_count=0, lines=[], binary=True,
+            )
+
+        content = raw.decode("utf-8", errors="replace")
         lines = content.splitlines()
-        h = hashlib.md5(content.encode(), usedforsecurity=False).hexdigest()
         return _FileState(exists=True, content_hash=h, line_count=len(lines), lines=lines)
     except OSError:
         return _FileState(exists=False, content_hash="", line_count=0, lines=[])
