@@ -156,9 +156,16 @@ class _SocketPtyBackend:
                 )
             raw += chunk
 
-        handshake_line, _remainder = raw.split(b"\n", 1)
+        handshake_line, remainder = raw.split(b"\n", 1)
         handshake = json.loads(handshake_line.decode())
         self.pid: int = handshake["pid"]
+
+        # The server sends the handshake and then the scrollback replay with
+        # two sendall() calls. The kernel may coalesce them into one recv, so
+        # bytes after the handshake newline are real PTY output (typically the
+        # startup prompt). Keep them and deliver them before reading the
+        # socket; discarding them loses shell-integration markers.
+        self._pending: bytes = remainder
 
         # Wrap the socket's file descriptor in pexpect.fdpexpect so the
         # rest of TerminalSession can use the identical sendline/expect API.
@@ -191,6 +198,12 @@ class _SocketPtyBackend:
             return self._process.before, "EOF"
 
     def read_nonblocking(self, size: int = 65536, timeout: float = 0.5) -> str:
+        # Bytes captured alongside the handshake are older than anything still
+        # in the socket, so deliver them first.
+        if self._pending:
+            chunk = self._pending[:size]
+            self._pending = self._pending[size:]
+            return chunk.decode("utf-8", "replace")
         try:
             return self._process.read_nonblocking(size=size, timeout=timeout)
         except (pexpect.TIMEOUT, pexpect.EOF, OSError):
@@ -362,6 +375,45 @@ def _create_backend(session_id: str, work_dir: str, cols: int, rows: int, shell:
     return backend
 
 
+# ----------------------------------------------------------------------
+# Echo fallback
+# ----------------------------------------------------------------------
+
+_PROMPT_SUFFIXES = ("$ ", "# ", "> ", "% ")
+
+
+def _strip_command_echo(output: str, command: str) -> str:
+    """
+    Remove a leading command echo when the shell did not emit OSC 633;C.
+
+    This is a conservative fallback for shells without PS0 support (or where
+    the user overrode PS0). It only strips when the output begins with the
+    exact command text followed by a newline, or when a single prompt line
+    ends with the exact command. Anything ambiguous is left untouched: real
+    output is never guessed away.
+    """
+    if not output or not command:
+        return output
+
+    normalized = output.replace("\r\n", "\n").replace("\r", "\n")
+    cmd = command.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+    if not cmd:
+        return output
+
+    if normalized.startswith(cmd):
+        rest = normalized[len(cmd):]
+        if rest == "" or rest.startswith("\n"):
+            return rest.lstrip("\n")
+
+    first, _, rest = normalized.partition("\n")
+    if first.endswith(cmd):
+        prefix = first[: len(first) - len(cmd)].rstrip()
+        if any(prefix.endswith(suffix.rstrip()) for suffix in _PROMPT_SUFFIXES):
+            return rest
+
+    return output
+
+
 # ======================================================================
 #  TerminalSession — wraps a single persistent process (cross-platform)
 # ======================================================================
@@ -397,6 +449,7 @@ class TerminalSession:
         self.cwd: str = work_dir
         self._bytes_fed: int = 0   # total raw chars fed to VT screen this command
         self._startup_time: float = time.time()  # grace period for bash init
+        self._needs_startup_drain: bool = True   # discard shell-startup prompt bytes once
         
         import threading
         self._lock = threading.Lock()
@@ -457,6 +510,31 @@ class TerminalSession:
                 f'echo {self._marker}_RC_%__cp_rc%'
             )
 
+    def _drain_pending(self, timeout: float = 2.0) -> None:
+        """Consume the shell's startup prompt before the first command.
+
+        A fresh shell emits PROMPT_COMMAND's OSC 633;D and its initial prompt
+        asynchronously. If those bytes are read during the first real command,
+        the stale D can be mistaken for the command finishing. Wait for the
+        prompt-end marker (or the startup D), then clear the completed flag so
+        the first command starts from a clean lifecycle state.
+
+        This runs once per session, before the first command, so later output
+        is never discarded.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            chunk = self._backend.read_nonblocking(size=65536, timeout=0.05)
+            if chunk:
+                self._screen.feed(chunk)
+                if self._screen.osc_633_b_count > 0 or self._screen.command_finished:
+                    break
+            elif self._screen.osc_633_b_count > 0:
+                break
+            else:
+                time.sleep(0.01)
+        self._screen.command_finished = False
+
     def run(self, command: str, timeout: int):
         """Execute a command. Returns (output, completed, return_code)."""
         self.command_tag += 1
@@ -468,9 +546,17 @@ class TerminalSession:
         
         with self._lock:
             self.agent_active_command = True
+            # A fresh shell may still have startup prompt bytes buffered.
+            # Drain them once so a stale OSC 633;D cannot be mistaken for
+            # this command's completion.
+            if self._needs_startup_drain:
+                self._drain_pending()
+                self._needs_startup_drain = False
             # Reset the virtual screen so previous command output doesn't bleed in
             self._screen.reset()
+            self._screen.begin_agent_command()
             self._bytes_fed = 0
+            c_before = self._screen.osc_633_c_count
             full_cmd = self._build_full_cmd(command)
             self._backend.sendline(full_cmd)
 
@@ -488,6 +574,12 @@ class TerminalSession:
             pass
 
         output, completed, rc = self._read_until(timeout, delta=False)
+
+        # Fallback for shells that do not emit OSC 633;C (no PS0 support or a
+        # user override). Only used when the marker was genuinely absent.
+        if "bash" in self.shell and self._screen.osc_633_c_count == c_before:
+            output = _strip_command_echo(output, command)
+
         self.command_output_buffer = output
 
         # Sync the delta watermark to the current screen state.
@@ -596,6 +688,12 @@ class TerminalSession:
                 else:
                     if not self._backend.is_alive():
                         return _render(), True, -1
+                    # A held pre-C D becomes the completion signal only when
+                    # the shell never emits C (no PS0 support).
+                    if self._screen.promote_pending_d():
+                        self.cwd = self._screen.cwd or self.cwd
+                        self._screen.command_finished = False
+                        return _render(), True, self._screen.osc_633_d_rc
                     time.sleep(0.05)
             
             # Timeout

@@ -24,6 +24,7 @@ Licensed under the MIT License.
 from __future__ import annotations
 
 import threading
+import time
 from typing import List, Optional, Tuple
 
 # ── defaults ──────────────────────────────────────────────────────────────────
@@ -31,6 +32,13 @@ from typing import List, Optional, Tuple
 DEFAULT_COLS   = 220
 DEFAULT_ROWS   = 50
 MAX_SCROLLBACK = 10_000   # hard cap — prevents unbounded memory growth
+
+#: Grace window for a D that arrives before the command's C marker. A fresh
+#: shell can emit its startup PROMPT_COMMAND D after the command echo but
+#: before bash reads/executes the command. A D inside this window is held;
+#: if C arrives, it was stale; if C never arrives, the shell lacks PS0 and
+#: the held D is promoted after the window.
+_C_GRACE_SECONDS = 1.0
 
 # ── parser states (int constants are faster than Enum in hot loops) ───────────
 
@@ -108,6 +116,26 @@ class VirtualScreen:
         self.cwd: Optional[str] = None
         self.command_finished: bool = False
 
+        # Echo handling. ``clear_on_c`` is enabled only for an agent command:
+        # everything rendered before OSC 633;C is the PTY's echo of the command
+        # line (and possibly a stale prompt), never command output. Clearing it
+        # there is precise and cannot drop real output.
+        self.clear_on_c: bool = False
+        self._c_cleared: bool = False
+        # After OSC 633;D, bash prints the next prompt. Suppress its visible
+        # text until OSC 633;B (prompt end) so prompt glyphs never leak into
+        # command output. Only enabled once shell integration has been seen.
+        self._suppress_prompt: bool = False
+        self._has_shell_integration: bool = False
+        self._post_command: bool = False
+
+        # A D that arrives before the command's C marker may be the shell's
+        # startup PROMPT_COMMAND D rather than this command's completion.
+        # Hold it and promote it only if C never arrives (no PS0 support).
+        self._c_seen: bool = False
+        self._command_started_at: Optional[float] = None
+        self._pending_d_rc: Optional[int] = None
+
         # Delta watermark (index into self._scrollback)
         self._delta_mark: int = 0
 
@@ -120,6 +148,80 @@ class VirtualScreen:
             # Actually, `reset()` is called before each command in `TerminalSession`. 
             # We must clear OSC command_finished so we can wait for the new one.
             self._init_state()
+
+    def begin_agent_command(self) -> None:
+        """
+        Arm echo clearing for a command submitted by the agent.
+
+        The next OSC 633;C (emitted by bash immediately before execution)
+        clears everything rendered so far. Interactive input sent later with
+        send_input() is never cleared, because no new C marker is emitted.
+        """
+        with self._lock:
+            self.clear_on_c = True
+            self._c_cleared = False
+            self._suppress_prompt = False
+            self._post_command = False
+            self._c_seen = False
+            self._command_started_at = time.monotonic()
+            self._pending_d_rc = None
+
+    def promote_pending_d(self) -> bool:
+        """
+        Promote a held pre-C D once the grace window has elapsed.
+
+        A D that arrives before the command's C marker is normally stale
+        startup output and is discarded when C arrives. If C never arrives
+        (the shell has no PS0 support), the D is the only completion signal,
+        so promote it after ``_C_GRACE_SECONDS``. Returns True when a held D
+        was promoted and the command should be treated as finished.
+        """
+        with self._lock:
+            if self._pending_d_rc is None:
+                return False
+            if self._c_seen:
+                self._pending_d_rc = None
+                return False
+
+            started = self._command_started_at
+            elapsed = (
+                _C_GRACE_SECONDS if started is None
+                else time.monotonic() - started
+            )
+            if elapsed < _C_GRACE_SECONDS:
+                return False
+
+            self.osc_633_d_rc = self._pending_d_rc
+            self._pending_d_rc = None
+            self.command_finished = True
+            self.clear_on_c = False
+            self._post_command = True
+            return True
+
+    def clear_rendered(self) -> None:
+        """
+        Clear visible content while preserving shell-integration state.
+
+        Used at OSC 633;C to discard the echoed command line. OSC counters,
+        cwd, and command_finished are intentionally preserved because they
+        describe the command lifecycle, not the screen contents.
+        """
+        with self._lock:
+            self._grid = self._blank_grid()
+            self._scrollback = []
+            self._delta_mark = 0
+            self._row = 0
+            self._col = 0
+            self._scroll_top = 0
+            self._scroll_bot = self.rows - 1
+            self._saved_cursor = (0, 0)
+            self._suppress_prompt = False
+            self._post_command = False
+            # A new command always starts on the main screen.
+            self._in_alt = False
+            self._alt_grid = None
+            self._alt_scrollback = None
+            self._alt_saved_cursor = None
 
     def feed(self, text: str) -> None:
         """Feed raw PTY bytes (as a decoded string) into the emulator."""
@@ -286,6 +388,16 @@ class VirtualScreen:
 
         # ── NORMAL ──────────────────────────────────────────────────────────
         if state == _NORMAL:
+            if self._suppress_prompt:
+                # The next prompt is being printed after OSC 633;D. Parse
+                # escape sequences (so A/B/D state still updates) but do not
+                # render prompt glyphs or move the cursor.
+                if ch == "\x1b":
+                    self._state = _ESC
+                    return
+                if 0x80 <= ord(ch) <= 0x9F and self._handle_c1(ch):
+                    return
+                return
             if ch == "\x1b":
                 self._state = _ESC
                 return
@@ -539,13 +651,49 @@ class VirtualScreen:
                 cmd = parts[1]
                 if cmd == "A":
                     self.osc_633_a_count += 1
+                    self._has_shell_integration = True
+                    if self._post_command:
+                        # The prompt is starting after a completed command.
+                        # Suppress its glyphs until B (prompt end).
+                        self._suppress_prompt = True
+                        self._post_command = False
                 elif cmd == "B":
                     self.osc_633_b_count += 1
+                    self._has_shell_integration = True
+                    self._suppress_prompt = False
+                    self._post_command = False
                 elif cmd == "C":
                     self.osc_633_c_count += 1
+                    self._has_shell_integration = True
+                    self._post_command = False
+                    # C means the shell is about to execute this command.
+                    # Any D seen before it was stale startup output.
+                    self._c_seen = True
+                    self._pending_d_rc = None
+                    # Everything rendered before this marker is the PTY echo
+                    # of the command line (and any stale prompt). Real command
+                    # output starts after C, so clearing here cannot drop it.
+                    if self.clear_on_c and not self._c_cleared:
+                        self.clear_rendered()
+                        self._c_cleared = True
                 elif cmd == "D":
-                    self.osc_633_d_rc = int(parts[2]) if len(parts) > 2 and parts[2].lstrip('-').isdigit() else 0
-                    self.command_finished = True
+                    rc = int(parts[2]) if len(parts) > 2 and parts[2].lstrip('-').isdigit() else 0
+                    self._has_shell_integration = True
+                    if self.clear_on_c and not self._c_seen:
+                        # D arrived before this command's C marker. It is
+                        # almost certainly the shell's startup PROMPT_COMMAND
+                        # D; hold it until C arrives or the grace window ends.
+                        # The prompt that follows belongs to shell startup or
+                        # a pre-execution failure, never to command output.
+                        self._pending_d_rc = rc
+                        self._post_command = True
+                    else:
+                        self.osc_633_d_rc = rc
+                        self.command_finished = True
+                        self.clear_on_c = False
+                        # Do not suppress yet: a program could print a literal
+                        # D. Suppression starts only at the following prompt A.
+                        self._post_command = True
                 elif cmd == "P":
                     for prop in parts[2:]:
                         if prop.startswith("Cwd="):
