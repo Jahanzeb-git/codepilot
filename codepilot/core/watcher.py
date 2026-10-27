@@ -24,6 +24,11 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 
+def _plural(count: int, noun: str) -> str:
+    """Return ``"1 line"`` / ``"2 lines"`` without grammar drift."""
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
 class WorkspaceWatcher:
     """
     Detects external file changes between agent steps.
@@ -95,7 +100,10 @@ class WorkspaceWatcher:
 
             # Created (was not there at snapshot time, now it is)
             if not old_state.exists and current.exists:
-                detail = "binary" if current.binary else f"{current.line_count} lines"
+                detail = (
+                    "binary" if current.binary
+                    else _plural(current.line_count, "line")
+                )
                 notifications.append(f"📄 Created: {rel_path} ({detail})")
                 continue
 

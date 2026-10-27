@@ -83,7 +83,7 @@ def test_created_and_deleted_notifications_still_work():
 
         path.write_text("print(1)\n", encoding="utf-8")
         created = watcher.check()
-        assert created is not None and "📄 Created: new.py (1 lines)" in created
+        assert created is not None and "📄 Created: new.py (1 line)" in created
 
         watcher.snapshot_all()
         path.unlink()
