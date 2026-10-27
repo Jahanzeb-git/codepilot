@@ -77,7 +77,7 @@ class PromptManager:
         agent_name: str,
         agent_role: str,
         developer_prompt: str,
-        tool_definitions: str,
+        tool_names: set,
         work_dir: str,
         codebase_snapshot: str,
         shell_info: str = "",
@@ -90,7 +90,7 @@ class PromptManager:
             agent_name=agent_name,
             agent_role=agent_role or "a skilled software engineering assistant",
             developer_prompt=developer_prompt,
-            tool_definitions=tool_definitions,
+            tool_names=tool_names,
         )
 
         # Dynamic half — rendered fresh every step with current environment state

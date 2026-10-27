@@ -22,8 +22,11 @@ from __future__ import annotations
 import inspect
 import json
 import re
+import types
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union, get_args, get_origin
+
+from .tool_schemas import TOOL_SCHEMAS
 
 
 # ---------------------------------------------------------------------------
@@ -141,23 +144,223 @@ _PY_TO_JSON_TYPE: Dict[str, str] = {
     "list":  "array",
     "dict":  "object",
     "None":  "null",
+    "NoneType": "null",
+    "Any":   "string",
 }
 
 
-def _param_json_type(annotation) -> str:
-    """Convert a Python type annotation to a JSON Schema type string."""
+def _split_top_level(text: str) -> List[str]:
+    """Split a comma-separated annotation on top-level commas only."""
+    parts: List[str] = []
+    depth = 0
+    start = 0
+    for index, char in enumerate(text):
+        if char in "[(":
+            depth += 1
+        elif char in "])":
+            depth -= 1
+        elif char == "," and depth == 0:
+            parts.append(text[start:index].strip())
+            start = index + 1
+    tail = text[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _schema_from_string(annotation: str) -> Dict[str, Any]:
+    """
+    Infer a JSON schema from a stringized annotation.
+
+    ``from __future__ import annotations`` turns every annotation into a
+    string unless ``eval_str=True`` succeeds. This fallback keeps common
+    typing forms correct (Optional, Union, List, Tuple, Dict) even when a
+    forward reference cannot be resolved.
+    """
+    text = annotation.strip().strip("'\"")
+    if text.startswith("typing."):
+        text = text[len("typing."):]
+
+    if text.startswith("Optional[") and text.endswith("]"):
+        return _schema_from_string(text[len("Optional["):-1])
+
+    if text.startswith("Union[") and text.endswith("]"):
+        members = [
+            m for m in _split_top_level(text[len("Union["):-1])
+            if m not in ("None", "NoneType")
+        ]
+        if len(members) == 1:
+            return _schema_from_string(members[0])
+        return {"anyOf": [_schema_from_string(m) for m in members]}
+
+    for prefix in ("List", "list", "Sequence", "Set", "set", "FrozenSet"):
+        if text.startswith(prefix + "[") and text.endswith("]"):
+            inner = _split_top_level(text[len(prefix) + 1:-1])
+            return {
+                "type": "array",
+                "items": _schema_from_string(inner[0]) if inner else {},
+            }
+
+    for prefix in ("Tuple", "tuple"):
+        if text.startswith(prefix + "[") and text.endswith("]"):
+            members = [
+                m for m in _split_top_level(text[len(prefix) + 1:-1])
+                if m != "..."
+            ]
+            if len(members) == 1:
+                return {"type": "array", "items": _schema_from_string(members[0])}
+            if members:
+                return {
+                    "type": "array",
+                    "items": {"anyOf": [_schema_from_string(m) for m in members]},
+                }
+            return {"type": "array", "items": {}}
+
+    for prefix in ("Dict", "dict", "Mapping", "mapping"):
+        if text.startswith(prefix + "[") and text.endswith("]"):
+            return {"type": "object"}
+
+    base = text.rsplit(".", 1)[-1]
+    return {"type": _PY_TO_JSON_TYPE.get(base, "string")}
+
+
+def _param_schema(annotation) -> Dict[str, Any]:
+    """Convert a Python type annotation to a JSON Schema fragment."""
     if annotation is inspect.Parameter.empty:
-        return "string"
-    name = getattr(annotation, "__name__", None) or str(annotation)
-    # Handle Optional[X] → unwrap to X.
-    origin = getattr(annotation, "__origin__", None)
+        return {"type": "string"}
+    if isinstance(annotation, str):
+        return _schema_from_string(annotation)
+    if annotation is Any:
+        return {}
+    if annotation is type(None):
+        return {"type": "null"}
+
+    origin = get_origin(annotation)
     if origin is not None:
-        args = getattr(annotation, "__args__", ())
-        # Union[X, None] is Optional[X].
-        non_none = [a for a in args if a is not type(None)]
-        if non_none:
-            return _param_json_type(non_none[0])
-    return _PY_TO_JSON_TYPE.get(name, "string")
+        args = get_args(annotation)
+
+        if origin is types.UnionType or origin is Union:
+            non_none = [a for a in args if a is not type(None)]
+            if len(non_none) == 1:
+                return _param_schema(non_none[0])
+            return {"anyOf": [_param_schema(a) for a in non_none]}
+
+        if origin is tuple:
+            members = [a for a in args if a is not Ellipsis]
+            if len(members) == 1:
+                return {"type": "array", "items": _param_schema(members[0])}
+            if members:
+                return {
+                    "type": "array",
+                    "items": {"anyOf": [_param_schema(a) for a in members]},
+                }
+            return {"type": "array", "items": {}}
+
+        if origin in (list, set, frozenset):
+            return {
+                "type": "array",
+                "items": _param_schema(args[0]) if args else {},
+            }
+
+        if origin is dict:
+            return {"type": "object"}
+
+    if annotation is bool:
+        return {"type": "boolean"}
+    if annotation is int:
+        return {"type": "integer"}
+    if annotation is float:
+        return {"type": "number"}
+    if annotation is str:
+        return {"type": "string"}
+    if annotation is list:
+        return {"type": "array", "items": {}}
+    if annotation is dict:
+        return {"type": "object"}
+    if annotation is tuple:
+        return {"type": "array", "items": {}}
+
+    return {"type": "string"}
+
+
+def _safe_signature(func):
+    """Return a signature with evaluated annotations when possible."""
+    try:
+        return inspect.signature(func, eval_str=True)
+    except Exception:
+        try:
+            return inspect.signature(func)
+        except (ValueError, TypeError):
+            return None
+
+
+_DOC_SECTION_STOP = re.compile(
+    r"^\s*(Returns?|Raises?|Yields?|Examples?|Notes?|Attributes?|See Also)\s*:?\s*$",
+    re.IGNORECASE,
+)
+_DOC_ARG_HEADER = re.compile(
+    r"^\s*(Args|Arguments)\s*:?\s*$",
+    re.IGNORECASE,
+)
+_DOC_ARG_ENTRY = re.compile(
+    r"^\s{0,8}([A-Za-z_]\w*)\s*(?:\([^)]*\))?\s*:\s*(.*)$"
+)
+
+
+def _parse_docstring_params(doc: str) -> Dict[str, str]:
+    """
+    Extract Google-style ``Args:`` parameter descriptions from a docstring.
+
+    Only the explicit ``Args:``/``Arguments:`` form is parsed. Numpy-style
+    sections are intentionally ignored rather than guessed at, because a
+    wrong description is worse than no description. Built-in tools use
+    curated metadata instead of this fallback.
+    """
+    params: Dict[str, str] = {}
+    in_args = False
+    current: Optional[str] = None
+
+    for line in doc.splitlines():
+        stripped = line.strip()
+
+        if not in_args:
+            if _DOC_ARG_HEADER.match(line):
+                in_args = True
+            continue
+
+        if not stripped:
+            continue
+        if _DOC_SECTION_STOP.match(line):
+            break
+
+        match = _DOC_ARG_ENTRY.match(line)
+        if match:
+            current = match.group(1)
+            params[current] = match.group(2).strip()
+        elif current:
+            params[current] = f"{params[current]} {stripped}".strip()
+
+    return params
+
+
+def _strip_args_section(doc: str) -> str:
+    """Remove a Google-style Args section from a docstring description."""
+    lines = doc.splitlines()
+    kept: List[str] = []
+    skipping = False
+
+    for line in lines:
+        if not skipping and _DOC_ARG_HEADER.match(line):
+            skipping = True
+            continue
+        if skipping:
+            if _DOC_SECTION_STOP.match(line):
+                skipping = False
+                kept.append(line)
+            continue
+        kept.append(line)
+
+    return "\n".join(kept).strip()
 
 
 def build_openai_tools(tools: Dict[str, Any]) -> List[Dict]:
@@ -165,19 +368,24 @@ def build_openai_tools(tools: Dict[str, Any]) -> List[Dict]:
     Convert a {name: callable} tool dict into the OpenAI function-calling
     schema format used by OpenAI, Alibaba, DeepSeek, and ExperientialLabs.
 
-    Each tool's description comes from its docstring (first paragraph only,
-    to keep token cost low). Parameters are derived from the function signature.
+    Signatures supply names, types, and defaults. Curated metadata in
+    ``tool_schemas.TOOL_SCHEMAS`` supplies the complete description and
+    per-parameter contracts for built-in tools. Unregistered/custom tools
+    fall back to their full docstring and inferred signature, so no tool
+    ever reaches the model with a truncated contract.
     """
     result = []
     for name, func in tools.items():
-        try:
-            sig = inspect.signature(func)
-        except (ValueError, TypeError):
-            sig = None
+        sig = _safe_signature(func)
 
-        # Strip the full docstring to just the first paragraph.
+        meta = TOOL_SCHEMAS.get(name, {})
         raw_doc = inspect.getdoc(func) or ""
-        description = raw_doc.split("\n\n")[0].strip() or f"Call {name}."
+        description = meta.get("description")
+        if not description:
+            description = _strip_args_section(raw_doc) or f"Call {name}."
+
+        curated_params = meta.get("parameters") or {}
+        doc_params = _parse_docstring_params(raw_doc)
 
         properties: Dict[str, Any] = {}
         required: List[str] = []
@@ -193,12 +401,50 @@ def build_openai_tools(tools: Dict[str, Any]) -> List[Dict]:
                 ):
                     continue
 
-                json_type = _param_json_type(param.annotation)
-                properties[param_name] = {"type": json_type}
+                prop = _param_schema(param.annotation)
+                param_meta = dict(curated_params.get(param_name, {}))
+                if "description" not in param_meta and param_name in doc_params:
+                    param_meta["description"] = doc_params[param_name]
+
+                # Metadata may override the inferred shape (enums, unions
+                # that should be a single type, array item schemas, ...).
+                if "type" in param_meta:
+                    prop.pop("anyOf", None)
+                    prop["type"] = param_meta["type"]
+                if "items" in param_meta:
+                    prop["items"] = param_meta["items"]
+                if "enum" in param_meta:
+                    prop["enum"] = param_meta["enum"]
+                if "description" in param_meta:
+                    prop["description"] = param_meta["description"]
+                if "minimum" in param_meta:
+                    prop["minimum"] = param_meta["minimum"]
+                if "maximum" in param_meta:
+                    prop["maximum"] = param_meta["maximum"]
+
+                if param.default is not inspect.Parameter.empty and param.default is not None:
+                    # Empty-string defaults are placeholders for "optional
+                    # unless retrying"; the description carries that rule.
+                    if not (isinstance(param.default, str) and param.default == ""):
+                        try:
+                            json.dumps(param.default)
+                            prop.setdefault("default", param.default)
+                        except (TypeError, ValueError):
+                            pass
+
+                properties[param_name] = prop
 
                 # A parameter is required when it has no default value.
                 if param.default is inspect.Parameter.empty:
                     required.append(param_name)
+
+        # Explicit required list wins (e.g. execute(command=...) has a
+        # permissive default for positional calls but is semantically
+        # required in native function-calling).
+        if "required" in meta:
+            required = list(meta["required"])
+            for required_name in required:
+                properties.get(required_name, {}).pop("default", None)
 
         schema: Dict[str, Any] = {"type": "object", "properties": properties}
         if required:

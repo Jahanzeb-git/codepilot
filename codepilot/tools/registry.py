@@ -76,6 +76,10 @@ class ToolRegistry:
     def get(self, name: str) -> Optional[Callable]:
         return self._tools.get(name)
 
+    def names(self) -> List[str]:
+        """Return the names of all currently registered tools."""
+        return list(self._tools.keys())
+
     def as_sandbox_dict(self) -> Dict[str, Callable]:
         """Returns a copy of {name: callable} suitable for exec() globals."""
         return dict(self._tools)

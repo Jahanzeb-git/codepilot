@@ -31,8 +31,18 @@ class SearchWebTool:
 
     def search_web(self, query: str = "", domain: str = "", url: str = "", section: str = "") -> str:
         """
-        Search web or extract page content. Returns markdown with citations.
-        Pass query/domain to search, or url/section to read specific web page sections.
+        Search the web or extract page content. Returns markdown with citations.
+
+        Pass `query` (optionally with `domain`) to search, or `url`
+        (optionally with `section`) to read a specific web page. Provide
+        exactly one mode per call. Search results are capped and summarized;
+        page extraction returns the requested section or the page start.
+
+        Args:
+            query: Natural-language search query. Use this for discovery.
+            domain: Optional domain to restrict a search, e.g. "docs.python.org".
+            url: Exact page URL to extract. Use this instead of query to read a known page.
+            section: Optional heading or topic to extract from `url`.
         """
         # 1. Emit TOOL_CALL event for UI/hooks
         self.hooks.emit(EventType.TOOL_CALL, tool="search_web", args={"query": query, "domain": domain, "url": url, "section": section})

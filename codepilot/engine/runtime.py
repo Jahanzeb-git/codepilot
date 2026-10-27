@@ -962,7 +962,7 @@ class AsyncRuntime:
             agent_name=self.config.name,
             agent_role=self.config.role or "",
             developer_prompt=developer_prompt,
-            tool_definitions=self.registry.get_definitions(),
+            tool_names=set(self.registry.names()),
             work_dir=self.config.runtime.work_dir,
             codebase_snapshot=self.context_manager.get_formatted_snapshot(),
             shell_info=self._terminal_manager.get_prompt_info(),
