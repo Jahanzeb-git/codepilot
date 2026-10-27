@@ -34,6 +34,7 @@ Licensed under the MIT License.
 
 from __future__ import annotations
 
+import difflib
 from pathlib import Path
 from typing import Optional, List, Tuple, TYPE_CHECKING
 
@@ -77,6 +78,63 @@ class _EditResult:
     @property
     def new_line_count(self) -> int:
         return self.added_lines
+
+
+# ---------------------------------------------------------------------------
+# Edit feedback — bounded diff + human-readable counts
+# ---------------------------------------------------------------------------
+
+#: Maximum number of diff lines returned for a single edit_file call.
+_MAX_EDIT_DIFF_LINES = 40
+#: Maximum characters per diff line (protects against minified/generated files).
+_MAX_EDIT_DIFF_LINE_CHARS = 300
+
+
+def _plural(count: int, noun: str) -> str:
+    """Return ``"1 line"`` / ``"2 lines"`` without grammar drift."""
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _format_edit_diff(
+    before: str,
+    after: str,
+    path: str,
+    max_lines: int = _MAX_EDIT_DIFF_LINES,
+) -> str:
+    """
+    Return a compact unified diff for one edit_file replacement.
+
+    Each edit_file call replaces exactly one contiguous region, so the diff
+    is capped independently per call. Truncation therefore never hides a
+    second, unrelated region — there is only one region in this result.
+
+    Returns an empty string when the edit produced no textual change.
+    """
+    diff = list(
+        difflib.unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+            n=2,
+            lineterm="",
+        )
+    )
+    if not diff:
+        return ""
+
+    rendered: List[str] = []
+    for line in diff:
+        if len(line) > _MAX_EDIT_DIFF_LINE_CHARS:
+            line = line[:_MAX_EDIT_DIFF_LINE_CHARS] + "…"
+        rendered.append(line)
+
+    if len(rendered) > max_lines:
+        hidden = len(rendered) - max_lines
+        rendered = rendered[:max_lines]
+        rendered.append(f"… diff truncated ({hidden} more lines)")
+
+    return "\n".join(rendered)
 
 
 # ---------------------------------------------------------------------------
@@ -745,19 +803,28 @@ class FilesystemTools:
             cache_note = " (from cache)" if cache_id is not None else ""
 
             start = result.start_line or 1
-            if result.added_lines > 1:
+            if result.added_lines == 0:
+                region_label = (
+                    f"line {start}" if result.removed_lines == 1
+                    else f"lines {start}-{start + result.removed_lines - 1}"
+                )
+            elif result.added_lines > 1:
                 region_label = f"lines {start}-{start + result.added_lines - 1}"
             else:
                 region_label = f"line {start}"
 
             msg = (
                 f"[edit_file] '{path}' updated{cache_note}: "
-                f"replaced {result.removed_lines} lines at {region_label} "
-                f"with {result.added_lines} lines ({delta_str}). "
-                f"File now has {total_lines} lines."
+                f"replaced {_plural(result.removed_lines, 'line')} at {region_label} "
+                f"with {_plural(result.added_lines, 'line')} ({delta_str}). "
+                f"File now has {_plural(total_lines, 'line')}."
             )
             if result.warning:
                 msg += f"\n[Notice] {result.warning}"
+
+            diff = _format_edit_diff(current, result.new_content, path)
+            if diff:
+                msg += "\n" + diff
 
             return self._emit_ok("edit_file", msg)
 
