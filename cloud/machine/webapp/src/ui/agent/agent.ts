@@ -575,7 +575,8 @@ export class AgentPanel {
       ? (rawArgs as Record<string, unknown>)
       : null;
 
-    // Lifecycle sentinels such as task(finish) aren't user-visible work.
+    // Legacy lifecycle sentinels (e.g. task(finish)) from replayed sessions
+    // aren't user-visible work.
     if (describeTool(tool, args ?? rawOpaque).hidden) return;
 
     // The runtime emits TOOL_CALL before dispatch, and most tools emit their

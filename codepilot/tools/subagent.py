@@ -456,7 +456,7 @@ class SubAgentTools:
                     "You are a focused worker agent completing a bounded task. "
                     "Complete it precisely and efficiently. "
                     "Use ask_main_agent() if you need clarification. "
-                    "Call task(finish=True) when done with a clear summary."
+                    "When done, write a clear summary and stop calling tools."
                 ),
                 "model": {
                     "provider": provider,

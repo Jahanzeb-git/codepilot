@@ -148,7 +148,7 @@ class ToolRegistry:
             "### 🔌 MCP Tools": ["mcp"],
             "### 🧠 Context Maintenance": ["archive_context"],
             "### 🤖 Sub-Agent Delegation": ["spawn_subagent", "await_subagent"],
-            "### ⚙️ Runtime Control & Interaction": ["ask_user", "task"],
+            "### ⚙️ Runtime Control & Interaction": ["ask_user"],
         }
 
         lines = []

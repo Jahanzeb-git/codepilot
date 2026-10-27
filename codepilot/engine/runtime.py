@@ -254,8 +254,6 @@ class AsyncRuntime:
         # ------------------------------------------------------------------ #
         #  Control flags                                                       #
         # ------------------------------------------------------------------ #
-        self._done:         bool = False
-        self._done_summary: str  = ""
         self._abort:        bool = False
 
         # ------------------------------------------------------------------ #
@@ -294,11 +292,13 @@ class AsyncRuntime:
         """
         Run a task within the current conversation context.
 
+        The loop ends when the model replies without calling any tools, when
+        max_steps is reached, or when the run is aborted.
+
         Returns:
-            The summary string from the completion block, or None if the loop ended
-            for any other reason (max_steps, abort).
+            Always None. Kept for backward compatibility with callers that
+            treated the old completion sentinel as an optional summary.
         """
-        self._done  = False
         self._abort = False
         self._terminal_manager.ensure_default_terminal()
 
@@ -335,7 +335,7 @@ class AsyncRuntime:
         self.hooks.emit(EventType.START, task=task)
 
         step = 0
-        while step < self.config.runtime.max_steps and not self._done and not self._abort:
+        while step < self.config.runtime.max_steps and not self._abort:
             step += 1
             self.hooks.emit(EventType.STEP, step=step, max_steps=self.config.runtime.max_steps)
 
@@ -461,11 +461,6 @@ class AsyncRuntime:
             if self._context_maintenance_completed:
                 self._finish_context_maintenance()
 
-            if self._done:
-                self._done_summary = response.text or ""
-                self.hooks.emit(EventType.FINISH, summary=self._done_summary)
-                break
-
             # 5. Update watcher snapshots (baseline for next step's check)
             self._watcher.snapshot_all()
 
@@ -486,15 +481,15 @@ class AsyncRuntime:
         # Note: do NOT cancel the cache timer here.
         # It should fire between tasks to upgrade TTL to 1h.
 
-        if not self._done and not self._abort:
+        if not self._abort:
             if step >= self.config.runtime.max_steps:
                 self.hooks.emit(EventType.MAX_STEPS)
             else:
-                # Stream was naturally closed due to a conversational reply rather than a completion block.
-                # Emit a FINISH event so the UI gracefully restores its state.
+                # The model replied without calling a tool: the turn is done.
+                # Emit FINISH so the UI gracefully restores its state.
                 self.hooks.emit(EventType.FINISH, summary="Agent replied. Standing by for next task.")
 
-        return self._done_summary if self._done else None
+        return None
 
     def reset(self):
         """Wipe the entire conversation history and start fresh (sync sessions)."""
@@ -857,7 +852,6 @@ class AsyncRuntime:
         capabilities like filesystem, terminal, or semantic search.
         """
         # Runtime control
-        self.registry.register("task",          self._task_control)
         self.registry.register("retry_block",   self.retry_block)
 
         # Sub-agent tools — only registered when enabled in config
@@ -944,26 +938,6 @@ class AsyncRuntime:
         self.registry.unregister("archive_context")
         self._context_maintenance_active = False
         self._context_maintenance_completed = False
-
-    def _task_control(self, *, finish: bool = False):
-        """Signal task lifecycle events.
-
-        task(finish=True) — marks the current task as complete. The agentic
-        loop terminates after this step finishes executing. Write your
-        final summary as plain text before or after the diff records.
-        """
-        if finish:
-            self._done = True
-            message = "[task] Task marked as complete."
-        else:
-            message = "[task] No action taken (finish=False)."
-
-        self._append_execution(message)
-        # Emit a result so the tool message is never empty. Anthropic rejects
-        # empty tool_result blocks, and host UIs need a completion signal for
-        # the row they rendered when the call started.
-        self.hooks.emit(EventType.TOOL_RESULT, tool="task", result=message)
-        return message
 
     def _build_system_prompt(self, step: int = 0, max_steps: int = 0) -> SystemPromptParts:
         # Build sub-agent status block (empty when none active)

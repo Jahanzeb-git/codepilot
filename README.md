@@ -195,7 +195,7 @@ The model still operates under a strict protocol:
 
 - `<path>` on its own line immediately before `<<<<<<< SEARCH`: a complete file mutation.
 - `codepilot.py` with an empty SEARCH section: fresh executable tool script.
-- `task(finish=True)` in the script: explicit task-finished signal.
+- No tool calls in a response: the turn ends and control returns to the user.
 
 This aligns with research showing that LLM agents benefit from interleaving reasoning and environment actions, as in ReAct, and from well-designed agent-computer interfaces for software engineering tasks.
 

@@ -103,12 +103,10 @@ codepilot/core/session.py
 
 SEARCH must uniquely match exactly one location in the file. Zero-match or multi-match is rejected. Leave SEARCH empty for full-file creation or complete rewrites.
 
-### Task completion signal
+### Finishing a turn
 
-```python
-# Inside a codepilot.py block:
-task(finish=True)
-```
+Write your summary and stop calling tools. The turn ends when a response
+contains no tool calls. Do not call a tool solely to signal completion.
 
 ---
 
@@ -125,7 +123,6 @@ task(finish=True)
 | `find_file` | `find_file(pattern, directory=".")` | Find files by glob/name |
 | `search` | `search(pattern, path, include=None)` | ripgrep search |
 | `semantic_search` | `semantic_search(query, top_k=5)` | Semantic code search |
-| `task` | `task(finish=True)` | Signal task completion |
 | `ask_user` | `ask_user(question)` | Prompt user for input |
 | `spawn_subagent` | `spawn_subagent(config, task)` | Spawn a sub-agent |
 | `await_subagent` | `await_subagent(agent_id)` | Wait for sub-agent result |

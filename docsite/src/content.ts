@@ -143,10 +143,10 @@ export const sections: DocSection[] = [
       "Natural language before the control block can stream to the user immediately.",
       "Only the fenced codepilot control block executes; ordinary Python markdown is display-only.",
       "Execution results are fed back to the model as the next user turn.",
-      "The loop stops when task(finish=True) runs, max_steps is reached, or it is aborted.",
+      "The loop stops when the model replies without tool calls, max_steps is reached, or it is aborted.",
     ],
     code:
-      "```codepilot\nread_file('routes/profile.py', start_line=35, end_line=65)\ntask(finish=True)\n```",
+      "```codepilot\nread_file('routes/profile.py', start_line=35, end_line=65)\n# Reply with your summary and no tool calls to finish.\n```",
   },
   {
     id: "tools",
@@ -169,7 +169,7 @@ export const sections: DocSection[] = [
     title: "Streaming keeps the interface alive while tools wait.",
     eyebrow: "Streaming",
     description:
-      "When stream=True, the assistant's pre-tool explanation streams token by token. The control block and payload blocks buffer silently; final text is emitted after tools finish when task(finish=True) is called.",
+      "When stream=True, the assistant's pre-tool explanation streams token by token. The control block and payload blocks buffer silently; final text is emitted after tools finish and the model replies without further tool calls.",
     icon: Radio,
     points: [
       "STREAM hooks receive natural language before the first codepilot fence.",
