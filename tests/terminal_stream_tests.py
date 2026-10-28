@@ -208,6 +208,43 @@ def test_isolated_manager_never_binds_main_or_control_sockets(tmp_path):
         time.sleep(0.1)
 
 
+def test_wrapper_bytes_never_reach_the_ui_terminal():
+    """The shared xterm must show output, not the agent's safety wrapper."""
+    session = TerminalSession(f"clean_{uuid.uuid4().hex[:8]}", "/tmp")
+    ui = None
+    try:
+        session.run("echo ready", timeout=5)
+        ui = _connect_ui(session.session_id)
+
+        for command, expected in (
+            ("echo visible", b"visible"),
+            ("echo a\necho b", b"a\r\nb"),
+            ("set -e\necho before\nfalse", b"before"),
+        ):
+            out, completed, rc = session.run(command, timeout=8)
+            assert completed
+            assert "__cp_" not in out
+            assert "set +e +u" not in out
+
+            raw = _drain(ui, timeout=1.0)
+            assert expected in raw, (command, raw[-200:])
+            assert b"__cp_" not in raw, raw[-400:]
+            assert b"set +e +u" not in raw, raw[-400:]
+            # The short source trigger is erased before the output renders.
+            assert b"\x1b[1A\x1b[2K\r" in raw
+
+        tag = session._marker.strip("_").removeprefix("CP_")
+        assert not list(Path("/tmp").glob(f"cp_{tag}_*.sh"))
+    finally:
+        if ui is not None:
+            try:
+                ui.close()
+            except OSError:
+                pass
+        session.close()
+        time.sleep(0.1)
+
+
 def test_runtime_cleanup_closes_terminal_manager():
     from codepilot.engine.runtime import AsyncRuntime, Runtime
 

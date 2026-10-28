@@ -59,6 +59,12 @@ _READ_CHUNK = 65536
 # (for example a closed browser tab) is disconnected instead of growing the
 # server's memory without bound.
 _MAX_CLIENT_BACKLOG = 8 * 1024 * 1024
+
+# PIDs of bash processes owned by MuxServers. The process-wide SIGCHLD
+# handler must reap only these; `waitpid(-1)` also steals the exit status of
+# unrelated children (for example a tool's subprocess.run), making successful
+# commands look like they returned 0 or raising ChildProcessError.
+_BASH_PIDS: set[int] = set()
 #: Prefix of the one-line JSON hello an agent client sends immediately after
 #: connecting. Human clients never send this, so the server can classify the
 #: very first bytes without guessing.
@@ -183,6 +189,8 @@ class MuxServer:
     def stop(self) -> None:
         """Cleanly tear down all resources. Safe to call multiple times."""
         self._running = False
+        if self._bash_pid is not None:
+            _BASH_PIDS.discard(self._bash_pid)
 
         # Close all clients first so we can cleanly unregister them
         for client in self._clients[:]:
@@ -327,6 +335,7 @@ PROMPT_COMMAND="__cp_command_finished; $PROMPT_COMMAND"
         os.close(slave_fd)
         self._master_fd = master_fd
         self._bash_pid = pid
+        _BASH_PIDS.add(pid)
         
         # We need the parent to also know the rcfile path to clean it up
         if "bash" in self._shell:
@@ -652,20 +661,23 @@ PROMPT_COMMAND="__cp_command_finished; $PROMPT_COMMAND"
 
     def _on_sigchld(self, signum: int, frame) -> None:
         """
-        SIGCHLD handler: reap bash when it exits.
+        Reap MuxServer bash children only.
 
-        Without this, the exited bash process remains as a zombie in the
-        process table until the parent (MuxServer) itself exits.
-        os.WNOHANG ensures the handler returns immediately if no child has
-        actually changed state yet (avoids blocking the event loop).
+        ``os.waitpid(-1, ...)`` would also reap unrelated children (a tool's
+        ``subprocess.run``), corrupting their exit status. Only PIDs this
+        module spawned are eligible.
         """
-        try:
-            pid, _ = os.waitpid(-1, os.WNOHANG)
-            if pid == self._bash_pid:
-                _log.info("Bash (PID %d) confirmed exited via SIGCHLD.", pid)
-                self._running = False
-        except ChildProcessError:
-            pass
+        for pid in list(_BASH_PIDS):
+            try:
+                reaped, _ = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                _BASH_PIDS.discard(pid)
+                continue
+            if reaped:
+                _BASH_PIDS.discard(pid)
+                if pid == self._bash_pid:
+                    _log.info("Bash (PID %d) confirmed exited via SIGCHLD.", pid)
+                    self._running = False
 
 
 # ======================================================================

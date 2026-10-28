@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codepilot-ai"
-version = "0.9.42"
+version = "0.9.43"
 description = "An embeddable, code-native agentic framework featuring sandboxed execution, deterministic Git-diff editing, and persistent PTY session management."
 readme = "README.md"
 authors = [

@@ -417,6 +417,12 @@ _WRAPPER_TRACE_RE = re.compile(
     r"(?m)^\++ (?:__cp_\w+.*|set \+x|unset __cp_cmd_\w+)\n?"
 )
 
+# eval() prefixes parser errors with "bash: eval: line N:" and repeats the
+# offending command line. Normalize that to the interactive-shell message the
+# model expects, and drop the echoed command (it is already in the tool call).
+_EVAL_ECHO_RE = re.compile(r"(?m)^bash: eval: line \d+: `.*'[^\n]*\n?")
+_EVAL_PREFIX_RE = re.compile(r"(?m)^bash: eval: line \d+: ")
+
 
 def _heredoc_delimiter(command: str) -> str:
     """Pick a heredoc terminator that cannot collide with the command text."""
@@ -528,6 +534,7 @@ class TerminalSession:
         self.last_used: float = time.time()
         self.cwd: str = work_dir
         self._bytes_fed: int = 0   # total raw chars fed to VT screen this command
+        self._pending_script: Optional[str] = None  # scratch file for this command
         self._startup_time: float = time.time()  # grace period for bash init
         self._needs_startup_drain: bool = True   # discard shell-startup prompt bytes once
         
@@ -628,14 +635,21 @@ class TerminalSession:
             time.sleep(0.05)
 
     def _build_full_cmd(self, command: str) -> str:
-        """Wrap the user command for the shell, protecting the persistent session."""
+        """Return the exact text to type into the shell for *command*."""
         if "bash" in self.shell:
-            # Bash emits one OSC 633;C/D pair per *line*, so multi-line input
-            # must be sent as one brace group. The wrapper also guarantees that
-            # shell options cannot leak between execute calls.
+            # Never type the protection wrapper into the PTY. The shared UI
+            # xterm shows every echoed byte, so a wrapper looks like garbage
+            # the agent did not ask for. Write the command body to a private
+            # script instead: bash echoes only the short trigger, and the
+            # script erases that line before producing any output.
+            #
+            # A sourced file is also parse-safe: an incomplete quote or `if`
+            # hits EOF in the file and returns to the prompt, instead of
+            # leaving the interactive shell waiting on PS2 and swallowing
+            # every later command.
             if _CONTAINED_BASH_RE.search(command):
-                return self._wrap_contained_bash(command)
-            return self._wrap_guarded_bash(command)
+                return self._script_command(self._wrap_contained_bash(command))
+            return self._script_command(self._wrap_guarded_bash(command))
         elif self.shell == "powershell":
             return (
                 f'Write-Host "{self._marker}_START"; '
@@ -733,6 +747,39 @@ class TerminalSession:
             "}"
         )
 
+    def _script_command(self, body: str) -> str:
+        """
+        Write *body* to a private script and return a short source command.
+
+        Sourcing a file keeps the PTY stream clean: bash echoes only the
+        trigger, and the script erases even that line before producing output.
+        The script's own text is never echoed, so the shared xterm shows the
+        command's output instead of the safety wrapper.
+        """
+        tag = self._marker.strip("_").removeprefix("CP_")
+        path = f"/tmp/cp_{tag}_{self.command_tag}.sh"
+        erase = "printf '\\033[1A\\033[2K\\r'\n"
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(erase + body + "\n")
+            self._pending_script = path
+            return f". {path}"
+        except OSError:
+            # Correctness first: if the scratch file cannot be written, fall
+            # back to typing the wrapper.
+            return body
+
+    def _cleanup_script(self) -> None:
+        """Remove this command's scratch script, if any."""
+        path = self._pending_script
+        self._pending_script = None
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
     def _drain_pending(self, timeout: float = 2.0) -> None:
         """Consume the shell's startup prompt before the first command.
 
@@ -766,6 +813,7 @@ class TerminalSession:
         self.status = "running"
         self.return_code = None
         self.last_used = time.time()
+        self._cleanup_script()
 
         with self._lock:
             self.agent_active_command = True
@@ -793,6 +841,7 @@ class TerminalSession:
                 # Never leave the session thinking an agent command is still
                 # in flight.
                 self.agent_active_command = False
+                self._cleanup_script()
                 raise
 
         if "bash" not in self.shell:
@@ -815,6 +864,10 @@ class TerminalSession:
             with self._lock:
                 self.agent_active_command = False
             raise
+        finally:
+            # bash has already opened/parsed the script; removing the path is
+            # safe even if the command itself is still running.
+            self._cleanup_script()
 
         # Fallback for shells that do not emit OSC 633;C (no PS0 support or a
         # user override). Only used when the marker was genuinely absent.
@@ -929,6 +982,8 @@ class TerminalSession:
         def _render() -> str:
             text = self._screen.delta_snapshot() if delta else self._screen.snapshot()
             text = self._extract_cwd_marker(text)
+            text = _EVAL_ECHO_RE.sub("", text)
+            text = _EVAL_PREFIX_RE.sub("bash: ", text)
             # Remove xtrace noise emitted by the containment plumbing itself.
             return _WRAPPER_TRACE_RE.sub("", text)
 
