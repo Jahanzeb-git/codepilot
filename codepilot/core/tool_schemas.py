@@ -173,7 +173,10 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "description": (
             "Run a shell command in a persistent terminal session and return "
             "its output. The session keeps shell state (working directory, "
-            "environment, aliases) between calls. If the command finishes "
+            "environment, aliases) between calls. Shell options set with "
+            "`set` (for example `set -euo pipefail`), `source`, `eval`, "
+            "`trap`, and `exec` apply only to that one call and never leak "
+            "into later calls or terminate the session. If the command finishes "
             "within `timeout`, the result is marked completed and includes "
             "the exit code; otherwise it is marked running and you must call "
             "read_output to collect more output. Use new_terminal=True with a "

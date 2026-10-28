@@ -392,6 +392,65 @@ def _create_backend(session_id: str, work_dir: str, cols: int, rows: int, shell:
 
 _PROMPT_SUFFIXES = ("$ ", "# ", "> ", "% ")
 
+# Shell options that can terminate or pollute a *persistent* bash session if
+# they survive an execute call. ``set -e`` exits the shell on the first failed
+# command; ``set -u`` aborts the current command list; ``set -x`` traces every
+# later command, including the shell-integration prompt hook.
+_BASH_OPTION_RESET = "set +e +u +x +v +f +n; set +o pipefail 2>/dev/null"
+
+# Commands that can change shell state in ways a persistent session must not
+# inherit: ``set`` can enable errexit/nounset/xtrace, ``source``/``eval`` can
+# do so indirectly, ``trap``/``exec`` can replace or later kill the shell, and
+# assigning PS0-PS4/PROMPT_COMMAND would break completion detection. Such
+# commands run in a contained subshell, and their state is bridged back only
+# on success. The match is anchored at a command position so quoted mentions
+# like ``git commit -m 'set -x'`` are not affected.
+_CONTAINED_BASH_RE = re.compile(
+    r"(?m)(?:^|[;\n&|({]|\b(?:then|do|else)\b)\s*"
+    r"(?:(?:export\s+)?(?:PROMPT_COMMAND|PS[0-4])\+?="
+    r"|set\s+(?:-{1,2}|\+)|source\s|[.]\s|eval\s|trap\s|exec\s)"
+)
+
+# xtrace lines emitted by the containment wrapper itself. They are noise from
+# the plumbing, not from the user's command, so they never reach the model.
+_WRAPPER_TRACE_RE = re.compile(
+    r"(?m)^\++ (?:__cp_\w+.*|set \+x|unset __cp_cmd_\w+)\n?"
+)
+
+
+def _heredoc_delimiter(command: str) -> str:
+    """Pick a heredoc terminator that cannot collide with the command text."""
+    delim = f"__CP_CMD_{uuid.uuid4().hex[:12]}__"
+    while delim in command:
+        delim += "X"
+    return delim
+
+
+def _eval_wrapper(command: str, rc: str, cmd_var: str) -> str:
+    """
+    Return wrapper lines that run *command* via ``eval`` of a heredoc variable.
+
+    The command is passed as heredoc *data*, so the outer shell never parses
+    it. A syntax error therefore surfaces as ``eval`` returning 2 instead of
+    leaving bash waiting for more input on PS2 — which would swallow every
+    later command in the persistent session. It also means the command is
+    parsed with the session's real options (for example a previously enabled
+    ``extglob``), unlike a separate ``bash -n`` check.
+    """
+    delim = _heredoc_delimiter(command)
+    return (
+        f"{cmd_var}=$(command cat <<'{delim}'\n"
+        f"{command}\n"
+        f"{delim}\n"
+        ")\n"
+        f'eval "${cmd_var}"\n'
+        f"{rc}=$?\n"
+        # Turn off xtrace before the wrapper's own tail so its bookkeeping
+        # never appears in the model-visible output.
+        "set +x\n"
+        f"unset {cmd_var}\n"
+    )
+
 
 def _strip_command_echo(output: str, command: str) -> str:
     """
@@ -569,21 +628,14 @@ class TerminalSession:
             time.sleep(0.05)
 
     def _build_full_cmd(self, command: str) -> str:
-        """Wrap user command with RC/CWD markers appropriate for the shell type."""
+        """Wrap the user command for the shell, protecting the persistent session."""
         if "bash" in self.shell:
-            # We don't need wrappers for bash anymore! OSC 633 handles it.
-            #
-            # Multi-line input is different: bash reads and executes each line
-            # as a separate command, emitting its own OSC 633;C/D pair for
-            # every line. That made run() return after the *first* line and
-            # left the rest of the script running while the session looked
-            # idle — the root cause of false "user ran a command" events.
-            # A brace group executes the whole block as one command unit in
-            # the current shell (so cd/env/vars persist) and emits exactly one
-            # C/D pair, giving deterministic completion.
-            if "\n" in command.strip():
-                return "{\n" + command + "\n}"
-            return command
+            # Bash emits one OSC 633;C/D pair per *line*, so multi-line input
+            # must be sent as one brace group. The wrapper also guarantees that
+            # shell options cannot leak between execute calls.
+            if _CONTAINED_BASH_RE.search(command):
+                return self._wrap_contained_bash(command)
+            return self._wrap_guarded_bash(command)
         elif self.shell == "powershell":
             return (
                 f'Write-Host "{self._marker}_START"; '
@@ -598,6 +650,88 @@ class TerminalSession:
                 f'echo {self._marker}_CWD_%CD% & '
                 f'echo {self._marker}_RC_%__cp_rc%'
             )
+
+    def _wrap_guarded_bash(self, command: str) -> str:
+        """
+        Run a command in the current shell with option hygiene.
+
+        The reset lines run before and after the command so ``set -e/-u/-x``
+        and ``pipefail`` cannot leak into the next execute call. The command is
+        passed to ``eval`` as heredoc data, so a syntax error is reported as a
+        normal failed result instead of leaving bash on PS2. The whole thing is
+        one brace group, so bash emits a single OSC 633;C/D pair.
+        """
+        tag = self._marker.strip("_")
+        rc = f"__cp_rc_{tag}"
+        cmd_var = f"__cp_cmd_{tag}"
+        return (
+            "{\n"
+            f"{_BASH_OPTION_RESET}\n"
+            f"{_eval_wrapper(command, rc, cmd_var)}"
+            f"{_BASH_OPTION_RESET}\n"
+            f"(exit ${rc})\n"
+            "}"
+        )
+
+    def _wrap_contained_bash(self, command: str) -> str:
+        """
+        Run a command that changes shell options in a contained subshell.
+
+        A command like ``set -e; make`` must abort at the first failure, but
+        it must not abort the *persistent* shell. A subshell gives exactly
+        that semantics. On success, its working directory, variables, exported
+        environment, aliases, and functions are copied back into the session
+        so the usual persistence guarantees still hold. On failure the state
+        is deliberately not copied back: a failed script should not leave
+        half-applied ``cd``/``export`` changes behind.
+        """
+        tag = self._marker.strip("_")
+        state = f"__cp_state_{tag}"
+        dump = f"__cp_dump_{tag}"
+        var = f"__cp_v_{tag}"
+        decl = f"__cp_d_{tag}"
+        flags = f"__cp_fl_{tag}"
+        fn = f"__cp_f_{tag}"
+        rc = f"__cp_rc_{tag}"
+        cmd_var = f"__cp_cmd_{tag}"
+        return (
+            "{\n"
+            f"{_BASH_OPTION_RESET}\n"
+            f"{state}=$(mktemp /tmp/cp_state.XXXXXX 2>/dev/null) || {state}=/tmp/cp_state_$$_{tag}\n"
+            "(\n"
+            f"{dump}() {{\n"
+            "set +e +u +x\n"
+            "IFS=$' \\t\\n'\n"
+            "{\n"
+            "printf 'cd -- %q\\n' \"$PWD\"\n"
+            f"for {var} in $(compgen -v); do\n"
+            f"case \"${var}\" in __cp_*|BASH*|FUNCNAME|GROUPS|DIRSTACK|PIPESTATUS|LINENO|RANDOM|SRANDOM|SECONDS|EPOCH*|HISTCMD|OPTIND|OPTARG|COMP_*|MAIL*|PS1|PS2|PS4|PROMPT_COMMAND|PWD|OLDPWD|SHLVL|_|IFS) continue ;; esac\n"
+            f"{decl}=$(declare -p \"${var}\" 2>/dev/null) || continue\n"
+            # Readonly variables (EUID, UID, PPID, HOSTTYPE, ...) cannot be
+            # re-declared, and their values never change anyway.
+            f"{flags}=${{{decl}#declare -}}; {flags}=${{{flags}%% *}}\n"
+            f"case \"${flags}\" in *r*) continue ;; esac\n"
+            f"printf '%s\\n' \"${decl}\"\n"
+            "done\n"
+            "alias -p\n"
+            f"for {fn} in $(compgen -A function); do\n"
+            f"case \"${fn}\" in __cp_*) continue ;; esac\n"
+            f"declare -f \"${fn}\"\n"
+            "done\n"
+            f"}} > \"${state}\" 2>/dev/null\n"
+            "}\n"
+            f"trap {dump} EXIT\n"
+            f"{_eval_wrapper(command, rc, cmd_var)}"
+            f"(exit ${rc})\n"
+            ")\n"
+            f"{rc}=$?\n"
+            f"if [ \"${rc}\" -eq 0 ] && [ -s \"${state}\" ]; then\n"
+            f". \"${state}\" >/dev/null 2>&1\n"
+            "fi\n"
+            f"rm -f \"${state}\"\n"
+            f"(exit ${rc})\n"
+            "}"
+        )
 
     def _drain_pending(self, timeout: float = 2.0) -> None:
         """Consume the shell's startup prompt before the first command.
@@ -632,7 +766,7 @@ class TerminalSession:
         self.status = "running"
         self.return_code = None
         self.last_used = time.time()
-        
+
         with self._lock:
             self.agent_active_command = True
             # An agent command takes ownership of the terminal. Discard any
@@ -794,7 +928,9 @@ class TerminalSession:
         """
         def _render() -> str:
             text = self._screen.delta_snapshot() if delta else self._screen.snapshot()
-            return self._extract_cwd_marker(text)
+            text = self._extract_cwd_marker(text)
+            # Remove xtrace noise emitted by the containment plumbing itself.
+            return _WRAPPER_TRACE_RE.sub("", text)
 
         if "bash" in self.shell:
             deadline = time.monotonic() + timeout
@@ -971,9 +1107,15 @@ class TerminalManager:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def start_default_terminal(self):
-        """Start the default 'main' terminal session."""
-        work_dir = self.runtime.config.runtime.work_dir
+    def start_default_terminal(self, work_dir: str = None):
+        """Start the default 'main' terminal session.
+
+        ``work_dir`` lets recovery restart the shell in the directory the
+        previous shell was last known to be in.
+        """
+        work_dir = work_dir or self.runtime.config.runtime.work_dir
+        if not os.path.isdir(work_dir):
+            work_dir = self.runtime.config.runtime.work_dir
         try:
             def _on_user(sid, output):
                 # Bound the injected text: a human command can produce
@@ -1010,10 +1152,67 @@ class TerminalManager:
         main = self._sessions.get("main")
         if main is None or not main.is_alive():
             if main is not None:
+                # Close the dead session so its mux server and socket are
+                # cleaned up before a new shell claims the same path.
+                try:
+                    main.close()
+                except Exception:
+                    pass
                 self._sessions.pop("main", None)
                 if "main" in self._session_order:
                     self._session_order.remove("main")
             self.start_default_terminal()
+
+    def _recover_dead_session(
+        self, session_id: str, session: "TerminalSession",
+        rc: Optional[int], error: Optional[BaseException] = None,
+        before_command: bool = False,
+    ) -> str:
+        """
+        Clean up a session whose shell exited and, for ``main``, start a new one.
+
+        Returns a truthful note for the model. The note never claims success:
+        the command may have stopped halfway, and its state changes are gone.
+        """
+        last_cwd = getattr(session, "cwd", None) or self.runtime.config.runtime.work_dir
+        try:
+            session.close()
+        except Exception:
+            pass
+        self._sessions.pop(session_id, None)
+        if session_id in self._session_order:
+            self._session_order.remove(session_id)
+
+        if before_command:
+            note = (
+                f"[terminal:{session_id}] The shell had already exited before "
+                "this command could run, so the command did not run."
+            )
+        else:
+            # -1 means the socket closed before a status marker arrived, so
+            # the exit code is genuinely unknown.
+            status = rc if rc is not None and rc >= 0 else "unknown"
+            note = (
+                f"[terminal:{session_id}] The shell exited while running this "
+                f"command (status {status})."
+            )
+        if error is not None:
+            note += f" Execution error: {error}"
+        if session_id == "main":
+            self.start_default_terminal(work_dir=last_cwd)
+            note += (
+                f" A fresh 'main' shell was started in {last_cwd}. "
+                "Working-directory, environment, alias, and variable changes "
+                "made by this command were lost. Re-apply any `cd`/`export` "
+                "you still need, then verify the command's effects before "
+                "depending on them."
+            )
+        else:
+            note += (
+                " The session is no longer available. Create a new terminal "
+                "with new_terminal=True if you need to continue there."
+            )
+        return note
 
     def get_prompt_info(self) -> str:
         """Generate terminal info for the system prompt."""
@@ -1055,7 +1254,14 @@ class TerminalManager:
         Runs a shell command in a persistent virtual terminal. Captures output up to timeout seconds.
         Returns output with status: 'completed' (has return_code) or 'running'
         (timed out — use read_output() to wait more, send_input() for prompts).
-        
+
+        Shell state (cwd, environment, aliases) persists between calls, but
+        shell options set with ``set``, and commands that can replace or
+        reconfigure the shell (``source``, ``eval``, ``trap``, ``exec``), are
+        scoped to this call: they run in a contained subshell so a failure
+        cannot kill the persistent session. Their state is carried back only
+        when the call succeeds.
+
         To spawn a background process or new environment, set new_terminal=True AND provide 
         a UNIQUE new session_id (e.g., execute("server", "./run.sh", new_terminal=True)). 
         Do NOT reuse an existing session_id (like "main") when creating a new_terminal.
@@ -1186,7 +1392,10 @@ class TerminalManager:
             return result
 
         if not session.is_alive():
-            result = f"[terminal:{session_id}] Error: terminal process is dead."
+            note = self._recover_dead_session(
+                session_id, session, None, before_command=True,
+            )
+            result = f"[terminal:{session_id}] Error: terminal process was dead.\n{note}"
             self.runtime._append_execution(result)
             self.runtime.hooks.emit(
                 EventType.TOOL_RESULT, tool="execute", result=result,
@@ -1196,19 +1405,42 @@ class TerminalManager:
         # Touch session order
         self._touch_session(session_id)
 
-        # Execute
+        # Execute. A command that exits the shell (``exit 3``) or a broken
+        # pipe raises/returns with the socket closed; both are handled below
+        # so the model gets a truthful result instead of a silent dead session.
+        run_error = None
         try:
             output, completed, rc = session.run(command, timeout)
         except Exception as e:
-            result = f"[terminal:{session_id}] Execution error: {e}"
+            run_error = e
+            output, completed, rc = "", True, None
+
+        # Truncate output
+        output = self._truncate(output)
+
+        if not session.is_alive():
+            # Format before recovery: _format_output reads the session's cwd
+            # and recovery replaces (or removes) the session.
+            result = self._format_output(
+                session_id, session.command_tag, output,
+                "shell exited", rc if rc is not None and rc >= 0 else None,
+                session.pid, label=f"$ {command}",
+            )
+            note = self._recover_dead_session(session_id, session, rc, run_error)
+            result = f"{result}\n{note}"
             self.runtime._append_execution(result)
             self.runtime.hooks.emit(
                 EventType.TOOL_RESULT, tool="execute", result=result,
             )
             return result
 
-        # Truncate output
-        output = self._truncate(output)
+        if run_error is not None:
+            result = f"[terminal:{session_id}] Execution error: {run_error}"
+            self.runtime._append_execution(result)
+            self.runtime.hooks.emit(
+                EventType.TOOL_RESULT, tool="execute", result=result,
+            )
+            return result
 
         result = self._format_output(
             session_id, session.command_tag, output,

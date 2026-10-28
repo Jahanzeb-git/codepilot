@@ -138,6 +138,9 @@ class MuxServer:
         self._bash_pid: Optional[int] = None
         self._running: bool = False
         self._rcfile_path: Optional[str] = None
+        # Inode of the socket this server bound. Shutdown uses it to avoid
+        # unlinking a newer server's socket at the same path (recovery race).
+        self._bound_ino: Optional[int] = None
 
         # Clients owned by the agent (the TerminalSession's pexpect bridge)
         # identify themselves with a one-line JSON hello immediately after
@@ -188,7 +191,18 @@ class MuxServer:
             self._server.close()
             self._server = None
 
-        self._socket_path.unlink(missing_ok=True)
+        # Only remove the socket file if it is still the one we bound. A
+        # replacement server for the same session may already have claimed
+        # this path, and unlinking it would break the new session.
+        try:
+            same_socket = (
+                self._bound_ino is not None
+                and os.stat(str(self._socket_path)).st_ino == self._bound_ino
+            )
+        except OSError:
+            same_socket = False
+        if same_socket:
+            self._socket_path.unlink(missing_ok=True)
 
         if self._master_fd is not None:
             try:
@@ -333,6 +347,11 @@ PROMPT_COMMAND="__cp_command_finished; $PROMPT_COMMAND"
 
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(str(self._socket_path))
+
+        # Remember which socket this server actually created. A replacement
+        # server for the same session may bind the same path before this one
+        # finishes shutting down; stop() must not unlink the newer socket.
+        self._bound_ino = os.stat(str(self._socket_path)).st_ino
 
         # Restrict socket access to the current user only.
         os.chmod(str(self._socket_path), 0o600)
