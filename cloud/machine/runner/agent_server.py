@@ -307,11 +307,12 @@ def init_runtime(session_id: str) -> Runtime:
         print("[EVENT] on_finish called.")
         emit({"type": "finish"})
 
-    @r.hooks.register(EventType.START)
     def _start(task: str, **_):
         # Lets the UI re-arm the abort button when a queued follow-up turn
         # starts after an abort.
         emit({"type": "run_started"})
+
+    r.hooks.register(EventType.START, _start)
 
     @on_tool_call(r)
     def _tool_call(tool: str, args: dict, label: str = "", **_):
