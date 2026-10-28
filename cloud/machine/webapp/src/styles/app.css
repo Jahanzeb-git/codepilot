@@ -974,7 +974,32 @@
 .send-btn:active:not(:disabled), .abort-btn:active { transform: scale(0.94); }
 .send-btn:disabled { background: var(--bg-3); color: var(--fg-2); cursor: default; }
 .send-btn svg { width: 16px; height: 16px; }
-.abort-btn svg { width: 12px; height: 12px; }
+
+/* Abort: white circle with a red stop square inscribed in it. The square's
+   70.7% side makes its corners touch the circle's circumference. */
+.abort-btn {
+  background: #fff;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.10), 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+.abort-btn .abort-square {
+  width: 70.7%;
+  height: 70.7%;
+  background: #e53935;
+  border-radius: 1px;
+  transition: background 0.12s ease, transform 0.12s ease;
+}
+.abort-btn:hover {
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.10), 0 0 0 3px rgba(229, 57, 53, 0.22);
+}
+.abort-btn:hover .abort-square { background: #c62828; }
+.abort-btn:active .abort-square { transform: scale(0.92); }
+
+.card.abort-note {
+  color: #e53935;
+  background: rgba(229, 57, 53, 0.08);
+  border: 1px solid rgba(229, 57, 53, 0.28);
+  font-weight: 600;
+}
 
 .composer-meta {
   display: flex;

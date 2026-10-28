@@ -461,7 +461,10 @@ class AsyncRuntime:
             self._execution_buffer = []
             for call in response.tool_calls:
                 self.hooks.emit(EventType.TOOL_CALL, tool=call.name, args=call.arguments)
-                result_content = self.registry.dispatch(call)
+                # Run synchronous tools off the event loop. MCP's blocking
+                # future and long terminal commands must not freeze the loop;
+                # otherwise abort and queued messages cannot be serviced.
+                result_content = await asyncio.to_thread(self.registry.dispatch, call)
                 self.messages.append({
                     "role": "tool",
                     "tool_call_id": call.call_id,
@@ -500,6 +503,15 @@ class AsyncRuntime:
                 # The model replied without calling a tool: the turn is done.
                 # Emit FINISH so the UI gracefully restores its state.
                 self.hooks.emit(EventType.FINISH, summary="Agent replied. Standing by for next task.")
+
+        if self._abort:
+            # The user aborted while this turn was running. A message sent
+            # during the turn was queued; run it now instead of leaving the
+            # UI stuck on "Queued ... will run after the current step".
+            self._abort = False
+            queued = self._pop_queued_messages()
+            if queued:
+                return await self.run("\n\n".join(queued))
 
         return None
 
@@ -573,6 +585,10 @@ class AsyncRuntime:
     def abort(self):
         """Stop the loop cleanly after the current step completes."""
         self._abort = True
+
+    def is_aborted(self) -> bool:
+        """True once abort() has been requested for the current run."""
+        return self._abort
 
     def register_tool(self, name: str, func, replace: bool = False):
         """
@@ -838,6 +854,22 @@ class AsyncRuntime:
             })
             if not silent:
                 self.hooks.emit(EventType.USER_MESSAGE_INJECTED, message=msg)
+
+    def _pop_queued_messages(self) -> List[str]:
+        """Remove and return visible messages queued during the run."""
+        messages: List[str] = []
+        while True:
+            try:
+                item = self._message_queue.get_nowait()
+            except queue.Empty:
+                break
+            if isinstance(item, tuple):
+                msg, silent = item
+            else:
+                msg, silent = item, False
+            if not silent:
+                messages.append(msg)
+        return messages
 
     def _register_enabled_tools(self):
         # If the user supplies a tools: list in agent.yaml, honour it exactly.

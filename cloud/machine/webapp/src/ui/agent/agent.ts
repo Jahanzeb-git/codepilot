@@ -113,7 +113,7 @@ export class AgentPanel {
         <div class="composer-box">
           <textarea rows="1" placeholder="Message the agent…"></textarea>
           <div class="composer-actions">
-            <button class="icon-btn abort-btn" title="Abort" style="display:none">${icon("stop")}</button>
+            <button class="icon-btn abort-btn" title="Abort" aria-label="Abort" style="display:none"><span class="abort-square" aria-hidden="true"></span></button>
             <button class="icon-btn send-btn" title="Send">${icon("send")}</button>
           </div>
         </div>
@@ -293,7 +293,26 @@ export class AgentPanel {
   private abort() {
     agentSocket.send({ type: "event", event_type: "abort" });
     this.setRunning(false);
-    this.finalizeTurn();
+    this.finalizeTurn(true);
+    this.clearQueuedNotes();
+    this.appendAbortNote();
+  }
+
+  /** Remove stale "Queued... will run after..." notes after an abort. */
+  private clearQueuedNotes() {
+    for (const card of Array.from(this.messagesEl.querySelectorAll(".msg.agent .card"))) {
+      if ((card.textContent ?? "").startsWith("Queued:")) {
+        card.closest(".msg")?.remove();
+      }
+    }
+  }
+
+  private appendAbortNote() {
+    const wrap = document.createElement("div");
+    wrap.className = "msg agent";
+    wrap.innerHTML = `<div class="card abort-note">Aborted!</div>`;
+    this.messagesEl.appendChild(wrap);
+    this.scrollToBottom(true);
   }
 
   private setRunning(running: boolean) {
@@ -306,6 +325,9 @@ export class AgentPanel {
     switch (msg.type) {
       case "stream":
         this.handleStream(msg.text);
+        break;
+      case "run_started":
+        this.setRunning(true);
         break;
       case "finish":
         this.finalizeTurn();
@@ -496,7 +518,7 @@ export class AgentPanel {
     }, 120);
   }
 
-  private finalizeTurn() {
+  private finalizeTurn(aborted = false) {
     if (this.turnTimer !== null) {
       clearInterval(this.turnTimer);
       this.turnTimer = null;
@@ -512,7 +534,7 @@ export class AgentPanel {
     const elapsed = this.turnStart > 0 ? Date.now() - this.turnStart : null;
     for (const record of this.turnRecords) {
       if (record.state === "running") {
-        record.state = "ok";
+        record.state = aborted ? "error" : "ok";
         record.endedAt = Date.now();
       }
     }

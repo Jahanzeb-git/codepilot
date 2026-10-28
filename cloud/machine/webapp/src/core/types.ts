@@ -62,6 +62,7 @@ export type AgentOutbound =
 
 export type AgentInbound =
   | { type: "stream"; text: string }
+  | { type: "run_started" }
   | { type: "finish" }
   | { type: "tool_call"; tool: string; args: unknown; label?: string }
   | { type: "tool_result"; tool: string; result: unknown }

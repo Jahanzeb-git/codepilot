@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
@@ -199,12 +200,25 @@ class MCPTools:
             self._main_loop
         )
         
-        try:
-            res = future.result(timeout=120)
-        except concurrent.futures.TimeoutError:
-            res = "[MCP] Request timed out after 120 seconds."
-        except Exception as exc:
-            res = f"[MCP error] {exc}"
+        # Poll instead of a single 120s wait: the user's abort must return
+        # promptly even when the MCP server never answers.
+        deadline = time.monotonic() + 120
+        while True:
+            try:
+                res = future.result(timeout=0.25)
+                break
+            except concurrent.futures.TimeoutError:
+                if self._runtime is not None and self._runtime.is_aborted():
+                    future.cancel()
+                    res = "[MCP] Aborted by user."
+                    break
+                if time.monotonic() >= deadline:
+                    future.cancel()
+                    res = "[MCP] Request timed out after 120 seconds."
+                    break
+            except Exception as exc:
+                res = f"[MCP error] {exc}"
+                break
             
         if self._runtime:
             self._runtime._append_execution(res)
