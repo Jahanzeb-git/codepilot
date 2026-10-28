@@ -6,9 +6,8 @@
 #
 # What this does:
 #   1. Detects your CPU architecture (amd64 or arm64).
-#   2. Resolves the latest release tag from GitHub.
-#   3. Downloads the pre-compiled Go binary for your arch.
-#   4. Installs it to /usr/local/bin/codepilot-workspace.
+#   2. Downloads the latest pre-compiled Go binary for your arch.
+#   3. Installs it to /usr/local/bin/codepilot-workspace.
 #
 # Requirements: Linux only. curl. sudo if /usr/local/bin is not user-writable.
 set -euo pipefail
@@ -29,26 +28,16 @@ case "$ARCH" in
     ;;
 esac
 
-# ---- 2. Resolve latest release tag -----------------------------------------
+# ---- 2. Download the latest binary -----------------------------------------
+#
+# Use GitHub's direct "latest asset" URL instead of the REST API. The API is
+# rate-limited to 60 requests/hour per IP for unauthenticated clients, which
+# breaks installs on shared/NAT networks. This endpoint redirects straight to
+# the newest release asset and is not subject to that limit.
 
-echo "[codepilot] Resolving latest release..."
+DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${BINARY}-linux-${ARCH}"
 
-LATEST="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
-  | grep '"tag_name"' \
-  | sed 's/.*"tag_name": *"\(.*\)".*/\1/')"
-
-if [ -z "$LATEST" ]; then
-  echo "ERROR: could not determine latest release. Check your internet connection." >&2
-  exit 1
-fi
-
-echo "[codepilot] Latest release: ${LATEST}"
-
-# ---- 3. Download the binary ------------------------------------------------
-
-DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST}/${BINARY}-linux-${ARCH}"
-
-echo "[codepilot] Downloading ${BINARY}-linux-${ARCH}..."
+echo "[codepilot] Downloading ${BINARY}-linux-${ARCH} from the latest release..."
 
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
