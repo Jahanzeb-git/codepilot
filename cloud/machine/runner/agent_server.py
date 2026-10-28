@@ -506,8 +506,16 @@ def handle_client(conn, addr):
                 if err:
                     emit({"type": "error", "message": err})
                 else:
+                    # Stop the replaced runtime's terminals/control socket.
+                    # Otherwise its 'main' shell survives as an orphan and the
+                    # UI keeps streaming to it instead of the new session.
+                    old_rt, runtime = runtime, new_rt
+                    if old_rt is not None and old_rt is not new_rt:
+                        try:
+                            old_rt.cleanup()
+                        except Exception as exc:
+                            print(f"[WARN] old runtime cleanup failed: {exc}")
                     active_session_id = obj["session_id"]
-                    runtime = new_rt
                     _runtime_init_error = None
 
                     # Read the session file to emit the history

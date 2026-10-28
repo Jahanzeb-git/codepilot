@@ -16,6 +16,9 @@ use crate::{fs, terminal};
 #[derive(Deserialize)]
 pub struct TerminalQuery {
     pub session: Option<String>,
+    /// "agent" means the tab is agent-owned: wait for the codepilot runtime's
+    /// socket instead of silently spawning a private shell when it is missing.
+    pub mode: Option<String>,
 }
 
 /// Placeholder page served until the real React frontend exists.
@@ -255,11 +258,17 @@ pub async fn ws_terminal_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let session = q.session.unwrap_or_else(|| "main".to_string());
+    let agent_owned = q.mode.as_deref() == Some("agent");
     ws.on_upgrade(move |socket| async move {
         let sock = format!("/tmp/codepilot_{session}.sock");
         // Route by reality, not by name: if the codepilot runtime owns this
         // session socket, bridge to it; otherwise spawn a private Rust PTY.
-        if tokio::fs::metadata(&sock).await.is_ok() {
+        // Agent tabs must never take the private-PTY path: during a runtime
+        // re-init the socket can be missing for a moment, and a silent
+        // fallback would leave the "agent" tab attached to a shell the agent
+        // cannot see. handle_codepilot_terminal retries, then closes the WS
+        // so the browser reconnects to the fresh socket.
+        if agent_owned || tokio::fs::metadata(&sock).await.is_ok() {
             terminal::handle_codepilot_terminal(socket, session, state).await;
         } else {
             terminal::handle_user_terminal(socket, state).await;

@@ -27,6 +27,7 @@ import queue
 import re
 import threading
 import traceback
+import uuid
 from pathlib import Path
 from dataclasses import replace
 from typing import Dict, List, Optional, Any, Union
@@ -129,6 +130,7 @@ class AsyncRuntime:
         stream: bool = True,
         db_url: Optional[str] = None,
         db=None,
+        isolated_terminal: bool = False,
     ):
         """
         Args:
@@ -164,7 +166,17 @@ class AsyncRuntime:
         self.prompt_manager  = PromptManager()
 
         self._fs_tools          = FilesystemTools(self)
-        self._terminal_manager  = TerminalManager(self)
+        # Sub-agent runtimes get a private default session and no control
+        # socket. Otherwise every sub-agent would rebind the UI-visible
+        # /tmp/codepilot_main.sock and /tmp/codepilot_control.sock, silently
+        # stealing the browser's live terminal from the main runtime.
+        self._terminal_manager  = TerminalManager(
+            self,
+            default_session_id=(
+                f"sub_{uuid.uuid4().hex[:8]}" if isolated_terminal else "main"
+            ),
+            control_socket=not isolated_terminal,
+        )
         self._interaction_tools = InteractionTools(self)
         self._semantic_tools    = SemanticTools(self)
         self._search_tools      = SearchTools(self)
@@ -516,6 +528,21 @@ class AsyncRuntime:
         self._terminal_manager.cleanup_all()
         self._terminal_manager.start_default_terminal()
         self.hooks.emit(EventType.SESSION_RESET)
+
+    def cleanup(self):
+        """
+        Release OS resources owned by this runtime.
+
+        Must be called before a runtime is replaced (new/switch session,
+        settings save). Without it, the old control socket and ``main`` shell
+        stay alive as orphans: the browser keeps streaming to the old shell
+        and never sees commands run by the replacement runtime.
+        """
+        self._cancel_cache_timer()
+        try:
+            self._terminal_manager.close()
+        except Exception:
+            pass
 
     def raw_llm_generations(self) -> List[Dict[str, Any]]:
         """Return raw, uncompressed LLM generations captured for this session."""
@@ -1605,6 +1632,10 @@ class Runtime:
     def abort(self):
         """Stop the loop cleanly after the current step completes."""
         self._async.abort()
+
+    def cleanup(self):
+        """Release OS resources (terminals, control socket, cache timer)."""
+        self._async.cleanup()
 
     def send_message(self, message: str, silent: bool = False):
         """Inject a user message into the running loop from any thread."""

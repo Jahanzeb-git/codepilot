@@ -32,7 +32,7 @@ export class TerminalSocket {
 
   constructor(
     public readonly sessionId: string,
-    private readonly reconnect: boolean
+    private readonly agentOwned: boolean
   ) {}
 
   connect() {
@@ -44,7 +44,11 @@ export class TerminalSocket {
     this.setState("connecting");
     this.gotHandshake = false;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    this.ws = new WebSocket(`${proto}//${location.host}/ws/terminal?session=${encodeURIComponent(this.sessionId)}`);
+    // Tell the runner this tab is agent-owned. It must wait for the runtime's
+    // socket (and reconnect) instead of falling back to a private shell when
+    // the socket is briefly missing during a runtime re-init.
+    const mode = this.agentOwned ? "&mode=agent" : "";
+    this.ws = new WebSocket(`${proto}//${location.host}/ws/terminal?session=${encodeURIComponent(this.sessionId)}${mode}`);
     this.ws.binaryType = "arraybuffer";
 
     this.ws.onopen = () => {
@@ -77,7 +81,7 @@ export class TerminalSocket {
 
     this.ws.onclose = () => {
       this.setState("closed");
-      if (!this.closedByUser && this.reconnect) {
+      if (!this.closedByUser && this.agentOwned) {
         setTimeout(() => this.open(), this.backoff);
         this.backoff = Math.min(this.backoff * 1.6, 8000);
       }

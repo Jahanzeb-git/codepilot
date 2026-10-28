@@ -349,6 +349,7 @@ class SubAgentTools:
         from ..engine.runtime import Runtime as SyncRuntime
         from ..engine.hooks import EventType
 
+        sub_rt = None
         try:
             # Build a temporary agent.yaml for the sub-agent
             config_path = self._build_subagent_config(tool_names, model_override)
@@ -360,6 +361,7 @@ class SubAgentTools:
                 str(config_path),
                 session="memory",
                 stream=False,
+                isolated_terminal=True,
             )
 
             # Register ask_main_agent tool (sub-agent → main communication)
@@ -426,6 +428,12 @@ class SubAgentTools:
                     Path(self._last_subagent_config).unlink(missing_ok=True)
             except Exception:
                 pass
+            # Stop the sub-agent's private terminal and its mux server.
+            if sub_rt is not None:
+                try:
+                    sub_rt.cleanup()
+                except Exception:
+                    pass
 
     def _build_subagent_config(
         self,

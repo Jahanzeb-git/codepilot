@@ -1009,21 +1009,30 @@ class TerminalSession:
 class TerminalManager:
     """Manages terminal sessions and provides the 4 agent tool methods."""
 
-    def __init__(self, runtime: "Runtime"):
+    def __init__(self, runtime: "Runtime", default_session_id: str = "main",
+                 control_socket: bool = True):
         self.runtime = runtime
+        self._default_session_id = default_session_id
+        self._control_enabled = control_socket
         self._sessions: Dict[str, TerminalSession] = {}
         self._session_order: List[str] = []          # most recent first
         self._output_history: Dict[tuple, List[str]] = {}  # (sid, cmd_tag) -> [result strings]
 
         self._control_socket_path = "/tmp/codepilot_control.sock"
         self._control_clients = []
-        self._start_control_server()
+        self._control_server = None
+        self._control_running = False
+        self._control_ino = None
+        if control_socket:
+            self._start_control_server()
 
     def _start_control_server(self):
         import threading
         import json
 
         def _serve():
+            if not self._control_running:
+                return
             try:
                 os.unlink(self._control_socket_path)
             except OSError:
@@ -1032,8 +1041,20 @@ class TerminalManager:
             server.bind(self._control_socket_path)
             os.chmod(self._control_socket_path, 0o600)
             server.listen(5)
-            
-            while True:
+            server.settimeout(0.5)
+            self._control_server = server
+            self._control_ino = os.stat(self._control_socket_path).st_ino
+            if not self._control_running:
+                # close() ran while this thread was binding.
+                try:
+                    if os.stat(self._control_socket_path).st_ino == self._control_ino:
+                        os.unlink(self._control_socket_path)
+                except OSError:
+                    pass
+                server.close()
+                return
+
+            while self._control_running:
                 try:
                     conn, _ = server.accept()
                     self._control_clients.append(conn)
@@ -1087,9 +1108,12 @@ class TerminalManager:
                                 pass
                                 
                     threading.Thread(target=_handle_client, args=(conn,), daemon=True).start()
+                except socket.timeout:
+                    continue
                 except Exception:
                     pass
-                        
+
+        self._control_running = True
         t = threading.Thread(target=_serve, daemon=True)
         t.start()
 
@@ -1133,14 +1157,17 @@ class TerminalManager:
                 # commands on the next run() call.
                 self.runtime.send_message(msg, silent=True)
                 
-            session = TerminalSession("main", work_dir, on_user_command=_on_user)
+            session = TerminalSession(
+                self._default_session_id, work_dir,
+                on_user_command=_on_user if self._default_session_id == "main" else None,
+            )
             session.owner = "agent"
-            self._sessions["main"] = session
-            self._session_order.insert(0, "main")
+            self._sessions[self._default_session_id] = session
+            self._session_order.insert(0, self._default_session_id)
             self._broadcast_control_event({
                 "event": "terminal_created",
-                "session_id": "main",
-                "socket_path": "/tmp/codepilot_main.sock"
+                "session_id": self._default_session_id,
+                "socket_path": f"/tmp/codepilot_{self._default_session_id}.sock"
             })
         except Exception as e:
             self.runtime._append_execution(
@@ -1148,8 +1175,9 @@ class TerminalManager:
             )
 
     def ensure_default_terminal(self):
-        """Guarantee the default 'main' session exists and is alive."""
-        main = self._sessions.get("main")
+        """Guarantee the default session for this manager exists and is alive."""
+        sid = self._default_session_id
+        main = self._sessions.get(sid)
         if main is None or not main.is_alive():
             if main is not None:
                 # Close the dead session so its mux server and socket are
@@ -1158,9 +1186,9 @@ class TerminalManager:
                     main.close()
                 except Exception:
                     pass
-                self._sessions.pop("main", None)
-                if "main" in self._session_order:
-                    self._session_order.remove("main")
+                self._sessions.pop(sid, None)
+                if sid in self._session_order:
+                    self._session_order.remove(sid)
             self.start_default_terminal()
 
     def _recover_dead_session(
@@ -1198,10 +1226,10 @@ class TerminalManager:
             )
         if error is not None:
             note += f" Execution error: {error}"
-        if session_id == "main":
+        if session_id == self._default_session_id:
             self.start_default_terminal(work_dir=last_cwd)
             note += (
-                f" A fresh 'main' shell was started in {last_cwd}. "
+                f" A fresh '{session_id}' shell was started in {last_cwd}. "
                 "Working-directory, environment, alias, and variable changes "
                 "made by this command were lost. Re-apply any `cd`/`export` "
                 "you still need, then verify the command's effects before "
@@ -1238,9 +1266,56 @@ class TerminalManager:
         self._session_order.clear()
         self._output_history.clear()
 
+    def close(self):
+        """
+        Stop the control server and every terminal session.
+
+        Called when a Runtime is replaced (new/switch session, settings save).
+        Closing the shared sockets makes the UI's terminal and control bridges
+        hit EOF and reconnect to the replacement runtime, instead of staying
+        attached to an orphaned shell that the agent no longer uses.
+        """
+        self._control_running = False
+
+        server = self._control_server
+        self._control_server = None
+        if server is not None:
+            try:
+                server.close()
+            except OSError:
+                pass
+
+        for client in self._control_clients[:]:
+            try:
+                client.close()
+            except OSError:
+                pass
+        self._control_clients.clear()
+
+        # Only remove the control socket if it is still the one we bound: a
+        # replacement manager may already have rebound this path.
+        try:
+            if (self._control_ino is not None
+                    and os.stat(self._control_socket_path).st_ino == self._control_ino):
+                os.unlink(self._control_socket_path)
+        except OSError:
+            pass
+
+        self.cleanup_all()
+
     # ------------------------------------------------------------------
     # Tool 1: execute
     # ------------------------------------------------------------------
+
+    def _resolve_session_id(self, session_id: str) -> str:
+        """Map the tool's default 'main' to this manager's default session.
+
+        Only sub-agent runtimes use a non-'main' default (so they cannot
+        hijack the UI-visible ``/tmp/codepilot_main.sock``).
+        """
+        if session_id == "main" and self._default_session_id != "main":
+            return self._default_session_id
+        return session_id
 
     def execute(
         self,
@@ -1273,6 +1348,7 @@ class TerminalManager:
         if not command and session_id != "main":
             command = session_id
             session_id = "main"
+        session_id = self._resolve_session_id(session_id)
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="execute",
             args={
@@ -1472,6 +1548,7 @@ class TerminalManager:
         [CRITICAL CONSTRAINT]
         DO NOT call this on a completed session repeatedly unless you expect new output.
         """
+        session_id = self._resolve_session_id(session_id)
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="read_output",
             args={"session_id": session_id, "timeout": timeout},
@@ -1550,6 +1627,7 @@ class TerminalManager:
           '\x1b'              — Escape key
         All of these work cross-platform.
         """
+        session_id = self._resolve_session_id(session_id)
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="send_input",
             args={"session_id": session_id, "text": text, "timeout": timeout},
@@ -1636,6 +1714,7 @@ class TerminalManager:
         [CRITICAL CONSTRAINT]
         This destroys the session entirely. The session_id becomes unusable.
         """
+        session_id = self._resolve_session_id(session_id)
         self.runtime.hooks.emit(
             EventType.TOOL_CALL, tool="terminate_terminal",
             args={"session_id": session_id},

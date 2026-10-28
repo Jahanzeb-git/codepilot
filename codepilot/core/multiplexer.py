@@ -55,6 +55,10 @@ _log = logging.getLogger(__name__)
 
 DEFAULT_SOCKET_PATH = "/tmp/codepilot_shared.sock"
 _READ_CHUNK = 65536
+# Per-client output backlog ceiling. A client that cannot drain this much
+# (for example a closed browser tab) is disconnected instead of growing the
+# server's memory without bound.
+_MAX_CLIENT_BACKLOG = 8 * 1024 * 1024
 #: Prefix of the one-line JSON hello an agent client sends immediately after
 #: connecting. Human clients never send this, so the server can classify the
 #: very first bytes without guessing.
@@ -149,6 +153,7 @@ class MuxServer:
         # socat — can represent a human typing into the shared PTY.
         self._client_roles: dict = {}       # server-side sock -> "agent"|"human"
         self._client_buffers: dict = {}     # server-side sock -> pending bytes
+        self._client_out: dict = {}         # server-side sock -> queued output
         self._human_input_callback = None
 
     # ------------------------------------------------------------------
@@ -379,7 +384,11 @@ PROMPT_COMMAND="__cp_command_finished; $PROMPT_COMMAND"
                     if not self._handle_pty_output():
                         return   # bash exited — EIO on master_fd
                 elif key.data == "client":
-                    self._handle_client_input(key.fileobj)
+                    if _mask & selectors.EVENT_WRITE:
+                        self._flush_client(key.fileobj)
+                    if (_mask & selectors.EVENT_READ
+                            and key.fileobj in self._clients):
+                        self._handle_client_input(key.fileobj)
 
             self._flush_stale_partial_hellos()
 
@@ -390,7 +399,9 @@ PROMPT_COMMAND="__cp_command_finished; $PROMPT_COMMAND"
         except OSError:
             return
 
-        client_sock.setblocking(False)
+        # Send the handshake (and scrollback) before switching to
+        # non-blocking mode: this is small and must arrive in one piece.
+        client_sock.settimeout(1.0)
 
         # The handshake gives clients the bash PID (for /proc/<pid>/cwd
         # lookups) and the current PTY geometry.
@@ -404,11 +415,13 @@ PROMPT_COMMAND="__cp_command_finished; $PROMPT_COMMAND"
             client_sock.sendall(handshake.encode())
             if self._scrollback:
                 client_sock.sendall(self._scrollback)
+            client_sock.setblocking(False)
         except OSError:
             client_sock.close()
             return
 
         self._clients.append(client_sock)
+        self._client_out[client_sock] = bytearray()
         self._sel.register(client_sock, selectors.EVENT_READ, data="client")
         _log.debug("Client connected — total connected: %d", len(self._clients))
 
@@ -437,13 +450,66 @@ PROMPT_COMMAND="__cp_command_finished; $PROMPT_COMMAND"
         # Update scrollback buffer
         self._scrollback = (self._scrollback + data)[-self._max_scrollback:]
 
+        # Queue + flush instead of sendall: client sockets are non-blocking,
+        # and a momentarily slow reader must not be disconnected mid-stream
+        # (that silently dropped the browser's live terminal).
         for client in self._clients[:]:
-            try:
-                client.sendall(data)
-            except OSError:
-                self._close_client(client)
+            self._queue_client_output(client, data)
 
         return True
+
+    def _queue_client_output(self, client_sock: socket.socket, data: bytes) -> None:
+        """Append output for a client and flush as much as the socket accepts."""
+        buf = self._client_out.get(client_sock)
+        if buf is None:
+            if client_sock not in self._clients:
+                return
+            buf = bytearray()
+            self._client_out[client_sock] = buf
+        buf.extend(data)
+        if len(buf) > _MAX_CLIENT_BACKLOG:
+            _log.warning(
+                "Client output backlog exceeded %d bytes — dropping slow client",
+                _MAX_CLIENT_BACKLOG,
+            )
+            self._close_client(client_sock)
+            return
+        self._flush_client(client_sock)
+
+    def _flush_client(self, client_sock: socket.socket) -> None:
+        """Send as much queued output as possible without blocking."""
+        buf = self._client_out.get(client_sock)
+        if buf is None:
+            return
+        try:
+            sent = client_sock.send(buf)
+        except BlockingIOError:
+            sent = 0
+        except OSError:
+            self._close_client(client_sock)
+            return
+        if sent:
+            del buf[:sent]
+        if buf:
+            self._set_write_interest(client_sock, True)
+        else:
+            self._client_out.pop(client_sock, None)
+            self._set_write_interest(client_sock, False)
+
+    def _set_write_interest(self, client_sock: socket.socket, enabled: bool) -> None:
+        """Add or remove EVENT_WRITE for a client in the selector."""
+        if self._sel is None or client_sock not in self._clients:
+            return
+        try:
+            mask = self._sel.get_key(client_sock).events
+            new_mask = (
+                mask | selectors.EVENT_WRITE if enabled
+                else mask & ~selectors.EVENT_WRITE
+            )
+            if new_mask != mask:
+                self._sel.modify(client_sock, new_mask, data="client")
+        except (KeyError, ValueError, OSError):
+            self._close_client(client_sock)
 
     def _handle_client_input(self, client_sock: socket.socket) -> None:
         """Forward keystrokes received from a client into bash via master_fd."""
@@ -574,6 +640,7 @@ PROMPT_COMMAND="__cp_command_finished; $PROMPT_COMMAND"
                 pass
         self._client_roles.pop(client_sock, None)
         self._client_buffers.pop(client_sock, None)
+        self._client_out.pop(client_sock, None)
         if client_sock in self._clients:
             self._clients.remove(client_sock)
         try:
