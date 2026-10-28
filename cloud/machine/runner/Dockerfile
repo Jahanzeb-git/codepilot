@@ -39,7 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir --break-system-packages \
-    codepilot-ai==0.9.41 \
+    codepilot-ai==0.9.42 \
     "litellm>=1.106.4,<2.0"
 RUN pip install --no-cache-dir --break-system-packages voyageai
 
