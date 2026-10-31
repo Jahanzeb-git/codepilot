@@ -11,6 +11,7 @@ mod fs;
 mod idle_watchdog;
 mod routes;
 mod state;
+mod sysinfo;
 mod terminal;
 
 #[tokio::main]

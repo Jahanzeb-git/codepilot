@@ -14,6 +14,55 @@ export interface FsEntry {
   modified: number;
 }
 
+// Shape of the `system_info` reply — see runner/server/src/sysinfo.rs.
+// Every field is individually nullable: each probe there is best-effort, so a
+// sandbox with no egress, no pip, or no cgroup v2 still returns a renderable
+// payload rather than an error.
+export interface SystemInfo {
+  server: {
+    /** Version of the binary that answered this request. */
+    version: string;
+    /** "build" when injected at image-build time, "crate" for a dev `cargo run`. */
+    source: "build" | "crate";
+    commit: string | null;
+    /** Release artifact built for this machine, e.g. "linux-amd64". */
+    target: string;
+    latest: {
+      tag: string;
+      name: string | null;
+      url: string;
+      published_at: string | null;
+      assets: { name: string; size: number }[];
+      matching_asset: { name: string; size: number } | null;
+    } | null;
+    latest_error: string | null;
+    /** null when either version isn't a plain numeric version (dev builds). */
+    update_available: boolean | null;
+  };
+  runtime: {
+    package: string;
+    version: string | null;
+    location: string | null;
+    python: string | null;
+  };
+  sandbox: {
+    cpu_model: string | null;
+    cpu_cores: number | null;
+    cpu_quota_cores: number | null;
+    cpuset: string | null;
+    memory_limit_bytes: number | null;
+    memory_used_bytes: number | null;
+    memory_free_bytes: number | null;
+    memory_peak_bytes: number | null;
+    memory_source: "cgroup" | "proc" | "none";
+    host_memory_total_bytes: number | null;
+    workspace_path: string;
+    containerized: boolean;
+  };
+  environment: { key: string; value: string }[];
+  repository: string;
+}
+
 export type ControlRequest =
   | { id: string; type: "list_dir"; path: string }
   | { id: string; type: "read_file"; path: string }
@@ -23,12 +72,14 @@ export type ControlRequest =
   | { id: string; type: "create_dir"; path: string }
   | { id: string; type: "delete_dir"; path: string }
   | { id: string; type: "git_clone"; url: string }
+  | { id: string; type: "system_info" }
   | { id: string; type: "ping" };
 
 export type ControlResponse =
   | { id: string; type: "dir_list"; path: string; data: FsEntry[]; success: true }
   | { id: string; type: "file_content"; path: string; content: string; success: true }
   | { id: string; type: "operation_result"; success: true }
+  | { id: string; type: "system_info"; data: SystemInfo; success: true }
   | { id: string; type: "error"; error: string; success: false }
   | { id: string; type: "pong" }
   | { type: "file_created"; path: string }

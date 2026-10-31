@@ -11,7 +11,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::state::AppState;
-use crate::{fs, terminal};
+use crate::{fs, sysinfo, terminal};
 
 #[derive(Deserialize)]
 pub struct TerminalQuery {
@@ -132,6 +132,23 @@ async fn handle_control_socket(ws: WebSocket, state: Arc<AppState>) {
         if req_type == "ping" {
             let _ = tx.send(Message::Text(
                 serde_json::json!({ "id": req_id, "type": "pong" }).to_string(),
+            ));
+            continue;
+        }
+
+        // Also path-less, so it has to short-circuit before validate_path below.
+        // Never fails: sysinfo degrades each probe to null on its own.
+        if req_type == "system_info" {
+            let info = sysinfo::collect(&state.config.workspace_path).await;
+            let data = serde_json::to_value(info).unwrap_or(serde_json::Value::Null);
+            let _ = tx.send(Message::Text(
+                serde_json::json!({
+                    "id": req_id,
+                    "type": "system_info",
+                    "success": true,
+                    "data": data,
+                })
+                .to_string(),
             ));
             continue;
         }
