@@ -1,4 +1,4 @@
-import type { ControlRequest, ControlResponse, FsEntry, TerminalCreatedEvent } from "./types";
+import type { ControlRequest, ControlResponse, FsEntry, SystemInfo, TerminalCreatedEvent } from "./types";
 
 // Omit<Union, K> collapses to the intersection of members, not the
 // per-member omission we want — distribute it manually so each request
@@ -134,6 +134,9 @@ export class ControlSocket {
   }
   gitClone(url: string) {
     return this.send<{ success: boolean; error?: string }>({ type: "git_clone", url } as any);
+  }
+  systemInfo() {
+    return this.send<{ data: SystemInfo }>({ type: "system_info" }).then((r) => r.data);
   }
 }
 

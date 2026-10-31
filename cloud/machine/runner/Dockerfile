@@ -7,6 +7,14 @@ RUN cargo build --release
 
 WORKDIR /usr/src/app
 COPY runner/server/ ./server/
+# Stamped into the binary at compile time (option_env!) so the in-IDE profile
+# modal can report which build is actually running — see server/src/sysinfo.rs.
+# Deliberately in this stage rather than up top: a version bump then only
+# rebuilds the server crate, leaving persistent-vol's build cached.
+ARG CODEPILOT_VERSION=dev
+ARG CODEPILOT_COMMIT=
+ENV CODEPILOT_VERSION=${CODEPILOT_VERSION} \
+    CODEPILOT_COMMIT=${CODEPILOT_COMMIT}
 WORKDIR /usr/src/app/server
 RUN cargo build --release
 

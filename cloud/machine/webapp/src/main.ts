@@ -4,6 +4,7 @@ import { Explorer } from "./ui/explorer/explorer";
 import { EditorManager } from "./ui/editor/editor";
 import { AgentPanel } from "./ui/agent/agent";
 import { SettingsPanel } from "./ui/settings/settings";
+import { ProfilePanel } from "./ui/profile/profile";
 import { TerminalDock } from "./ui/terminal/terminalDock";
 import { icon } from "./ui/icons";
 
@@ -76,6 +77,7 @@ agentContainer.style.display = "contents";
 sidePanelHost.appendChild(agentContainer);
 
 const settings = new SettingsPanel(document.body);
+const profile = new ProfilePanel(document.body);
 new AgentPanel(agentContainer);
 
 const editor = new EditorManager(editorHost);
@@ -206,6 +208,7 @@ sidebar.querySelectorAll("[data-side]").forEach((btn) =>
   btn.addEventListener("click", () => showSide(btn.getAttribute("data-side") as Side))
 );
 sidebar.querySelector('[data-action="settings"]')!.addEventListener("click", () => settings.open());
+sidebar.querySelector('[data-action="profile"]')!.addEventListener("click", () => profile.open());
 sidebar.querySelector('[data-action="toggle-terminal"]')!.addEventListener("click", () => terminalDock.toggle());
 showSide("explorer");
 
