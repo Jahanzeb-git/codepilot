@@ -89,6 +89,15 @@ _MAX_EDIT_DIFF_LINES = 40
 #: Maximum characters per diff line (protects against minified/generated files).
 _MAX_EDIT_DIFF_LINE_CHARS = 300
 
+#: Minimum share of old_str lines that must match a candidate region before an
+#: anchor-only (forgiving) match may be applied. Anchor passes ignore the
+#: middle of old_str, so without this guard a stale/fabricated old_str whose
+#: first and last lines happen to exist would silently delete real code.
+_MIN_ANCHOR_SIMILARITY = 0.6
+#: Minimum character-level similarity for an individual mismatched line.
+#: Typos pass; an unrelated line copied from another region does not.
+_MIN_MISMATCHED_LINE_SIMILARITY = 0.5
+
 
 def _plural(count: int, noun: str) -> str:
     """Return ``"1 line"`` / ``"2 lines"`` without grammar drift."""
@@ -216,9 +225,62 @@ def _find_anchor_regions(
     return regions
 
 
+def _line_similarity(left: str, right: str) -> float:
+    """Character-level similarity between two already-stripped lines."""
+    if left == right:
+        return 1.0
+    return difflib.SequenceMatcher(None, left, right).ratio()
+
+
+def _region_similarity(
+    file_lines: List[str],
+    start: int,
+    region_n: int,
+    old_lines: List[str],
+) -> float:
+    """
+    Score how closely a candidate region matches old_str.
+
+    The score is the fraction of lines that match exactly after stripping
+    indentation. Every mismatched line must also be *similar* to its
+    counterpart, so a single typo is tolerated but a line copied from an
+    unrelated part of the file disqualifies the candidate (score 0.0).
+    """
+    if region_n != len(old_lines):
+        return 0.0
+
+    old_norm = [_stripped(line) for line in old_lines]
+    file_norm = [_stripped(file_lines[start + i]) for i in range(region_n)]
+
+    matched = sum(1 for a, b in zip(old_norm, file_norm) if a == b)
+    score = matched / region_n if region_n else 0.0
+    if score < _MIN_ANCHOR_SIMILARITY:
+        return score
+
+    for old_line, file_line in zip(old_norm, file_norm):
+        if old_line == file_line:
+            continue
+        if _line_similarity(old_line, file_line) < _MIN_MISMATCHED_LINE_SIMILARITY:
+            return 0.0
+    return score
+
+
+def _region_is_exact(
+    file_lines: List[str],
+    start: int,
+    region_n: int,
+    old_lines: List[str],
+) -> bool:
+    """True when a candidate matches old_str exactly (trailing space ignored)."""
+    return all(
+        file_lines[start + i].rstrip() == old_lines[i].rstrip()
+        for i in range(region_n)
+    )
+
+
 def _apply_str_replace(file_content: str, old_str: str, new_str: str) -> _EditResult:
     """
-    Forgiving multi-pass search-and-replace.
+    Forgiving search-and-replace.
 
     Replaces the unique region in *file_content* matched by *old_str* with
     *new_str*. Passes run in order until exactly one match is found:
@@ -230,32 +292,32 @@ def _apply_str_replace(file_content: str, old_str: str, new_str: str) -> _EditRe
     Pass 2 — Full old_str, exact indentation.
         Run only when Pass 1 found multiple matches. If unique → apply.
 
-    Pass 3 — First-and-last anchor pair, indentation stripped.
-        Use only the first and last non-blank lines of old_str as anchors.
-        Searches for (anchor_first, anchor_last) pairs separated by exactly
-        len(old_str_lines) - 1 lines. If unique → apply (middle content
-        of old_str is ignored). This tolerates mistakes in middle lines.
+    Pass 3 — Anchor pair + content similarity.
+        Use the first and last non-blank lines of old_str to find candidate
+        regions of the same height, then score each candidate against the
+        *entire* old_str. A candidate must contain most of old_str's lines
+        (small typos are tolerated); if one candidate is the clear best it
+        is applied, otherwise the edit is reported as ambiguous. This
+        tolerates middle typos without letting a stale or fabricated
+        old_str silently delete the wrong code.
 
-    Pass 4 — First-and-last anchor pair, exact indentation.
-        Run only when Pass 3 found multiple matches. If unique → apply.
-
-    Pass 5 — Progressive bottom-up anchor expansion.
-        Run only when Pass 4 still found multiple matches. Adds lines from
-        the bottom of old_str upward one at a time (second-to-last, then
-        third-to-last, …). For each extension, checks whether the bottom
-        anchor window (last_anchor + extension lines above it) uniquely
-        identifies a contiguous region within any of the Pass 4 candidates.
-        Stops as soon as a unique region is confirmed.
-
-    Indentation preservation:
-        When the match was found via anchor-only passes (3-5), the base
-        indentation of the matched region in the file is used to prefix
-        each line of new_str that is not blank.
+    Line endings:
+        A CRLF file stays CRLF, and LF files stay LF: new_str is normalised
+        to the file's existing convention before it is spliced in.
 
     Returns an _EditResult with ok=True on success or ok=False with a
     human-readable error string the model can act on.
     """
     file_lines = file_content.splitlines(keepends=True)
+
+    # Preserve the file's existing line-ending convention. The model emits
+    # LF (or occasionally CRLF); normalise new_str to whatever the file uses
+    # so an edit never converts a CRLF file to LF (or leaves mixed endings).
+    eol = "\r\n" if "\r\n" in file_content else "\n"
+    new_str = new_str.replace("\r\n", "\n").replace("\r", "\n")
+    if eol == "\r\n":
+        new_str = new_str.replace("\n", "\r\n")
+
     raw_old_lines = old_str.splitlines()
 
     # Drop blank boundary lines (models sometimes add trailing newlines).
@@ -281,7 +343,7 @@ def _apply_str_replace(file_content: str, old_str: str, new_str: str) -> _EditRe
     p1_matches = _find_windows_stripped(file_lines, raw_old_lines)
 
     if len(p1_matches) == 1:
-        return _build_result(file_lines, p1_matches[0], n, new_str)
+        return _build_result(file_lines, p1_matches[0], n, new_str, eol=eol)
 
     # ------------------------------------------------------------------ #
     # Pass 2 — full match, exact indentation (disambiguation)             #
@@ -289,7 +351,7 @@ def _apply_str_replace(file_content: str, old_str: str, new_str: str) -> _EditRe
     if len(p1_matches) > 1:
         p2_matches = _find_windows_exact(file_lines, raw_old_lines)
         if len(p2_matches) == 1:
-            return _build_result(file_lines, p2_matches[0], n, new_str)
+            return _build_result(file_lines, p2_matches[0], n, new_str, eol=eol)
         # If still multiple, fall through to anchor-based passes.
         # If p2 has zero matches (indentation truly wrong), also fall through.
 
@@ -319,71 +381,14 @@ def _apply_str_replace(file_content: str, old_str: str, new_str: str) -> _EditRe
     last_anchor  = raw_old_lines[-1]
 
     # ------------------------------------------------------------------ #
-    # Pass 3 — first+last anchor, indentation stripped                    #
+    # Pass 3 — anchor candidates + whole-region similarity                #
     # ------------------------------------------------------------------ #
     p3_regions = _find_anchor_regions(
         file_lines, first_anchor, last_anchor, n, strip=True
     )
 
-    if len(p3_regions) == 1:
-        start, end = p3_regions[0]
-        return _build_result(file_lines, start, end - start + 1, new_str)
-
-    # ------------------------------------------------------------------ #
-    # Pass 4 — first+last anchor, exact indentation                       #
-    # ------------------------------------------------------------------ #
-    if len(p3_regions) > 1:
-        p4_regions = _find_anchor_regions(
-            file_lines, first_anchor, last_anchor, n, strip=False
-        )
-        if len(p4_regions) == 1:
-            start, end = p4_regions[0]
-            return _build_result(file_lines, start, end - start + 1, new_str)
-
-        if not p4_regions:
-            # Indentation was wrong even for anchors — fall back to p3 candidates.
-            p4_regions = p3_regions
-
-        # ------------------------------------------------------------------ #
-        # Pass 5 — progressive bottom-up expansion inside p4 candidates       #
-        # ------------------------------------------------------------------ #
-        # Build an expanding "bottom window" from old_str lines. Start with
-        # the last anchor (already in p4_regions), then add lines from the
-        # bottom of old_str upward: old_str[-2], old_str[-3], …
-        #
-        # For each candidate region (start, end) in p4_regions we check
-        # whether the bottom window (size k, stripped) matches the bottom k
-        # lines of that region in the file. Candidates that fail are dropped.
-        # Once exactly one candidate survives → apply.
-        #
-        # This handles the classic case of two functions both ending with
-        # `return "hi"`: as we expand upward we eventually hit a distinguishing
-        # line unique to one function and the other candidate is eliminated.
-
-        surviving = list(p4_regions)
-
-        for k in range(2, n):
-            # Bottom window: last k lines of old_str
-            bottom_window = [_stripped(l) for l in raw_old_lines[n - k:]]
-
-            surviving = [
-                (start, end)
-                for (start, end) in surviving
-                if [_stripped(file_lines[end - k + 1 + j]) for j in range(k)]
-                   == bottom_window
-            ]
-
-            if len(surviving) == 1:
-                start, end = surviving[0]
-                return _build_result(file_lines, start, end - start + 1, new_str)
-            if not surviving:
-                break
-
-    # ------------------------------------------------------------------ #
-    # Failure — build a useful error message                              #
-    # ------------------------------------------------------------------ #
     first_line_str = _stripped(raw_old_lines[0])
-    if len(p1_matches) == 0 and (not p3_regions if n > 1 else True):
+    if not p3_regions:
         return _EditResult(
             ok=False,
             error=(
@@ -393,8 +398,46 @@ def _apply_str_replace(file_content: str, old_str: str, new_str: str) -> _EditRe
             ),
         )
 
-    # Multiple candidates survived all passes.
-    candidate_count = len(p3_regions) if p3_regions else len(p1_matches)
+    scored = [
+        (_region_similarity(file_lines, start, end - start + 1, raw_old_lines), start, end)
+        for start, end in p3_regions
+    ]
+    best_score, best_start, best_end = max(scored, key=lambda item: item[0])
+
+    if best_score < _MIN_ANCHOR_SIMILARITY:
+        return _EditResult(
+            ok=False,
+            error=(
+                f"old_str does not match the file closely enough — only "
+                f"{best_score:.0%} of its lines match the region near line "
+                f"{best_start + 1} (leading line: {first_line_str!r}). "
+                "It looks stale or copied from a different region. Call "
+                "view_file() and copy the exact current text, then retry."
+            ),
+        )
+
+    # Candidates tied for the best score need another discriminator.
+    top = [item for item in scored if item[0] >= best_score - 1e-9]
+    if len(top) == 1:
+        return _build_result(
+            file_lines, best_start, best_end - best_start + 1, new_str, eol=eol
+        )
+
+    # ------------------------------------------------------------------ #
+    # Pass 4 — exact-indentation tie-break among equally-similar regions  #
+    # ------------------------------------------------------------------ #
+    exact_top = [
+        (start, end)
+        for _, start, end in top
+        if _region_is_exact(file_lines, start, end - start + 1, raw_old_lines)
+    ]
+    if len(exact_top) == 1:
+        start, end = exact_top[0]
+        return _build_result(
+            file_lines, start, end - start + 1, new_str, eol=eol
+        )
+
+    candidate_count = len(exact_top) if exact_top else len(top)
     return _EditResult(
         ok=False,
         error=(
@@ -411,6 +454,7 @@ def _build_result(
     start: int,
     region_n: int,
     new_str: str,
+    eol: str = "\n",
 ) -> _EditResult:
     """
     Apply a confirmed replacement: splice new_str in place of
@@ -431,8 +475,8 @@ def _build_result(
     # the model's exact intended indentation, including intentional
     # unindenting (e.g. extracting methods to module scope) or indenting.
     new_lines_raw = new_str.splitlines(keepends=True)
-    if new_lines_raw and not new_lines_raw[-1].endswith("\n"):
-        new_lines_raw[-1] += "\n"
+    if new_lines_raw and not new_lines_raw[-1].endswith(("\n", "\r")):
+        new_lines_raw[-1] += eol
 
     indented_new = new_lines_raw
 
@@ -742,11 +786,10 @@ class FilesystemTools:
 
         1. Full old_str match, indentation ignored.
         2. Full old_str match, exact indentation (disambiguates pass 1).
-        3. First+last line anchor pair, indentation ignored (tolerates mistakes
-           in middle lines of old_str).
-        4. First+last anchor pair, exact indentation.
-        5. Progressive bottom-up expansion — adds lines from the bottom of
-           old_str upward until the region is uniquely identified.
+        3. First+last line anchor pair, then whole-region similarity scoring.
+           Minor typos in middle lines are tolerated, but a stale or
+           fabricated old_str that only shares the anchors is rejected
+           instead of silently replacing the wrong code.
 
         For large edits across multiple independent regions in the same file,
         call edit_file() multiple times — one call per region.
@@ -798,7 +841,9 @@ class FilesystemTools:
                     f"'{path}' does not exist. Use write_file() to create a new file.",
                 )
 
-            with open(abs_path, "r", encoding="utf-8") as f:
+            # newline="" keeps CRLF files byte-for-byte intact on read/write;
+            # the default universal-newline mode would rewrite them as LF.
+            with open(abs_path, "r", encoding="utf-8", newline="") as f:
                 current = f.read()
 
             result = _apply_str_replace(current, old_str, new_str)
@@ -814,7 +859,7 @@ class FilesystemTools:
                     )
                 return self._emit_err("edit_file", result.error)
 
-            with open(abs_path, "w", encoding="utf-8") as f:
+            with open(abs_path, "w", encoding="utf-8", newline="") as f:
                 f.write(result.new_content)
 
             if hasattr(self.runtime, "_watcher"):

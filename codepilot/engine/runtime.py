@@ -416,10 +416,15 @@ class AsyncRuntime:
                     **stream_kwargs,
                 )
             except Exception as exc:
+                # A provider failure (auth, quota, rate limit, network) is not
+                # recoverable by taking another step: `continue` would retry
+                # the same failing request up to max_steps and surface the
+                # identical error to the UI once per step. Report it once and
+                # end the turn so the user sees a single, actionable error.
                 error_msg = f"LLM provider error: {exc}"
                 self.hooks.emit(EventType.RUNTIME_ERROR, error=error_msg)
                 self._append_execution_result(f"PROVIDER ERROR: {error_msg}")
-                continue
+                break
 
             # Token deltas already reached the UI while the stream was open.
             # Only non-streaming routes (e.g. Anthropic's signed thinking
