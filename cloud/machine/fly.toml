@@ -3,3 +3,9 @@ primary_region = "sin"
 
 [build]
   dockerfile = "runner/Dockerfile"
+
+# Baked into the runner binary so the in-IDE profile panel reports the actual
+# release instead of the crate's fallback "dev" version. Bump alongside the
+# release tag and the codepilot-ai pin in runner/Dockerfile.
+[build.args]
+  CODEPILOT_VERSION = "v1.1.13"
