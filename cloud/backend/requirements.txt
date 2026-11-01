@@ -1,7 +1,7 @@
 fastapi
 uvicorn[standard]
 pydantic[email]
-sqlalchemy
+sqlalchemy[asyncio]
 asyncpg
 authlib
 argon2-cffi
