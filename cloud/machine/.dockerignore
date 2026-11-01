@@ -1,0 +1,11 @@
+# Keep local/CI Fly builds small. The Dockerfile installs JS and Rust
+# dependencies itself; host node_modules and cargo target dirs are not inputs.
+webapp/node_modules
+**/node_modules
+runner/server/target
+runner/persistent-vol/target
+runner/frontend/dist
+**/__pycache__
+**/*.pyc
+.git
+.gitignore
